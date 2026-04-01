@@ -20,6 +20,7 @@ import pandas as pd
 
 from src.strategy import Strategy, Signal, Position
 from src.strategies.sr_bounce import SRBounceStrategy
+from src.pair_selector import PairSelector
 from src.notifier import Notifier
 
 logger = logging.getLogger("futures_bot")
@@ -35,7 +36,6 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 class Bot:
     def __init__(self, cfg: dict, env: dict):
         self.cfg = cfg
-        self.symbols: list[str] = cfg["symbols"]
         self.tf_trend: str = cfg["timeframe_trend"]
         self.tf_entry: str = cfg["timeframe_entry"]
         self.lookback: int = cfg["strategy"]["lookback_candles"]
@@ -56,6 +56,7 @@ class Bot:
         self.sr_strategy = SRBounceStrategy(cfg)
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
+        self.pair_selector = PairSelector(self.exchange, cfg)
 
         # Signal cooldown: (symbol, direction, stage) -> last alert time
         self._last_alert: dict[tuple, datetime] = {}
@@ -285,14 +286,15 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _tick(self):
-        now = datetime.utcnow().strftime("%H:%M:%S")
-        open_pos = len(self._paper_positions)
+        symbols   = self.pair_selector.get_symbols()
+        now       = datetime.utcnow().strftime("%H:%M:%S")
+        open_pos  = len(self._paper_positions)
         paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
-        paper_info = f" | Paper balance: {paper_bal} | Open positions: {open_pos}" if self.paper_enabled else ""
-        logger.info(f">>> Scanning {len(self.symbols)} symbols @ {now} UTC{paper_info}")
+        paper_info = f" | Paper: {paper_bal} | Positions: {open_pos}" if self.paper_enabled else ""
+        logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info}")
 
         signals_found = 0
-        for symbol in self.symbols:
+        for symbol in symbols:
             try:
                 htf_raw   = self._fetch_ohlcv(symbol, self.tf_trend)
                 entry_raw = self._fetch_ohlcv(symbol, self.tf_entry)
@@ -373,6 +375,7 @@ class Bot:
 
         signal_note = f" | {signals_found} signal(s) fired" if signals_found > 0 else " | No signals"
         logger.info(f"<<< Scan complete{signal_note} | Next scan in {self.poll_interval}s")
+        logger.info(f"    Pairs: {' | '.join(s.split('/')[0] for s in symbols)}")
 
         self._maybe_send_daily_summary()
 
@@ -386,14 +389,17 @@ class Bot:
             f" | Paper: ON (balance={self.paper_balance:.0f} USDT, risk={self.paper_risk_pct*100:.1f}%)"
             if self.paper_enabled else " | Paper: OFF"
         )
+        dp_cfg    = self.cfg.get("dynamic_pairs", {})
+        dp_note   = f"Dynamic pairs: TOP {dp_cfg.get('top_n', 30)} by 24h volume | Refresh: every {dp_cfg.get('refresh_hours', 4)}h"
         logger.info("=" * 60)
-        logger.info(f"Scanner started — {len(self.symbols)} symbols{paper_note}")
-        logger.info(f"Trend TF: {self.tf_trend} | Entry TF: {self.tf_entry}")
+        logger.info(f"Scanner started — {dp_note}{paper_note}")
+        logger.info(f"Trend TF: {self.tf_trend} | Entry TF: {self.tf_entry} | SR TF: {self.tf_sr}")
         logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
         logger.info("=" * 60)
 
+        symbols = self.pair_selector.get_symbols()
         self.notifier.scanner_started(
-            self.symbols, self.tf_trend, self.tf_entry,
+            symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
         )
 
