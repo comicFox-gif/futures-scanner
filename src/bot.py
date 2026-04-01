@@ -281,6 +281,13 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _tick(self):
+        now = datetime.utcnow().strftime("%H:%M:%S")
+        open_pos = len(self._paper_positions)
+        paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
+        paper_info = f" | Paper balance: {paper_bal} | Open positions: {open_pos}" if self.paper_enabled else ""
+        logger.info(f">>> Scanning {len(self.symbols)} symbols @ {now} UTC{paper_info}")
+
+        signals_found = 0
         for symbol in self.symbols:
             try:
                 htf_raw   = self._fetch_ohlcv(symbol, self.tf_trend)
@@ -332,10 +339,14 @@ class Bot:
                     "direction": signal.direction,
                     "symbol": symbol,
                 })
+                signals_found += 1
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
                 self.notifier.error_alert(f"Scanning {symbol}", str(e)[:200])
+
+        signal_note = f" | {signals_found} signal(s) fired" if signals_found > 0 else " | No signals"
+        logger.info(f"<<< Scan complete{signal_note} | Next scan in {self.poll_interval}s")
 
         self._maybe_send_daily_summary()
 
