@@ -46,6 +46,24 @@ from src.indicators import (
 
 
 @dataclass
+class Position:
+    symbol: str
+    direction: str          # "long" | "short"
+    entry_price: float
+    stop_loss: float
+    tp1: float
+    tp2: float
+    tp3: float
+    size: float             # units
+    size_remaining: float
+    tp1_hit: bool = False
+    tp2_hit: bool = False
+    tp3_hit: bool = False
+    be_activated: bool = False
+    closed_pnl: float = 0.0
+
+
+@dataclass
 class Signal:
     stage: int              # 1 = warning, 2 = confirmed, 0 = none
     direction: str          # "long" | "short" | "none"
@@ -418,3 +436,54 @@ class Strategy:
             entry_price=price, stop_loss=0, tp1=0, tp2=0, tp3=0,
             atr=atr, rsi=rsi, volume_ratio=0, reason="No signal",
         )
+
+    # ------------------------------------------------------------------
+    # Paper trade position management
+    # ------------------------------------------------------------------
+
+    def check_position(self, pos: Position, current_price: float) -> list[dict]:
+        """
+        Check open paper position against current price.
+        Returns list of action dicts to execute.
+        """
+        tp1_close  = 0.30
+        tp2_close  = 0.30
+        actions = []
+
+        if pos.direction == "long":
+            if current_price <= pos.stop_loss:
+                actions.append({"action": "close_all", "reason": "SL hit"})
+                return actions
+            if not pos.tp3_hit and current_price >= pos.tp3:
+                actions.append({"action": "close_all", "reason": "TP3 hit", "tp_level": 3})
+                pos.tp3_hit = True
+                return actions
+            if not pos.tp2_hit and current_price >= pos.tp2:
+                actions.append({"action": "close_partial", "pct": tp2_close, "reason": "TP2 hit", "tp_level": 2})
+                actions.append({"action": "move_sl", "new_sl": pos.tp1, "reason": "Trail SL to TP1"})
+                pos.tp2_hit = True
+            elif not pos.tp1_hit and current_price >= pos.tp1:
+                actions.append({"action": "close_partial", "pct": tp1_close, "reason": "TP1 hit", "tp_level": 1})
+                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
+                pos.tp1_hit = True
+                pos.be_activated = True
+
+        elif pos.direction == "short":
+            if current_price >= pos.stop_loss:
+                actions.append({"action": "close_all", "reason": "SL hit"})
+                return actions
+            if not pos.tp3_hit and current_price <= pos.tp3:
+                actions.append({"action": "close_all", "reason": "TP3 hit", "tp_level": 3})
+                pos.tp3_hit = True
+                return actions
+            if not pos.tp2_hit and current_price <= pos.tp2:
+                actions.append({"action": "close_partial", "pct": tp2_close, "reason": "TP2 hit", "tp_level": 2})
+                actions.append({"action": "move_sl", "new_sl": pos.tp1, "reason": "Trail SL to TP1"})
+                pos.tp2_hit = True
+            elif not pos.tp1_hit and current_price <= pos.tp1:
+                actions.append({"action": "close_partial", "pct": tp1_close, "reason": "TP1 hit", "tp_level": 1})
+                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
+                pos.tp1_hit = True
+                pos.be_activated = True
+
+        return actions

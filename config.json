@@ -1,6 +1,5 @@
 {
   "exchange": "okx",
-  "paper_trading": true,
 
   "symbols": [
     "BTC/USDT:USDT",
@@ -40,6 +39,12 @@
     "volume_sma_period": 20,
     "volume_filter_multiplier": 1.2,
     "lookback_candles": 300
+  },
+
+  "paper_trading": {
+    "enabled": true,
+    "balance": 1000.0,
+    "risk_per_trade_pct": 1.0
   },
 
   "trend_inception": {
