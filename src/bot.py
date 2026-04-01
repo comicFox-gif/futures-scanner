@@ -19,6 +19,7 @@ import ccxt
 import pandas as pd
 
 from src.strategy import Strategy, Signal, Position
+from src.strategies.sr_bounce import SRBounceStrategy
 from src.notifier import Notifier
 
 logger = logging.getLogger("futures_bot")
@@ -49,9 +50,12 @@ class Bot:
         self.paper_risk_pct: float = paper_cfg.get("risk_per_trade_pct", 1.0) / 100.0
         self.paper_start_balance: float = self.paper_balance
 
-        self.strategy = Strategy(cfg)
-        self.notifier = Notifier()
-        self.exchange = self._init_exchange(cfg, env)
+        self.tf_sr: str = cfg.get("timeframe_sr", "4h")
+
+        self.strategy    = Strategy(cfg)
+        self.sr_strategy = SRBounceStrategy(cfg)
+        self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
+        self.exchange    = self._init_exchange(cfg, env)
 
         # Signal cooldown: (symbol, direction, stage) -> last alert time
         self._last_alert: dict[tuple, datetime] = {}
@@ -295,51 +299,73 @@ class Bot:
                 if htf_raw is None or entry_raw is None:
                     continue
 
+                # Fetch 4H data for S/R strategy
+                sr_raw = self._fetch_ohlcv(symbol, self.tf_sr)
+
                 htf_df   = self.strategy.enrich(htf_raw.copy())
                 entry_df = self.strategy.enrich(entry_raw.copy())
+                sr_df    = self.sr_strategy.enrich(sr_raw.copy()) if sr_raw is not None else None
                 current_price = float(entry_df.iloc[-2]["close"])
 
                 # Paper position management (always runs if position is open)
                 if self.paper_enabled and symbol in self._paper_positions:
                     self._paper_tick(symbol, current_price)
 
-                # Signal detection (skip if already in paper position for this symbol)
-                if self.paper_enabled and symbol in self._paper_positions:
-                    continue
+                in_paper = self.paper_enabled and symbol in self._paper_positions
 
-                signal = self.strategy.generate_signal(symbol, htf_df, entry_df)
+                # ── Strategy 1: EMA Momentum ──────────────────────────────
+                if not in_paper:
+                    signal = self.strategy.generate_signal(symbol, htf_df, entry_df)
 
-                if signal.stage == 0:
-                    logger.debug(f"{symbol}: no signal")
-                    continue
+                    if signal.stage > 0 and not self._is_on_cooldown(symbol, signal.direction + "_ema", signal.stage):
+                        stage_label = "CONFIRMED" if signal.stage == 2 else "WARNING"
+                        quality = 3  # default quality for EMA strategy
+                        logger.info(
+                            f"[EMA {stage_label}] {signal.direction.upper()} {symbol} "
+                            f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | {signal.reason}"
+                        )
+                        if signal.stage == 2:
+                            self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
+                            if self.paper_enabled:
+                                self._paper_open(signal)
+                        else:
+                            self.notifier.warning_signal(signal, "EMA Momentum")
 
-                if self._is_on_cooldown(symbol, signal.direction, signal.stage):
-                    logger.debug(f"{symbol}: cooldown ({signal.direction} stage {signal.stage})")
-                    continue
+                        self._mark_sent(symbol, signal.direction + "_ema", signal.stage)
+                        self._daily_alerts.append({"stage": signal.stage, "direction": signal.direction, "symbol": symbol})
+                        signals_found += 1
 
-                stage_label = "CONFIRMED" if signal.stage == 2 else "WARNING"
-                logger.info(
-                    f"[{stage_label}] {signal.direction.upper()} {symbol} "
-                    f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} "
-                    f"| Vol={signal.volume_ratio:.2f}x | {signal.reason}"
-                )
+                # ── Strategy 2: S/R Bounce ────────────────────────────────
+                if sr_df is not None and not in_paper:
+                    sr_sig = self.sr_strategy.generate_signal(symbol, sr_df, entry_df)
 
-                # Telegram alert
-                if signal.stage == 2:
-                    self.notifier.confirmed_signal(signal)
-                    # Open paper trade on confirmed signals
-                    if self.paper_enabled:
-                        self._paper_open(signal)
-                else:
-                    self.notifier.warning_signal(signal)
+                    if sr_sig and not self._is_on_cooldown(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"]):
+                        stage_label = "CONFIRMED" if sr_sig["stage"] == 2 else "WARNING"
+                        logger.info(
+                            f"[SR {stage_label}] {sr_sig['direction'].upper()} {symbol} "
+                            f"@ {sr_sig['entry']:.4f} | Lvl={sr_sig['level_price']:.4f} "
+                            f"({sr_sig['level_touches']} touches) | {sr_sig['reason']}"
+                        )
+                        if sr_sig["stage"] == 2:
+                            self.notifier.sr_confirmed_signal(sr_sig)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                # Build a Signal-compatible object for paper trading
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(
+                                    stage=2, direction=sr_sig["direction"], symbol=symbol,
+                                    entry_price=sr_sig["entry"], stop_loss=sr_sig["sl"],
+                                    tp1=sr_sig["tp1"], tp2=sr_sig["tp2"], tp3=sr_sig["tp3"],
+                                    atr=sr_sig["atr"], rsi=sr_sig["rsi"],
+                                    volume_ratio=sr_sig.get("vol_ratio", 0),
+                                    reason=sr_sig["reason"],
+                                )
+                                self._paper_open(dummy)
+                        else:
+                            self.notifier.sr_warning_signal(sr_sig)
 
-                self._mark_sent(symbol, signal.direction, signal.stage)
-                self._daily_alerts.append({
-                    "stage": signal.stage,
-                    "direction": signal.direction,
-                    "symbol": symbol,
-                })
-                signals_found += 1
+                        self._mark_sent(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"])
+                        self._daily_alerts.append({"stage": sr_sig["stage"], "direction": sr_sig["direction"], "symbol": symbol})
+                        signals_found += 1
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")

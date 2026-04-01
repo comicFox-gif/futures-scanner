@@ -112,6 +112,149 @@ def find_swing_levels(df: pd.DataFrame, lookback: int = 20) -> dict:
 
 
 # ===========================================================================
+# S/R Level Detection
+# ===========================================================================
+
+def find_key_levels(df: pd.DataFrame, n_left: int = 5, n_right: int = 2,
+                    cluster_pct: float = 0.003, max_levels: int = 6) -> list[dict]:
+    """
+    Detect key S/R levels from swing highs/lows.
+
+    n_left  : candles to the left that must be lower/higher
+    n_right : candles to the right for confirmation (small = catches recent levels)
+    cluster_pct : group levels within this % of each other into one zone
+    max_levels  : max levels to return (strongest only)
+
+    Returns list of dicts sorted by strength:
+      {price, touches, type: 'support'|'resistance', strength: 1-5}
+    """
+    levels: list[dict] = []
+    # Use confirmed candles only (exclude last candle which may be live)
+    data = df.iloc[:-1]
+    n = len(data)
+
+    for i in range(n_left, n - n_right):
+        row = data.iloc[i]
+
+        # Swing high → resistance
+        left_highs  = data.iloc[i - n_left : i]["high"]
+        right_highs = data.iloc[i + 1 : i + n_right + 1]["high"]
+        if row["high"] >= left_highs.max() and row["high"] >= right_highs.max():
+            levels.append({"price": row["high"], "type": "resistance", "touches": 1})
+
+        # Swing low → support
+        left_lows  = data.iloc[i - n_left : i]["low"]
+        right_lows = data.iloc[i + 1 : i + n_right + 1]["low"]
+        if row["low"] <= left_lows.min() and row["low"] <= right_lows.min():
+            levels.append({"price": row["low"], "type": "support", "touches": 1})
+
+    if not levels:
+        return []
+
+    # Cluster nearby levels (within cluster_pct of each other)
+    levels.sort(key=lambda x: x["price"])
+    clustered: list[dict] = []
+    for lv in levels:
+        merged = False
+        for cl in clustered:
+            if abs(lv["price"] - cl["price"]) / cl["price"] <= cluster_pct and lv["type"] == cl["type"]:
+                # Merge: average price, add touch
+                cl["price"] = (cl["price"] * cl["touches"] + lv["price"]) / (cl["touches"] + 1)
+                cl["touches"] += 1
+                merged = True
+                break
+        if not merged:
+            clustered.append(dict(lv))
+
+    # Assign strength score 1-5 based on touch count
+    for cl in clustered:
+        t = cl["touches"]
+        cl["strength"] = 5 if t >= 5 else 4 if t >= 4 else 3 if t >= 3 else 2 if t >= 2 else 1
+
+    # Sort by strength desc, return top N
+    clustered.sort(key=lambda x: x["strength"], reverse=True)
+    return clustered[:max_levels]
+
+
+def price_near_level(current_price: float, level_price: float, atr: float,
+                     tolerance_mult: float = 0.5) -> bool:
+    """True if price is within tolerance_mult * ATR of the level."""
+    return abs(current_price - level_price) <= atr * tolerance_mult
+
+
+def price_approaching_level(current_price: float, level_price: float, atr: float,
+                             approach_mult: float = 1.5) -> bool:
+    """True if price is within approach_mult * ATR of the level (wider zone for warning)."""
+    return abs(current_price - level_price) <= atr * approach_mult
+
+
+# ===========================================================================
+# Bounce Pattern Detection
+# ===========================================================================
+
+def is_hammer(row: pd.Series) -> bool:
+    """
+    Bullish hammer at support:
+    - Lower wick >= 2x body
+    - Upper wick <= 0.5x body
+    - Body is at least 10% of range (not a doji)
+    """
+    body       = abs(row["close"] - row["open"])
+    lo_wick    = min(row["open"], row["close"]) - row["low"]
+    up_wick    = row["high"] - max(row["open"], row["close"])
+    total_rng  = row["high"] - row["low"]
+    if total_rng == 0:
+        return False
+    return (lo_wick >= body * 2 and up_wick <= body * 0.5 and body / total_rng >= 0.10)
+
+
+def is_shooting_star(row: pd.Series) -> bool:
+    """
+    Bearish shooting star at resistance:
+    - Upper wick >= 2x body
+    - Lower wick <= 0.5x body
+    - Body is at least 10% of range
+    """
+    body      = abs(row["close"] - row["open"])
+    lo_wick   = min(row["open"], row["close"]) - row["low"]
+    up_wick   = row["high"] - max(row["open"], row["close"])
+    total_rng = row["high"] - row["low"]
+    if total_rng == 0:
+        return False
+    return (up_wick >= body * 2 and lo_wick <= body * 0.5 and body / total_rng >= 0.10)
+
+
+def is_bullish_engulfing(df: pd.DataFrame, idx: int = -2) -> bool:
+    """
+    Current candle (bullish) fully engulfs previous bearish candle.
+    Strong reversal signal at support.
+    """
+    curr = df.iloc[idx]
+    prev = df.iloc[idx - 1]
+    return (
+        curr["close"] > curr["open"]   # current bullish
+        and prev["close"] < prev["open"]  # previous bearish
+        and curr["open"] <= prev["close"]
+        and curr["close"] >= prev["open"]
+    )
+
+
+def is_bearish_engulfing(df: pd.DataFrame, idx: int = -2) -> bool:
+    """
+    Current candle (bearish) fully engulfs previous bullish candle.
+    Strong reversal signal at resistance.
+    """
+    curr = df.iloc[idx]
+    prev = df.iloc[idx - 1]
+    return (
+        curr["close"] < curr["open"]
+        and prev["close"] > prev["open"]
+        and curr["open"] >= prev["close"]
+        and curr["close"] <= prev["open"]
+    )
+
+
+# ===========================================================================
 # Trend Inception Detectors
 # ===========================================================================
 

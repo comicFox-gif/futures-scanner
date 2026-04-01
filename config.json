@@ -1,5 +1,7 @@
 {
   "exchange": "okx",
+  "channel_name": "",
+  "timeframe_sr": "4h",
 
   "symbols": [
     "BTC/USDT:USDT",
@@ -74,6 +76,16 @@
     "consecutive_closes": 2,
     "macd_hist_atr_multiplier": 0.08,
     "volume_building_candles": 2
+  },
+
+  "sr_bounce": {
+    "swing_lookback_left": 5,
+    "swing_lookback_right": 2,
+    "cluster_pct": 0.003,
+    "max_levels": 6,
+    "min_touches": 2,
+    "touch_atr_multiplier": 0.5,
+    "approach_atr_multiplier": 1.5
   },
 
   "signal": {
