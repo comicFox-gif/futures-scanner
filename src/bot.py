@@ -93,7 +93,7 @@ class Bot:
                 "adjustForTimeDifference": True,
             },
         })
-        logger.info(f"Exchange: {exchange_id} ({default_type}) | Scanning {len(self.symbols)} symbols")
+        logger.info(f"Exchange: {exchange_id} ({default_type})")
         return exchange
 
     # ------------------------------------------------------------------
