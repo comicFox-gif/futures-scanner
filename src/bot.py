@@ -307,6 +307,13 @@ class Bot:
                 htf_df   = self.strategy.enrich(htf_raw.copy())
                 entry_df = self.strategy.enrich(entry_raw.copy())
                 sr_df    = self.sr_strategy.enrich(sr_raw.copy()) if sr_raw is not None else None
+
+                # Skip symbols without enough candle history
+                min_candles = max(self.strategy.ema_trend, 50) + 10
+                if len(htf_df) < min_candles or len(entry_df) < min_candles:
+                    logger.debug(f"Skipping {symbol}: insufficient candle history ({len(htf_df)} htf, {len(entry_df)} entry)")
+                    continue
+
                 current_price = float(entry_df.iloc[-2]["close"])
 
                 # Paper position management (always runs if position is open)

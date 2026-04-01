@@ -264,7 +264,8 @@ def ema_recently_crossed_bullish(df: pd.DataFrame, fast_col: str, slow_col: str,
     Returns (True, candles_ago) or (False, -1).
     We look at confirmed closed candles only (skip iloc[-1] which is live).
     """
-    for i in range(2, max_lookback + 2):
+    max_i = min(max_lookback + 2, len(df) - 1)
+    for i in range(2, max_i):
         curr = df.iloc[-i]
         prev = df.iloc[-i - 1]
         if curr[fast_col] > curr[slow_col] and prev[fast_col] <= prev[slow_col]:
@@ -276,7 +277,8 @@ def ema_recently_crossed_bearish(df: pd.DataFrame, fast_col: str, slow_col: str,
     """
     Detects if fast EMA crossed below slow EMA within the last `max_lookback` candles.
     """
-    for i in range(2, max_lookback + 2):
+    max_i = min(max_lookback + 2, len(df) - 1)
+    for i in range(2, max_i):
         curr = df.iloc[-i]
         prev = df.iloc[-i - 1]
         if curr[fast_col] < curr[slow_col] and prev[fast_col] >= prev[slow_col]:
