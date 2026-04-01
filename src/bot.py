@@ -63,22 +63,30 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _init_exchange(self, cfg: dict, env: dict):
-        exchange_id = env.get("EXCHANGE", cfg.get("exchange", "bybit"))
+        exchange_id = env.get("EXCHANGE", cfg.get("exchange", "okx"))
+
+        # OKX uses 'swap' for perpetuals; all others use 'future'
+        default_type = "swap" if exchange_id == "okx" else "future"
+
         api_key = env.get("API_KEY", "")
         api_secret = env.get("API_SECRET", "")
+        passphrase = env.get("API_PASSPHRASE", "")  # OKX requires passphrase
+
+        options = {
+            "defaultType": default_type,
+            "adjustForTimeDifference": True,
+        }
 
         exchange_class = getattr(ccxt, exchange_id)
         exchange = exchange_class({
             "apiKey": api_key,
             "secret": api_secret,
+            "password": passphrase,   # used by OKX, ignored by others
             "enableRateLimit": True,
             "timeout": 15000,
-            "options": {
-                "defaultType": "future",
-                "adjustForTimeDifference": True,
-            },
+            "options": options,
         })
-        logger.info(f"Exchange: {exchange_id} | Scanning {len(self.symbols)} symbols")
+        logger.info(f"Exchange: {exchange_id} ({default_type}) | Scanning {len(self.symbols)} symbols")
         return exchange
 
     # ------------------------------------------------------------------
