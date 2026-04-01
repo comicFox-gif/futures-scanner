@@ -61,30 +61,51 @@ class PairSelector:
     def _refresh(self):
         logger.info("Fetching top pairs by 24h volume...")
         try:
-            tickers = self.exchange.fetch_tickers()
+            # Load markets first to get all active swap symbols
+            markets = self.exchange.load_markets()
+            swap_symbols = [
+                s for s, m in markets.items()
+                if m.get("swap") and m.get("quote") == "USDT"
+                and m.get("active", True) and s not in BLACKLIST
+            ]
+            logger.info(f"Found {len(swap_symbols)} active USDT swap markets")
+
+            # Fetch tickers for swap symbols (batch to avoid rate limits)
+            tickers = self.exchange.fetch_tickers(swap_symbols)
         except Exception as e:
-            logger.error(f"PairSelector: fetch_tickers failed: {e}")
+            logger.error(f"PairSelector: fetch failed: {e}")
             if not self._symbols:
                 self._symbols = self.fallback
             return
 
-        # Filter: USDT perpetual futures only
+        # Rank by 24h USD volume
         candidates = []
         for symbol, t in tickers.items():
-            # OKX swap format: BTC/USDT:USDT
-            if not symbol.endswith(":USDT"):
-                continue
             if symbol in BLACKLIST:
                 continue
-            # Need valid volume data
+            # Try quoteVolume first, fall back to baseVolume * last price
             vol_usd = t.get("quoteVolume") or 0
+            if not vol_usd:
+                base_vol = t.get("baseVolume") or 0
+                last     = t.get("last") or 0
+                vol_usd  = base_vol * last
             if vol_usd < self.min_volume:
                 continue
             candidates.append((symbol, vol_usd))
 
         if not candidates:
-            logger.warning("PairSelector: no candidates found, keeping current list")
-            return
+            logger.warning("PairSelector: no candidates after volume filter — lowering threshold")
+            # Retry with no volume filter to at least get something
+            candidates = [
+                (s, t.get("quoteVolume") or 0)
+                for s, t in tickers.items()
+                if s not in BLACKLIST and s.endswith(":USDT")
+            ]
+            if not candidates:
+                logger.error("PairSelector: still no candidates, keeping current list")
+                if not self._symbols:
+                    self._symbols = self.fallback
+                return
 
         # Sort by 24h volume descending
         candidates.sort(key=lambda x: x[1], reverse=True)
