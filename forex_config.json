@@ -1,0 +1,73 @@
+{
+  "channel_name": "",
+
+  "pairs": [
+    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
+    "EURJPY", "GBPJPY", "EURGBP", "AUDJPY", "CADJPY", "GBPAUD", "EURAUD",
+    "GBPCAD", "EURCAD", "CHFJPY", "NZDJPY", "AUDCAD", "AUDCHF"
+  ],
+
+  "timeframe_htf":   "4h",
+  "timeframe_trend": "1h",
+  "timeframe_entry": "15m",
+
+  "strategy": {
+    "ema_fast": 9,
+    "ema_mid": 21,
+    "ema_slow": 50,
+    "ema_trend": 200,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "rsi_period": 14,
+    "rsi_long_min": 40,
+    "rsi_long_max": 70,
+    "rsi_short_min": 30,
+    "rsi_short_max": 60,
+    "atr_period": 14,
+    "atr_sl_multiplier": 1.5,
+    "volume_sma_period": 20,
+    "volume_filter_multiplier": 1.2,
+    "lookback_candles": 300
+  },
+
+  "london_breakout": {
+    "asian_session_start_utc": 0,
+    "asian_session_end_utc": 6,
+    "breakout_window_start_utc": 7,
+    "breakout_window_end_utc": 12,
+    "ny_retest_start_utc": 13,
+    "ny_retest_end_utc": 16,
+    "min_range_pips": 15,
+    "max_range_pips": 80,
+    "breakout_buffer_atr": 0.15,
+    "atr_sl_multiplier": 1.2
+  },
+
+  "filters": {
+    "min_body_ratio": 0.40,
+    "max_wick_against_trade": 0.40,
+    "consecutive_closes": 2,
+    "macd_hist_atr_multiplier": 0.05,
+    "session_filter": true
+  },
+
+  "signal": {
+    "tp1_rr": 1.0,
+    "tp2_rr": 2.0,
+    "tp3_rr": 3.0,
+    "atr_sl_multiplier": 1.5,
+    "signal_cooldown_minutes": 240
+  },
+
+  "paper_trading": {
+    "enabled": true,
+    "balance": 1000.0,
+    "risk_per_trade_pct": 1.0
+  },
+
+  "bot": {
+    "poll_interval_seconds": 60,
+    "daily_summary_utc_hour": 0
+  }
+}

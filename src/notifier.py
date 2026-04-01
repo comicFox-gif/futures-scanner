@@ -210,6 +210,86 @@ class Notifier:
         self.warning_signal(sig, strategy_name="S/R Bounce")
 
     # ------------------------------------------------------------------
+    # Forex confirmed signal (generic — works for both FX strategies)
+    # ------------------------------------------------------------------
+
+    def fx_confirmed_signal(self, sig: dict, strategy_name: str = "FX EMA Trend"):
+        self._signal_no += 1
+        no        = self._signal_no
+        quality   = sig.get("quality", 3)
+        direction = sig["direction"]
+        price     = sig["entry"]
+        sl        = sig["sl"]
+        tp1, tp2, tp3 = sig["tp1"], sig["tp2"], sig["tp3"]
+        rsi       = sig["rsi"]
+        symbol    = sig["symbol"]
+        reason    = sig["reason"]
+        sl_pct    = abs(price - sl) / price * 100
+        dir_tag   = self._dir_tag(direction)
+
+        self.send(
+            f"🚨 <b>SIGNAL #{no:03d}</b>  [{strategy_name}]\n"
+            f"{LINE}\n"
+            f"{dir_tag}  •  <b>{symbol}</b>\n"
+            f"Quality: {self._stars(quality)}\n"
+            f"{DLINE}\n"
+            f"Entry:  <code>{price:.5f}</code>\n"
+            f"🛑 SL:  <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 TP1: <code>{tp1:.5f}</code>  (+{sl_pct*1:.2f}%) → move to BE\n"
+            f"🎯 TP2: <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%) → trail SL\n"
+            f"🏆 TP3: <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%) → full exit\n"
+            f"R:R = 1 : 3\n"
+            f"{DLINE}\n"
+            f"📊 RSI: <code>{rsi:.1f}</code>\n"
+            f"<i>{reason}</i>\n"
+            f"{self._footer()}"
+        )
+
+    def fx_warning_signal(self, sig: dict, strategy_name: str = "FX EMA Trend"):
+        self.warning_signal(sig, strategy_name=strategy_name)
+
+    # ------------------------------------------------------------------
+    # London Breakout confirmed (includes range info)
+    # ------------------------------------------------------------------
+
+    def lb_confirmed_signal(self, sig: dict):
+        self._signal_no += 1
+        no         = self._signal_no
+        quality    = sig.get("quality", 3)
+        direction  = sig["direction"]
+        price      = sig["entry"]
+        sl         = sig["sl"]
+        tp1, tp2, tp3 = sig["tp1"], sig["tp2"], sig["tp3"]
+        rsi        = sig["rsi"]
+        symbol     = sig["symbol"]
+        reason     = sig["reason"]
+        range_pips = sig.get("range_pips", 0)
+        asian_high = sig.get("asian_high", 0)
+        asian_low  = sig.get("asian_low", 0)
+        sl_pct     = abs(price - sl) / price * 100
+        dir_tag    = self._dir_tag(direction)
+
+        self.send(
+            f"🚨 <b>SIGNAL #{no:03d}</b>  [London Breakout]\n"
+            f"{LINE}\n"
+            f"{dir_tag}  •  <b>{symbol}</b>\n"
+            f"Quality: {self._stars(quality)}\n"
+            f"{DLINE}\n"
+            f"Entry:  <code>{price:.5f}</code>\n"
+            f"🛑 SL:  <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 TP1: <code>{tp1:.5f}</code>  (+{sl_pct*1:.2f}%) → move to BE\n"
+            f"🎯 TP2: <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%) → trail SL\n"
+            f"🏆 TP3: <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%) → full exit\n"
+            f"R:R = 1 : 3\n"
+            f"{DLINE}\n"
+            f"📐 Asian Range: <code>{range_pips:.0f} pips</code>  "
+            f"H: <code>{asian_high:.5f}</code>  L: <code>{asian_low:.5f}</code>\n"
+            f"📊 RSI: <code>{rsi:.1f}</code>\n"
+            f"<i>{reason}</i>\n"
+            f"{self._footer()}"
+        )
+
+    # ------------------------------------------------------------------
     # Paper trading alerts
     # ------------------------------------------------------------------
 
