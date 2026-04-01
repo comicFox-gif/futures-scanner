@@ -1,0 +1,71 @@
+{
+  "exchange": "binanceusdm",
+  "paper_trading": true,
+
+  "symbols": [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "BNB/USDT:USDT",
+    "XRP/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "AVAX/USDT:USDT",
+    "LINK/USDT:USDT",
+    "ADA/USDT:USDT",
+    "DOT/USDT:USDT",
+    "LTC/USDT:USDT",
+    "ATOM/USDT:USDT",
+    "ARB/USDT:USDT",
+    "OP/USDT:USDT",
+    "NEAR/USDT:USDT"
+  ],
+  "timeframe_trend": "1h",
+  "timeframe_entry": "15m",
+
+  "strategy": {
+    "ema_fast": 9,
+    "ema_mid": 21,
+    "ema_slow": 50,
+    "ema_trend": 200,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "rsi_period": 14,
+    "rsi_long_min": 40,
+    "rsi_long_max": 70,
+    "rsi_short_min": 30,
+    "rsi_short_max": 60,
+    "atr_period": 14,
+    "atr_sl_multiplier": 1.5,
+    "volume_sma_period": 20,
+    "volume_filter_multiplier": 1.2,
+    "lookback_candles": 300
+  },
+
+  "trend_inception": {
+    "ema_cross_max_candles_ago": 8,
+    "ema_cross_proximity_pct": 0.002,
+    "pullback_atr_tolerance": 0.6
+  },
+
+  "filters": {
+    "min_body_ratio": 0.45,
+    "max_wick_against_trade": 0.35,
+    "consecutive_closes": 2,
+    "macd_hist_atr_multiplier": 0.08,
+    "volume_building_candles": 2
+  },
+
+  "signal": {
+    "tp1_rr": 1.0,
+    "tp2_rr": 2.0,
+    "tp3_rr": 3.0,
+    "atr_sl_multiplier": 1.5,
+    "signal_cooldown_minutes": 240
+  },
+
+  "bot": {
+    "poll_interval_seconds": 60,
+    "daily_summary_utc_hour": 0
+  }
+}
