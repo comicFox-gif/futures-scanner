@@ -489,6 +489,8 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
+            strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence"],
+            label="Crypto Futures Scanner",
         )
 
         while self._running:

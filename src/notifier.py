@@ -78,16 +78,21 @@ class Notifier:
     # ------------------------------------------------------------------
 
     def scanner_started(self, symbols: list, tf_trend: str, tf_entry: str,
-                        cooldown_min: int, paper_enabled: bool = False, paper_balance: float = 0):
+                        cooldown_min: int, paper_enabled: bool = False, paper_balance: float = 0,
+                        strategies: list | None = None, label: str = "Signal Scanner"):
         paper_line = (
             f"\n📄 Paper: <b>ON</b>  balance: <code>{paper_balance:.0f} USDT</code>"
             if paper_enabled else "\n📄 Paper: OFF"
         )
+        strats = strategies or [
+            "EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence"
+        ]
+        strat_lines = "\n".join(f"  • {s}" for s in strats)
         self.send(
-            f"🟢 <b>Signal Scanner Online</b>\n"
+            f"🟢 <b>{label} Online</b>\n"
             f"{LINE}\n"
             f"Scanning <b>{len(symbols)} pairs</b>\n"
-            f"Strategies: <b>EMA Momentum + S/R Bounce</b>\n"
+            f"Strategies ({len(strats)}):\n{strat_lines}\n"
             f"Trend TF: <code>{tf_trend}</code>  Entry TF: <code>{tf_entry}</code>\n"
             f"Cooldown: <code>{cooldown_min}min</code>"
             f"{paper_line}\n"

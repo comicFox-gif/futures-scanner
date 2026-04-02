@@ -415,12 +415,14 @@ class ForexBot:
             f"EMA Trend + London Breakout"
         )
         self.notifier.scanner_started(
-            [f"{p}/USD" for p in self.pairs],
+            self.pairs,
             tf_trend=self.tf_trend,
             tf_entry=self.tf_entry,
             cooldown_min=self.cooldown_min,
             paper_enabled=self.paper_enabled,
             paper_balance=self.paper_balance,
+            strategies=["FX EMA Trend", "London Breakout", "Order Block", "Trendline", "RSI Divergence"],
+            label="Forex Scanner",
         )
         while self._running:
             try:
