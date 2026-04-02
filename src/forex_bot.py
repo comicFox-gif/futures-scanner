@@ -412,9 +412,10 @@ class ForexBot:
 
     def run(self):
         self._running = True
+        pairs = self.pair_selector.get_pairs()
         logger.info(
-            f"Forex Scanner started | {len(self.pairs)} pairs | "
-            f"EMA Trend + London Breakout"
+            f"Forex Scanner started | {len(pairs)} pairs | "
+            f"EMA Trend + London Breakout + Order Block + Trendline + RSI Divergence"
         )
         self.notifier.scanner_started(
             self.pair_selector.get_pairs(),
