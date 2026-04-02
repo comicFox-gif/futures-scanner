@@ -20,6 +20,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 
 from src.forex_data import fetch_ohlcv
+from src.forex_pair_selector import ForexPairSelector
 from src.strategies.forex_ema_trend import ForexEmaTrendStrategy
 from src.strategies.london_breakout import LondonBreakoutStrategy
 from src.strategies.order_block import OrderBlockStrategy
@@ -83,7 +84,7 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
 class ForexBot:
     def __init__(self, cfg: dict):
         self.cfg             = cfg
-        self.pairs: list[str] = cfg["pairs"]
+        self.pair_selector   = ForexPairSelector(cfg)
         self.tf_htf: str     = cfg.get("timeframe_htf", "4h")
         self.tf_trend: str   = cfg["timeframe_trend"]     # 1h
         self.tf_entry: str   = cfg["timeframe_entry"]     # 15m
@@ -268,10 +269,11 @@ class ForexBot:
         now      = datetime.utcnow().strftime("%H:%M:%S")
         open_pos = len(self._paper_positions)
         bal_info = f" | Paper: ${self.paper_balance:.2f} | Pos: {open_pos}" if self.paper_enabled else ""
-        logger.info(f">>> FX Scanning {len(self.pairs)} pairs @ {now} UTC{bal_info}")
+        pairs = self.pair_selector.get_pairs()
+        logger.info(f">>> FX Scanning {len(pairs)} pairs @ {now} UTC{bal_info}")
 
         signals_found = 0
-        for pair in self.pairs:
+        for pair in pairs:
             try:
                 # Fetch all timeframes
                 htf_raw   = fetch_ohlcv(pair, self.tf_htf,   self.lookback)
@@ -415,7 +417,7 @@ class ForexBot:
             f"EMA Trend + London Breakout"
         )
         self.notifier.scanner_started(
-            self.pairs,
+            self.pair_selector.get_pairs(),
             tf_trend=self.tf_trend,
             tf_entry=self.tf_entry,
             cooldown_min=self.cooldown_min,
