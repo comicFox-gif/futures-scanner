@@ -45,11 +45,35 @@
   },
 
   "filters": {
-    "min_body_ratio": 0.40,
-    "max_wick_against_trade": 0.40,
-    "consecutive_closes": 2,
-    "macd_hist_atr_multiplier": 0.05,
+    "min_body_ratio": 0.30,
+    "max_wick_against_trade": 0.55,
+    "consecutive_closes": 1,
+    "macd_hist_atr_multiplier": 0.02,
     "session_filter": true
+  },
+
+  "order_block": {
+    "lookback_candles": 80,
+    "impulse_candles": 3,
+    "impulse_atr_mult": 2.0,
+    "approach_atr_mult": 1.5,
+    "touch_atr_mult": 0.6
+  },
+
+  "trendline": {
+    "swing_left": 5,
+    "swing_right": 3,
+    "warn_atr_mult": 1.0,
+    "touch_atr_mult": 0.5,
+    "break_atr_mult": 0.3,
+    "max_slope_atr_per_candle": 1.5
+  },
+
+  "rsi_divergence": {
+    "lookback_candles": 50,
+    "min_rsi_difference": 3.0,
+    "bull_div_rsi_max": 55,
+    "bear_div_rsi_min": 45
   },
 
   "signal": {
@@ -57,7 +81,7 @@
     "tp2_rr": 2.0,
     "tp3_rr": 3.0,
     "atr_sl_multiplier": 1.5,
-    "signal_cooldown_minutes": 240
+    "signal_cooldown_minutes": 120
   },
 
   "paper_trading": {

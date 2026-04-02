@@ -20,6 +20,9 @@ import pandas as pd
 
 from src.strategy import Strategy, Signal, Position
 from src.strategies.sr_bounce import SRBounceStrategy
+from src.strategies.order_block import OrderBlockStrategy
+from src.strategies.trendline_break import TrendlineBreakStrategy
+from src.strategies.rsi_divergence import RSIDivergenceStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 
@@ -54,6 +57,9 @@ class Bot:
 
         self.strategy    = Strategy(cfg)
         self.sr_strategy = SRBounceStrategy(cfg)
+        self.ob_strategy = OrderBlockStrategy(cfg)
+        self.tl_strategy = TrendlineBreakStrategy(cfg)
+        self.rd_strategy = RSIDivergenceStrategy(cfg)
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
         self.pair_selector = PairSelector(self.exchange, cfg)
@@ -374,6 +380,81 @@ class Bot:
 
                         self._mark_sent(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"])
                         self._daily_alerts.append({"stage": sr_sig["stage"], "direction": sr_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
+                # ── Strategy 3: Order Block ───────────────────────────────
+                if sr_df is not None and not in_paper:
+                    ob_sig = self.ob_strategy.generate_signal(symbol, sr_df, entry_df)
+                    if ob_sig and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
+                        stage_label = "CONFIRMED" if ob_sig["stage"] == 2 else "WARNING"
+                        logger.info(
+                            f"[OB {stage_label}] {ob_sig['direction'].upper()} {symbol} "
+                            f"@ {ob_sig['entry']:.4f} | {ob_sig['reason']}"
+                        )
+                        if ob_sig["stage"] == 2:
+                            self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=ob_sig["direction"], symbol=symbol,
+                                            entry_price=ob_sig["entry"], stop_loss=ob_sig["sl"],
+                                            tp1=ob_sig["tp1"], tp2=ob_sig["tp2"], tp3=ob_sig["tp3"],
+                                            atr=ob_sig["atr"], rsi=ob_sig["rsi"], volume_ratio=0,
+                                            reason=ob_sig["reason"])
+                                self._paper_open(dummy)
+                        else:
+                            self.notifier.fx_warning_signal(ob_sig, "Order Block")
+                        self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
+                        self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
+                # ── Strategy 4: Trendline ─────────────────────────────────
+                if not in_paper:
+                    tl_sig = self.tl_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if tl_sig and not self._is_on_cooldown(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"]):
+                        stage_label = "CONFIRMED" if tl_sig["stage"] == 2 else "WARNING"
+                        logger.info(
+                            f"[TL {stage_label}] {tl_sig['direction'].upper()} {symbol} "
+                            f"@ {tl_sig['entry']:.4f} | {tl_sig['reason']}"
+                        )
+                        if tl_sig["stage"] == 2:
+                            self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=tl_sig["direction"], symbol=symbol,
+                                            entry_price=tl_sig["entry"], stop_loss=tl_sig["sl"],
+                                            tp1=tl_sig["tp1"], tp2=tl_sig["tp2"], tp3=tl_sig["tp3"],
+                                            atr=tl_sig["atr"], rsi=tl_sig["rsi"], volume_ratio=0,
+                                            reason=tl_sig["reason"])
+                                self._paper_open(dummy)
+                        else:
+                            self.notifier.fx_warning_signal(tl_sig, "Trendline")
+                        self._mark_sent(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"])
+                        self._daily_alerts.append({"stage": tl_sig["stage"], "direction": tl_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
+                # ── Strategy 5: RSI Divergence ────────────────────────────
+                if not in_paper:
+                    rd_sig = self.rd_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if rd_sig and not self._is_on_cooldown(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"]):
+                        stage_label = "CONFIRMED" if rd_sig["stage"] == 2 else "WARNING"
+                        logger.info(
+                            f"[DIV {stage_label}] {rd_sig['direction'].upper()} {symbol} "
+                            f"@ {rd_sig['entry']:.4f} | {rd_sig['reason']}"
+                        )
+                        if rd_sig["stage"] == 2:
+                            self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
+                                            entry_price=rd_sig["entry"], stop_loss=rd_sig["sl"],
+                                            tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
+                                            atr=rd_sig["atr"], rsi=rd_sig["rsi"], volume_ratio=0,
+                                            reason=rd_sig["reason"])
+                                self._paper_open(dummy)
+                        else:
+                            self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
+                        self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
+                        self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
             except Exception as e:

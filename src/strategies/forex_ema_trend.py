@@ -21,7 +21,7 @@ Stage 2 CONFIRMED:
   Wick against trade direction filter (no rejection wick)
   Consecutive closes in trend direction (follow-through)
   MACD histogram strength (not a noise cross)
-  Active session filter (6am–9pm UTC — avoids thin Asian/weekend markets)
+  Active session filter (6am–9pm UTC)
 
 Quality score (1–5 stars):
   + Candle body quality
@@ -84,8 +84,8 @@ class ForexEmaTrendStrategy:
         # Fake-breakout filters
         self.min_body_ratio     = flt.get("min_body_ratio", 0.40)
         self.max_wick_against   = flt.get("max_wick_against_trade", 0.40)
-        self.consecutive_closes = flt.get("consecutive_closes", 2)
-        self.macd_hist_atr_mult = flt.get("macd_hist_atr_multiplier", 0.05)
+        self.consecutive_closes = flt.get("consecutive_closes", 1)
+        self.macd_hist_atr_mult = flt.get("macd_hist_atr_multiplier", 0.02)
         self.session_filter     = flt.get("session_filter", True)
 
     # ------------------------------------------------------------------
@@ -174,30 +174,28 @@ class ForexEmaTrendStrategy:
     # ------------------------------------------------------------------
 
     def _long_filters_pass(self, entry_df: pd.DataFrame, atr: float) -> tuple[bool, float]:
-        """Returns (passed, body_ratio)."""
-        row  = entry_df.iloc[-2]
-        body = candle_body_ratio(row)
+        """Returns (passed, body_ratio). Passes entry_df (DataFrame) to all filter functions."""
+        body = candle_body_ratio(entry_df)
         if body < self.min_body_ratio:
             return False, body
-        if upper_wick_ratio(row) > self.max_wick_against:
+        if upper_wick_ratio(entry_df) > self.max_wick_against:
             return False, body
         if not consecutive_bullish_closes(entry_df, self.consecutive_closes):
             return False, body
-        if not macd_histogram_strong(entry_df, atr, self.macd_hist_atr_mult):
+        if not macd_histogram_strong(entry_df, self.macd_hist_atr_mult):
             return False, body
         return True, body
 
     def _short_filters_pass(self, entry_df: pd.DataFrame, atr: float) -> tuple[bool, float]:
         """Returns (passed, body_ratio)."""
-        row  = entry_df.iloc[-2]
-        body = candle_body_ratio(row)
+        body = candle_body_ratio(entry_df)
         if body < self.min_body_ratio:
             return False, body
-        if lower_wick_ratio(row) > self.max_wick_against:
+        if lower_wick_ratio(entry_df) > self.max_wick_against:
             return False, body
         if not consecutive_bearish_closes(entry_df, self.consecutive_closes):
             return False, body
-        if not macd_histogram_strong(entry_df, atr, self.macd_hist_atr_mult):
+        if not macd_histogram_strong(entry_df, self.macd_hist_atr_mult):
             return False, body
         return True, body
 
@@ -261,7 +259,6 @@ class ForexEmaTrendStrategy:
         if self._htf_bullish(htf_df) and self._itf_bullish(itf_df):
             rsi_ok = self.rsi_long_min <= rsi <= self.rsi_long_max
 
-            # Stage 2: MACD bullish cross + all filters
             if is_macd_bullish_cross(entry_df) and rsi_ok:
                 passed, body = self._long_filters_pass(entry_df, atr)
                 if passed:
@@ -272,7 +269,6 @@ class ForexEmaTrendStrategy:
                         quality,
                     )
 
-            # Stage 1: histogram turning, trend aligned
             if macd_histogram_turning_positive(entry_df) and rsi_ok:
                 return self._build(
                     1, "long", pair, price, atr, rsi,
@@ -283,7 +279,6 @@ class ForexEmaTrendStrategy:
         if self._htf_bearish(htf_df) and self._itf_bearish(itf_df):
             rsi_ok = self.rsi_short_min <= rsi <= self.rsi_short_max
 
-            # Stage 2: MACD bearish cross + all filters
             if is_macd_bearish_cross(entry_df) and rsi_ok:
                 passed, body = self._short_filters_pass(entry_df, atr)
                 if passed:
@@ -294,7 +289,6 @@ class ForexEmaTrendStrategy:
                         quality,
                     )
 
-            # Stage 1: histogram turning
             if macd_histogram_turning_negative(entry_df) and rsi_ok:
                 return self._build(
                     1, "short", pair, price, atr, rsi,

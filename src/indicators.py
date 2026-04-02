@@ -435,3 +435,203 @@ def volume_building(df: pd.DataFrame, lookback: int = 2) -> bool:
     if vol_sma == 0:
         return False
     return all(recent["volume"] > vol_sma * 0.85)
+
+
+# ===========================================================================
+# Order Block Detection (ICT)
+# ===========================================================================
+
+def find_order_blocks(
+    df: pd.DataFrame,
+    lookback: int = 80,
+    impulse_candles: int = 3,
+    impulse_atr_mult: float = 2.0,
+) -> list[dict]:
+    """
+    Detect ICT-style order blocks in the last `lookback` candles.
+
+    Bullish OB: last bearish candle before a strong bullish impulse.
+                The candle's range becomes a demand zone — price returning = long.
+    Bearish OB: last bullish candle before a strong bearish impulse.
+                The candle's range becomes a supply zone — price returning = short.
+
+    Validity: an OB is invalidated if price closes through its opposite boundary
+    after formation. Only un-mitigated (fresh) OBs are returned.
+
+    Returns list of dicts: {type, high, low, mid, formed_idx}
+    """
+    if len(df) < lookback + impulse_candles + 5:
+        return []
+
+    atr = float(df["atr"].iloc[-2])
+    if pd.isna(atr) or atr == 0:
+        return []
+
+    current_price = float(df.iloc[-2]["close"])
+    obs: list[dict] = []
+
+    start = max(0, len(df) - lookback - impulse_candles)
+    end   = len(df) - impulse_candles - 2
+
+    for i in range(start, end):
+        candle  = df.iloc[i]
+        body    = abs(float(candle["close"]) - float(candle["open"]))
+        if body < atr * 0.1:          # skip doji candles
+            continue
+
+        impulse = df.iloc[i + 1 : i + impulse_candles + 1]
+        subsequent = df.iloc[i + 1 :]
+
+        # ── Bullish OB: bearish candle before strong up-move ─────────────
+        if candle["close"] < candle["open"]:
+            if impulse["high"].max() - float(candle["low"]) < impulse_atr_mult * atr:
+                continue
+            ob_high = float(candle["high"])
+            ob_low  = float(candle["low"])
+            # Invalidated if any close went below OB low
+            if (subsequent["close"] < ob_low).any():
+                continue
+            if current_price >= ob_low * 0.998:
+                obs.append({"type": "bullish", "high": ob_high, "low": ob_low,
+                            "mid": (ob_high + ob_low) / 2, "formed_idx": i})
+
+        # ── Bearish OB: bullish candle before strong down-move ───────────
+        elif candle["close"] > candle["open"]:
+            if float(candle["high"]) - impulse["low"].min() < impulse_atr_mult * atr:
+                continue
+            ob_high = float(candle["high"])
+            ob_low  = float(candle["low"])
+            # Invalidated if any close went above OB high
+            if (subsequent["close"] > ob_high).any():
+                continue
+            if current_price <= ob_high * 1.002:
+                obs.append({"type": "bearish", "high": ob_high, "low": ob_low,
+                            "mid": (ob_high + ob_low) / 2, "formed_idx": i})
+
+    # Return only the 2 most recent valid OBs of each type
+    bullish = [o for o in obs if o["type"] == "bullish"][-2:]
+    bearish = [o for o in obs if o["type"] == "bearish"][-2:]
+    return bullish + bearish
+
+
+# ===========================================================================
+# Swing High / Low Index Finders (for trendlines + divergence)
+# ===========================================================================
+
+def find_swing_highs_idx(df: pd.DataFrame, left: int = 5, right: int = 3) -> list[tuple[int, float]]:
+    """
+    Return list of (iloc_index, price) for swing highs.
+    A swing high is strictly higher than `left` candles left and `right` candles right.
+    Operates on confirmed candles only (excludes last row).
+    """
+    result = []
+    data = df.iloc[:-1]
+    n    = len(data)
+    for i in range(left, n - right):
+        h = float(data.iloc[i]["high"])
+        if (data.iloc[i - left : i]["high"] < h).all() and (data.iloc[i + 1 : i + right + 1]["high"] < h).all():
+            result.append((i, h))
+    return result
+
+
+def find_swing_lows_idx(df: pd.DataFrame, left: int = 5, right: int = 3) -> list[tuple[int, float]]:
+    """
+    Return list of (iloc_index, price) for swing lows.
+    A swing low is strictly lower than `left` candles left and `right` candles right.
+    """
+    result = []
+    data = df.iloc[:-1]
+    n    = len(data)
+    for i in range(left, n - right):
+        l = float(data.iloc[i]["low"])
+        if (data.iloc[i - left : i]["low"] > l).all() and (data.iloc[i + 1 : i + right + 1]["low"] > l).all():
+            result.append((i, l))
+    return result
+
+
+# ===========================================================================
+# RSI Divergence Detection
+# ===========================================================================
+
+def rsi_bullish_divergence(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    min_rsi_diff: float = 3.0,
+) -> tuple[bool, float, float, str]:
+    """
+    Regular bullish divergence: price makes a lower low, RSI makes a higher low.
+    This signals that selling momentum is weakening — reversal likely.
+
+    Returns (found, current_rsi, prior_rsi, reason_string).
+    """
+    if "rsi" not in df.columns or len(df) < lookback + 5:
+        return False, 0.0, 0.0, ""
+
+    curr      = df.iloc[-2]
+    curr_low  = float(curr["low"])
+    curr_rsi  = float(curr["rsi"])
+    if pd.isna(curr_rsi):
+        return False, 0.0, 0.0, ""
+
+    window = df.iloc[-lookback : -2]
+    if len(window) < 10:
+        return False, 0.0, 0.0, ""
+
+    prior_idx  = window["low"].idxmin()
+    prior_row  = df.loc[prior_idx]
+    prior_low  = float(prior_row["low"])
+    prior_rsi  = float(prior_row["rsi"])
+    if pd.isna(prior_rsi):
+        return False, 0.0, 0.0, ""
+
+    # Price lower low + RSI higher low = divergence
+    if curr_low < prior_low and curr_rsi > prior_rsi + min_rsi_diff and curr_rsi < 60:
+        reason = (
+            f"Bull divergence | Price LL {curr_low:.5f} < {prior_low:.5f} | "
+            f"RSI HL {curr_rsi:.1f} > {prior_rsi:.1f}"
+        )
+        return True, curr_rsi, prior_rsi, reason
+
+    return False, 0.0, 0.0, ""
+
+
+def rsi_bearish_divergence(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    min_rsi_diff: float = 3.0,
+) -> tuple[bool, float, float, str]:
+    """
+    Regular bearish divergence: price makes a higher high, RSI makes a lower high.
+    Selling momentum appears while price is still rising — reversal likely.
+
+    Returns (found, current_rsi, prior_rsi, reason_string).
+    """
+    if "rsi" not in df.columns or len(df) < lookback + 5:
+        return False, 0.0, 0.0, ""
+
+    curr      = df.iloc[-2]
+    curr_high = float(curr["high"])
+    curr_rsi  = float(curr["rsi"])
+    if pd.isna(curr_rsi):
+        return False, 0.0, 0.0, ""
+
+    window = df.iloc[-lookback : -2]
+    if len(window) < 10:
+        return False, 0.0, 0.0, ""
+
+    prior_idx  = window["high"].idxmax()
+    prior_row  = df.loc[prior_idx]
+    prior_high = float(prior_row["high"])
+    prior_rsi  = float(prior_row["rsi"])
+    if pd.isna(prior_rsi):
+        return False, 0.0, 0.0, ""
+
+    # Price higher high + RSI lower high = divergence
+    if curr_high > prior_high and curr_rsi < prior_rsi - min_rsi_diff and curr_rsi > 40:
+        reason = (
+            f"Bear divergence | Price HH {curr_high:.5f} > {prior_high:.5f} | "
+            f"RSI LH {curr_rsi:.1f} < {prior_rsi:.1f}"
+        )
+        return True, curr_rsi, prior_rsi, reason
+
+    return False, 0.0, 0.0, ""
