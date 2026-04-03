@@ -30,13 +30,25 @@ FOREX_UNIVERSE = [
     # GBP crosses
     "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD",
     # JPY crosses
-    "AUDJPY", "CADJPY", "CHFJPY", "NZDJPY",
-    # Other crosses
-    "AUDCAD", "AUDCHF", "AUDNZD", "CADCHF", "NZDCAD", "NZDCHF",
+    "AUDJPY", "CADJPY", "CHFJPY", "NZDJPY", "SGDJPY",
+    # AUD crosses
+    "AUDCAD", "AUDCHF", "AUDNZD", "AUDSGD",
+    # CAD crosses
+    "CADCHF",
+    # NZD crosses
+    "NZDCAD", "NZDCHF", "NZDSGD",
     # Commodity FX
-    "USDNOK", "USDSEK", "USDMXN",
-    # Asian
-    "USDSGD", "USDCNH", "USDKRW",
+    "USDNOK", "USDSEK", "USDDKK", "USDMXN", "USDZAR", "USDTRY",
+    # Asian / EM
+    "USDSGD", "USDCNH", "USDTHB", "USDHKD",
+    # Scandinavian crosses
+    "EURNOK", "EURSEK", "GBPNOK", "GBPSEK",
+    # Other EM
+    "USDPLN", "USDHUF", "USDCZK",
+    # Additional crosses
+    "EURCHF", "GBPCHF", "NZDCHF", "CADCHF",
+    # Exotic minors
+    "EURMXN", "GBPMXN", "EURZAR", "GBPZAR",
 ]
 
 # Always include majors regardless of score

@@ -2,7 +2,7 @@
   "channel_name": "",
 
   "dynamic_pairs": {
-    "top_n": 30,
+    "top_n": 80,
     "refresh_hours": 4
   },
 
