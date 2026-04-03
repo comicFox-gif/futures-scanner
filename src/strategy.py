@@ -553,17 +553,27 @@ class Strategy:
                 "1H EMA cross imminent — watch for pullback entry",
             )
 
-        # Continuation warning: trend aligned + price approaching EMA from above
+        # Continuation warning: score 4 conditions, fire if 3+ pass
         if self._htf_long_aligned(htf_df):
-            near = (
-                price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
-                or price_near_ema(entry_df, f"ema_{self.ema_mid}", self.pullback_atr_tolerance * 2)
-            )
-            w_rsi = float(entry_df.iloc[-2]["rsi"])
-            if near and self.rsi_long_min <= w_rsi <= self.rsi_long_max:
+            w_row  = entry_df.iloc[-2]
+            w_rsi  = float(w_row["rsi"])
+            w_macd = float(w_row["macd_hist"]) if not pd.isna(w_row.get("macd_hist", float("nan"))) else 0.0
+            near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
+            near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance * 2)
+
+            w_conds = {
+                "EMA approaching": near_fast or near_mid,
+                f"RSI {w_rsi:.0f} in range": self.rsi_long_min <= w_rsi <= self.rsi_long_max,
+                "MACD turning up": macd_histogram_turning_positive(entry_df),
+                "Candle bullish": candle_body_ratio(entry_df.iloc[-2]) >= self.min_body_ratio,
+            }
+            w_passed = [k for k, v in w_conds.items() if v]
+            w_failed = [k for k, v in w_conds.items() if not v]
+            if len(w_passed) >= 3:
+                missing = f" | Missing: {w_failed[0]}" if w_failed else ""
                 return self._build_signal(
                     symbol, "long", 1, price, atr, w_rsi, 0,
-                    "1H bull trend | Price pulling back to EMA — watch for bounce",
+                    f"1H bull trend | ⚡ {len(w_passed)}/4 warning conditions{missing}",
                 )
 
         # --- SHORT ---
@@ -585,17 +595,26 @@ class Strategy:
                 "1H EMA cross imminent — watch for pullback entry",
             )
 
-        # Continuation warning: trend aligned + price approaching EMA from below
+        # Continuation warning: score 4 conditions, fire if 3+ pass
         if self._htf_short_aligned(htf_df):
-            near = (
-                price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
-                or price_near_ema(entry_df, f"ema_{self.ema_mid}", self.pullback_atr_tolerance * 2)
-            )
-            w_rsi = float(entry_df.iloc[-2]["rsi"])
-            if near and self.rsi_short_min <= w_rsi <= self.rsi_short_max:
+            w_row  = entry_df.iloc[-2]
+            w_rsi  = float(w_row["rsi"])
+            near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
+            near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance * 2)
+
+            w_conds = {
+                "EMA approaching": near_fast or near_mid,
+                f"RSI {w_rsi:.0f} in range": self.rsi_short_min <= w_rsi <= self.rsi_short_max,
+                "MACD turning down": macd_histogram_turning_negative(entry_df),
+                "Candle bearish": candle_body_ratio(entry_df.iloc[-2]) >= self.min_body_ratio,
+            }
+            w_passed = [k for k, v in w_conds.items() if v]
+            w_failed = [k for k, v in w_conds.items() if not v]
+            if len(w_passed) >= 3:
+                missing = f" | Missing: {w_failed[0]}" if w_failed else ""
                 return self._build_signal(
                     symbol, "short", 1, price, atr, w_rsi, 0,
-                    "1H bear trend | Price pulling back to EMA — watch for rejection",
+                    f"1H bear trend | ⚡ {len(w_passed)}/4 warning conditions{missing}",
                 )
 
         return Signal(

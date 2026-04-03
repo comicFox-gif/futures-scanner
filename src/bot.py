@@ -485,7 +485,12 @@ class Bot:
         logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
         logger.info("=" * 60)
 
-        symbols = self.pair_selector.get_symbols()
+        try:
+            symbols = self.pair_selector.get_symbols()
+        except Exception as e:
+            logger.error(f"Pair selector failed on startup: {e} — using fallback list")
+            symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
+
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
