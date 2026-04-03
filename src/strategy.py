@@ -259,9 +259,8 @@ class Strategy:
         # MACD and RSI confirmation
         macd_ok   = is_macd_bullish_cross(entry_df) or macd_histogram_turning_positive(entry_df)
         rsi_ok    = self.rsi_long_min <= rsi <= self.rsi_long_max
-        vol_ok    = vol_ratio >= self.volume_filter_mult
 
-        if not (macd_ok and rsi_ok and vol_ok):
+        if not (macd_ok and rsi_ok):
             return False, rsi, vol_ratio, candles_ago
 
         # Fake breakout filters
@@ -297,9 +296,8 @@ class Strategy:
 
         macd_ok  = is_macd_bearish_cross(entry_df) or macd_histogram_turning_negative(entry_df)
         rsi_ok   = self.rsi_short_min <= rsi <= self.rsi_short_max
-        vol_ok   = vol_ratio >= self.volume_filter_mult
 
-        if not (macd_ok and rsi_ok and vol_ok):
+        if not (macd_ok and rsi_ok):
             return False, rsi, vol_ratio, candles_ago
 
         passed, _ = self._fake_breakout_check(entry_df, "short")
@@ -388,6 +386,93 @@ class Strategy:
     # Main signal generator
     # ------------------------------------------------------------------
 
+    def _htf_long_aligned(self, htf_df: pd.DataFrame) -> bool:
+        """1H EMA9 > EMA21 > EMA50 and price above EMA200 — established bull trend."""
+        row = htf_df.iloc[-2]
+        return (
+            row[f"ema_{self.ema_fast}"] > row[f"ema_{self.ema_mid}"]
+            and row[f"ema_{self.ema_mid}"] > row[f"ema_{self.ema_slow}"]
+            and row["close"] > row[f"ema_{self.ema_trend}"]
+        )
+
+    def _htf_short_aligned(self, htf_df: pd.DataFrame) -> bool:
+        """1H EMA9 < EMA21 < EMA50 and price below EMA200 — established bear trend."""
+        row = htf_df.iloc[-2]
+        return (
+            row[f"ema_{self.ema_fast}"] < row[f"ema_{self.ema_mid}"]
+            and row[f"ema_{self.ema_mid}"] < row[f"ema_{self.ema_slow}"]
+            and row["close"] < row[f"ema_{self.ema_trend}"]
+        )
+
+    def _long_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float]:
+        """
+        Trend continuation entry: EMA aligned on 1H + pullback to EMA9/21 on 15m + bounce.
+        Fires in established uptrends regardless of when the last EMA cross was.
+        """
+        if not self._htf_long_aligned(htf_df):
+            return False, 0.0, 0.0
+
+        row = entry_df.iloc[-2]
+        rsi = float(row["rsi"])
+        vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
+        rsi_ok = self.rsi_long_min <= rsi <= self.rsi_long_max
+        if not rsi_ok:
+            return False, rsi, vol_ratio
+
+        near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance)
+        near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance)
+        if not (near_fast or near_mid):
+            return False, rsi, vol_ratio
+
+        ema_col  = f"ema_{self.ema_fast}" if near_fast else f"ema_{self.ema_mid}"
+        bouncing = price_bouncing_bullish(entry_df, ema_col)
+        if not bouncing:
+            return False, rsi, vol_ratio
+
+        macd_ok = is_macd_bullish_cross(entry_df) or macd_histogram_turning_positive(entry_df)
+        if not macd_ok:
+            return False, rsi, vol_ratio
+
+        passed, _ = self._fake_breakout_check(entry_df, "long")
+        if not passed:
+            return False, rsi, vol_ratio
+
+        return True, rsi, vol_ratio
+
+    def _short_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float]:
+        """
+        Trend continuation entry: EMA aligned on 1H + pullback to EMA9/21 on 15m + rejection.
+        """
+        if not self._htf_short_aligned(htf_df):
+            return False, 0.0, 0.0
+
+        row = entry_df.iloc[-2]
+        rsi = float(row["rsi"])
+        vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
+        rsi_ok = self.rsi_short_min <= rsi <= self.rsi_short_max
+        if not rsi_ok:
+            return False, rsi, vol_ratio
+
+        near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance)
+        near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance)
+        if not (near_fast or near_mid):
+            return False, rsi, vol_ratio
+
+        ema_col  = f"ema_{self.ema_fast}" if near_fast else f"ema_{self.ema_mid}"
+        bouncing = price_bouncing_bearish(entry_df, ema_col)
+        if not bouncing:
+            return False, rsi, vol_ratio
+
+        macd_ok = is_macd_bearish_cross(entry_df) or macd_histogram_turning_negative(entry_df)
+        if not macd_ok:
+            return False, rsi, vol_ratio
+
+        passed, _ = self._fake_breakout_check(entry_df, "short")
+        if not passed:
+            return False, rsi, vol_ratio
+
+        return True, rsi, vol_ratio
+
     def generate_signal(
         self,
         symbol: str,
@@ -400,36 +485,76 @@ class Strategy:
         rsi   = float(row["rsi"])
 
         # --- LONG ---
+        # Path A: fresh EMA cross (trend inception)
         confirmed, c_rsi, c_vol, candles_ago = self._long_confirmed_inception(htf_df, entry_df)
         if confirmed:
-            hours_ago = candles_ago  # 1H candles = hours
             return self._build_signal(
                 symbol, "long", 2, price, atr, c_rsi, c_vol,
-                f"1H EMA9×EMA21 crossed {hours_ago}h ago | Pullback to EMA | Bounce confirmed | All filters passed",
+                f"1H EMA cross {candles_ago}h ago | Pullback+bounce confirmed",
+            )
+
+        # Path B: established trend + pullback (continuation)
+        cont, c_rsi, c_vol = self._long_continuation(htf_df, entry_df)
+        if cont:
+            return self._build_signal(
+                symbol, "long", 2, price, atr, c_rsi, c_vol,
+                "1H bull trend | EMA pullback bounce | MACD confirmed",
             )
 
         warn, w_rsi, w_vol = self._long_warning(htf_df, entry_df)
         if warn:
             return self._build_signal(
                 symbol, "long", 1, price, atr, w_rsi, w_vol,
-                "1H EMA9 approaching EMA21 from below — bullish cross imminent | Watch for pullback entry",
+                "1H EMA cross imminent — watch for pullback entry",
             )
+
+        # Continuation warning: trend aligned + price approaching EMA from above
+        if self._htf_long_aligned(htf_df):
+            near = (
+                price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
+                or price_near_ema(entry_df, f"ema_{self.ema_mid}", self.pullback_atr_tolerance * 2)
+            )
+            w_rsi = float(entry_df.iloc[-2]["rsi"])
+            if near and self.rsi_long_min <= w_rsi <= self.rsi_long_max:
+                return self._build_signal(
+                    symbol, "long", 1, price, atr, w_rsi, 0,
+                    "1H bull trend | Price pulling back to EMA — watch for bounce",
+                )
 
         # --- SHORT ---
         confirmed, c_rsi, c_vol, candles_ago = self._short_confirmed_inception(htf_df, entry_df)
         if confirmed:
-            hours_ago = candles_ago
             return self._build_signal(
                 symbol, "short", 2, price, atr, c_rsi, c_vol,
-                f"1H EMA9×EMA21 crossed {hours_ago}h ago | Pullback to EMA | Rejection confirmed | All filters passed",
+                f"1H EMA cross {candles_ago}h ago | Pullback+rejection confirmed",
+            )
+
+        cont, c_rsi, c_vol = self._short_continuation(htf_df, entry_df)
+        if cont:
+            return self._build_signal(
+                symbol, "short", 2, price, atr, c_rsi, c_vol,
+                "1H bear trend | EMA pullback rejection | MACD confirmed",
             )
 
         warn, w_rsi, w_vol = self._short_warning(htf_df, entry_df)
         if warn:
             return self._build_signal(
                 symbol, "short", 1, price, atr, w_rsi, w_vol,
-                "1H EMA9 approaching EMA21 from above — bearish cross imminent | Watch for pullback entry",
+                "1H EMA cross imminent — watch for pullback entry",
             )
+
+        # Continuation warning: trend aligned + price approaching EMA from below
+        if self._htf_short_aligned(htf_df):
+            near = (
+                price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
+                or price_near_ema(entry_df, f"ema_{self.ema_mid}", self.pullback_atr_tolerance * 2)
+            )
+            w_rsi = float(entry_df.iloc[-2]["rsi"])
+            if near and self.rsi_short_min <= w_rsi <= self.rsi_short_max:
+                return self._build_signal(
+                    symbol, "short", 1, price, atr, w_rsi, 0,
+                    "1H bear trend | Price pulling back to EMA — watch for rejection",
+                )
 
         return Signal(
             stage=0, direction="none", symbol=symbol,
