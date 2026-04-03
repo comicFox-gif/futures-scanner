@@ -214,15 +214,23 @@ class SRBounceStrategy:
             touching    = price_near_level(price, lv_price, atr, self.touch_atr_mult)
 
             if touching:
-                # Check bounce pattern
                 bounce_ok, wick_ratio = self._bullish_bounce(entry_df)
                 rsi_ok  = self.rsi_long_min <= rsi <= self.rsi_long_max
                 vol_ok  = vol_ratio >= self.volume_filter_mult
                 vol_bld = volume_building(entry_df, self.volume_building_candles)
 
-                if bounce_ok and rsi_ok and vol_ok and vol_bld:
-                    quality = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
-                    sl_dist = atr * self.atr_sl_mult
+                # Score 4 conditions (level already confirmed by touching)
+                conds   = {"Bounce pattern": bounce_ok, f"RSI {rsi:.0f}": rsi_ok,
+                           "Volume surge": vol_ok, "Volume building": vol_bld}
+                passed  = [k for k, v in conds.items() if v]
+                failed  = [k for k, v in conds.items() if not v]
+                score   = len(passed)
+
+                if score >= 3:   # 3/4 sub-conditions = 4/5 overall (level is the 5th)
+                    quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
+                    sl_dist  = atr * self.atr_sl_mult
+                    score_tag = f"✅ {score+1}/5 conditions"
+                    missing   = f" | Missing: {failed[0]}" if failed else ""
                     return {
                         "stage": 2, "direction": "long", "symbol": symbol,
                         "entry": price,
@@ -235,10 +243,8 @@ class SRBounceStrategy:
                         "level_price": lv_price, "level_touches": lv_touches,
                         "atr": atr,
                         "reason": (
-                            f"Support bounce @ {lv_price:.4f} "
-                            f"({lv_touches} touches) | "
-                            f"{'Hammer' if is_hammer(row) else 'Engulfing'} | "
-                            f"Vol {vol_ratio:.1f}x"
+                            f"Support bounce @ {lv_price:.4f} ({lv_touches} touches) | "
+                            f"{score_tag}{missing}"
                         ),
                     }
 
@@ -279,9 +285,17 @@ class SRBounceStrategy:
                 vol_ok  = vol_ratio >= self.volume_filter_mult
                 vol_bld = volume_building(entry_df, self.volume_building_candles)
 
-                if bounce_ok and rsi_ok and vol_ok and vol_bld:
-                    quality = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
-                    sl_dist = atr * self.atr_sl_mult
+                conds   = {"Rejection pattern": bounce_ok, f"RSI {rsi:.0f}": rsi_ok,
+                           "Volume surge": vol_ok, "Volume building": vol_bld}
+                passed  = [k for k, v in conds.items() if v]
+                failed  = [k for k, v in conds.items() if not v]
+                score   = len(passed)
+
+                if score >= 3:
+                    quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
+                    sl_dist  = atr * self.atr_sl_mult
+                    score_tag = f"✅ {score+1}/5 conditions"
+                    missing   = f" | Missing: {failed[0]}" if failed else ""
                     return {
                         "stage": 2, "direction": "short", "symbol": symbol,
                         "entry": price,
@@ -294,10 +308,8 @@ class SRBounceStrategy:
                         "level_price": lv_price, "level_touches": lv_touches,
                         "atr": atr,
                         "reason": (
-                            f"Resistance rejection @ {lv_price:.4f} "
-                            f"({lv_touches} touches) | "
-                            f"{'Shooting Star' if is_shooting_star(row) else 'Engulfing'} | "
-                            f"Vol {vol_ratio:.1f}x"
+                            f"Resistance rejection @ {lv_price:.4f} ({lv_touches} touches) | "
+                            f"{score_tag}{missing}"
                         ),
                     }
 

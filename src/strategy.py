@@ -404,74 +404,122 @@ class Strategy:
             and row["close"] < row[f"ema_{self.ema_trend}"]
         )
 
-    def _long_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float]:
+    def _score_long(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[int, float, float, list[str], list[str]]:
         """
-        Trend continuation entry: EMA aligned on 1H + pullback to EMA9/21 on 15m + bounce.
-        Fires in established uptrends regardless of when the last EMA cross was.
+        Score 5 conditions for a long signal.
+        Returns (score, rsi, vol_ratio, passed_conditions, failed_conditions).
+        Requires HTF trend aligned as a hard gate (score=0 if not).
         """
         if not self._htf_long_aligned(htf_df):
-            return False, 0.0, 0.0
+            return 0, 0.0, 0.0, [], ["HTF trend not aligned"]
 
-        row = entry_df.iloc[-2]
-        rsi = float(row["rsi"])
+        row       = entry_df.iloc[-2]
+        rsi       = float(row["rsi"])
         vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
-        rsi_ok = self.rsi_long_min <= rsi <= self.rsi_long_max
-        if not rsi_ok:
-            return False, rsi, vol_ratio
 
+        passed, failed = [], []
+
+        # C1: EMA pullback
         near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance)
         near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance)
-        if not (near_fast or near_mid):
-            return False, rsi, vol_ratio
+        if near_fast or near_mid:
+            passed.append("EMA pullback")
+        else:
+            failed.append("EMA pullback")
 
+        # C2: Bounce off EMA
         ema_col  = f"ema_{self.ema_fast}" if near_fast else f"ema_{self.ema_mid}"
         bouncing = price_bouncing_bullish(entry_df, ema_col)
-        if not bouncing:
-            return False, rsi, vol_ratio
+        if bouncing:
+            passed.append("Bounce confirmed")
+        else:
+            failed.append("Bounce not confirmed")
 
+        # C3: MACD confirmation
         macd_ok = is_macd_bullish_cross(entry_df) or macd_histogram_turning_positive(entry_df)
-        if not macd_ok:
-            return False, rsi, vol_ratio
+        if macd_ok:
+            passed.append("MACD bullish")
+        else:
+            failed.append("MACD not confirmed")
 
-        passed, _ = self._fake_breakout_check(entry_df, "long")
-        if not passed:
-            return False, rsi, vol_ratio
+        # C4: RSI in range
+        if self.rsi_long_min <= rsi <= self.rsi_long_max:
+            passed.append(f"RSI {rsi:.0f} ✓")
+        else:
+            failed.append(f"RSI {rsi:.0f} out of range")
 
-        return True, rsi, vol_ratio
+        # C5: Candle filter (body + wick)
+        fb_passed, _ = self._fake_breakout_check(entry_df, "long")
+        if fb_passed:
+            passed.append("Candle quality ✓")
+        else:
+            failed.append("Weak candle")
 
-    def _short_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float]:
-        """
-        Trend continuation entry: EMA aligned on 1H + pullback to EMA9/21 on 15m + rejection.
-        """
+        return len(passed), rsi, vol_ratio, passed, failed
+
+    def _score_short(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[int, float, float, list[str], list[str]]:
+        """Score 5 conditions for a short signal."""
         if not self._htf_short_aligned(htf_df):
-            return False, 0.0, 0.0
+            return 0, 0.0, 0.0, [], ["HTF trend not aligned"]
 
-        row = entry_df.iloc[-2]
-        rsi = float(row["rsi"])
+        row       = entry_df.iloc[-2]
+        rsi       = float(row["rsi"])
         vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
-        rsi_ok = self.rsi_short_min <= rsi <= self.rsi_short_max
-        if not rsi_ok:
-            return False, rsi, vol_ratio
+
+        passed, failed = [], []
 
         near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance)
         near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance)
-        if not (near_fast or near_mid):
-            return False, rsi, vol_ratio
+        if near_fast or near_mid:
+            passed.append("EMA pullback")
+        else:
+            failed.append("EMA pullback")
 
         ema_col  = f"ema_{self.ema_fast}" if near_fast else f"ema_{self.ema_mid}"
         bouncing = price_bouncing_bearish(entry_df, ema_col)
-        if not bouncing:
-            return False, rsi, vol_ratio
+        if bouncing:
+            passed.append("Rejection confirmed")
+        else:
+            failed.append("Rejection not confirmed")
 
         macd_ok = is_macd_bearish_cross(entry_df) or macd_histogram_turning_negative(entry_df)
-        if not macd_ok:
-            return False, rsi, vol_ratio
+        if macd_ok:
+            passed.append("MACD bearish")
+        else:
+            failed.append("MACD not confirmed")
 
-        passed, _ = self._fake_breakout_check(entry_df, "short")
-        if not passed:
-            return False, rsi, vol_ratio
+        if self.rsi_short_min <= rsi <= self.rsi_short_max:
+            passed.append(f"RSI {rsi:.0f} ✓")
+        else:
+            failed.append(f"RSI {rsi:.0f} out of range")
 
-        return True, rsi, vol_ratio
+        fb_passed, _ = self._fake_breakout_check(entry_df, "short")
+        if fb_passed:
+            passed.append("Candle quality ✓")
+        else:
+            failed.append("Weak candle")
+
+        return len(passed), rsi, vol_ratio, passed, failed
+
+    def _long_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
+        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or 5 conditions pass."""
+        score, rsi, vol_ratio, passed, failed = self._score_long(htf_df, entry_df)
+        if score >= 4:
+            score_tag = f"✅ {score}/5 conditions"
+            missing   = f" | Missing: {failed[0]}" if failed else ""
+            reason    = f"1H bull trend | {score_tag}{missing}"
+            return True, rsi, vol_ratio, reason
+        return False, rsi, vol_ratio, ""
+
+    def _short_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
+        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or 5 conditions pass."""
+        score, rsi, vol_ratio, passed, failed = self._score_short(htf_df, entry_df)
+        if score >= 4:
+            score_tag = f"✅ {score}/5 conditions"
+            missing   = f" | Missing: {failed[0]}" if failed else ""
+            reason    = f"1H bear trend | {score_tag}{missing}"
+            return True, rsi, vol_ratio, reason
+        return False, rsi, vol_ratio, ""
 
     def generate_signal(
         self,
@@ -493,13 +541,10 @@ class Strategy:
                 f"1H EMA cross {candles_ago}h ago | Pullback+bounce confirmed",
             )
 
-        # Path B: established trend + pullback (continuation)
-        cont, c_rsi, c_vol = self._long_continuation(htf_df, entry_df)
+        # Path B: established trend + pullback (continuation, fires on 4/5 conditions)
+        cont, c_rsi, c_vol, cont_reason = self._long_continuation(htf_df, entry_df)
         if cont:
-            return self._build_signal(
-                symbol, "long", 2, price, atr, c_rsi, c_vol,
-                "1H bull trend | EMA pullback bounce | MACD confirmed",
-            )
+            return self._build_signal(symbol, "long", 2, price, atr, c_rsi, c_vol, cont_reason)
 
         warn, w_rsi, w_vol = self._long_warning(htf_df, entry_df)
         if warn:
@@ -529,12 +574,9 @@ class Strategy:
                 f"1H EMA cross {candles_ago}h ago | Pullback+rejection confirmed",
             )
 
-        cont, c_rsi, c_vol = self._short_continuation(htf_df, entry_df)
+        cont, c_rsi, c_vol, cont_reason = self._short_continuation(htf_df, entry_df)
         if cont:
-            return self._build_signal(
-                symbol, "short", 2, price, atr, c_rsi, c_vol,
-                "1H bear trend | EMA pullback rejection | MACD confirmed",
-            )
+            return self._build_signal(symbol, "short", 2, price, atr, c_rsi, c_vol, cont_reason)
 
         warn, w_rsi, w_vol = self._short_warning(htf_df, entry_df)
         if warn:
