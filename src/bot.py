@@ -323,8 +323,10 @@ class Bot:
                 entry_df = self.strategy.enrich(entry_raw.copy())
                 sr_df    = self.sr_strategy.enrich(sr_raw.copy()) if sr_raw is not None else None
 
-                # Skip symbols without enough candle history
-                min_candles = max(self.strategy.ema_trend, 50) + 10
+                # Skip symbols without enough candle history.
+                # OKX caps at 300 candles per call; after EMA200 dropna ~100 rows remain.
+                # 60 is enough for all indicators (MACD needs 35, RSI needs 14).
+                min_candles = 60
                 if len(htf_df) < min_candles or len(entry_df) < min_candles:
                     logger.debug(f"Skipping {symbol}: insufficient candle history ({len(htf_df)} htf, {len(entry_df)} entry)")
                     continue
