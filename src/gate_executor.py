@@ -38,8 +38,12 @@ class GateExecutor:
             config = Configuration(key=api_key, secret=api_secret, host=host)
             self._api    = FuturesApi(ApiClient(config))
             self._settle = "usdt"
+            # Log masked key so we can verify the right value is loaded from env
+            masked_key    = api_key[:6]  + "..." + api_key[-4:]  if len(api_key)    > 10 else "???"
+            masked_secret = api_secret[:4] + "..." + api_secret[-4:] if len(api_secret) > 8  else "???"
             logger.info(
                 f"[GATE] Executor ready | host={host} | "
+                f"key={masked_key} | secret={masked_secret} | "
                 f"leverage={leverage}x | risk=${risk_usdt}/trade"
             )
         except ImportError:
@@ -164,7 +168,9 @@ class GateExecutor:
             logger.info(f"[GATE] SL stop @ {sl} | id={result['sl_order_id']}")
 
         except Exception as e:
-            logger.error(f"[GATE] place_order({contract}): {e}\n{traceback.format_exc()}")
+            # Log the full Gate.io error response to diagnose auth/param issues
+            detail = getattr(e, "body", "") or getattr(e, "reason", "") or str(e)
+            logger.error(f"[GATE] place_order({contract}): {e} | detail={detail}\n{traceback.format_exc()}")
 
         return result
 
