@@ -87,12 +87,17 @@ class GateExecutor:
             logger.warning(f"[GATE] set_leverage({contract}): {e}")
             return False
 
-    def _n_contracts(self, sl_dist: float, quanto: float) -> int:
-        """Dollar risk → number of integer contracts."""
-        risk_per_contract = sl_dist * quanto
-        if risk_per_contract <= 0:
+    def _n_contracts(self, entry_price: float, quanto: float) -> int:
+        """
+        Size by margin = risk_usdt at the given leverage.
+        margin_per_contract = entry_price × quanto / leverage
+        n = risk_usdt / margin_per_contract
+        → total margin locked ≤ risk_usdt ($10) regardless of SL distance.
+        """
+        margin_per_contract = entry_price * quanto / self.leverage
+        if margin_per_contract <= 0:
             return 1
-        return max(1, round(self.risk_usdt / risk_per_contract))
+        return max(1, int(self.risk_usdt / margin_per_contract))
 
     def _close_position(self, contract: str, size: int):
         """Emergency close — used if TP/SL placement fails after entry."""
@@ -136,7 +141,7 @@ class GateExecutor:
         if quanto is None:
             return {}   # contract not listed on testnet — skip silently
 
-        n          = self._n_contracts(sl_dist, quanto)
+        n          = self._n_contracts(entry, quanto)
         entry_size =  n if direction == "long" else -n   # positive=buy, negative=sell
         close_size = -n if direction == "long" else  n   # opposite to close
 
