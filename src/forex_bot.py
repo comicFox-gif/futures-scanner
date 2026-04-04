@@ -58,7 +58,7 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
             pos.tp2_hit = True
             pos.be_activated = True
         elif not pos.tp1_hit and current_price >= pos.tp1:
-            actions.append({"action": "close_partial", "pct": tp1_pct, "tp_level": 1})
+            actions.append({"action": "notify_tp1"})
             pos.tp1_hit = True
     else:
         if current_price >= pos.stop_loss:
@@ -74,7 +74,7 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
             pos.tp2_hit = True
             pos.be_activated = True
         elif not pos.tp1_hit and current_price <= pos.tp1:
-            actions.append({"action": "close_partial", "pct": tp1_pct, "tp_level": 1})
+            actions.append({"action": "notify_tp1"})
             pos.tp1_hit = True
 
     return actions
@@ -264,6 +264,9 @@ class ForexBot:
                     "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
                 })
                 return
+            elif act == "notify_tp1":
+                self.notifier.paper_tp1_alert(pos, price)
+
             elif act == "close_partial":
                 pct  = action["pct"]
                 tp_l = action.get("tp_level", 0)

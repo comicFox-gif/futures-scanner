@@ -73,7 +73,7 @@ class Bot:
         self.rm_strategy = RSIMACDReversalStrategy(cfg)
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
-        self.bybit       = BybitExecutor(risk_pct=self.paper_risk_pct)
+        self.bybit       = BybitExecutor()
         self.pair_selector = PairSelector(self.exchange, cfg)
 
         # Signal cooldown: (symbol, direction, stage) -> last alert time
@@ -289,6 +289,9 @@ class Bot:
                     "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
                 })
                 return
+
+            elif act == "notify_tp1":
+                self.notifier.paper_tp1_alert(pos, current_price)
 
             elif act == "close_partial":
                 pct        = action["pct"]

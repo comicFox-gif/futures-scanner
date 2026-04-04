@@ -79,7 +79,7 @@ class Notifier:
 
     def scanner_started(self, symbols: list, tf_trend: str, tf_entry: str,
                         cooldown_min: int, paper_enabled: bool = False, paper_balance: float = 0,
-                        strategies: list | None = None, label: str = "Signal Scanner"):
+                        strategies=None, label: str = "Signal Scanner"):
         paper_line = (
             f"\n📄 Paper: <b>ON</b>  balance: <code>{paper_balance:.0f} USDT</code>"
             if paper_enabled else "\n📄 Paper: OFF"
@@ -317,16 +317,25 @@ class Notifier:
             f"Open trades: <code>{open_count}</code>"
         )
 
+    def paper_tp1_alert(self, pos, price: float):
+        """TP1 reached — notify only, no position change, SL stays at original."""
+        strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
+        self.send(
+            f"🎯 <b>[PAPER] TP1 reached — {pos.symbol}</b>{strat_tag}\n"
+            f"{DLINE}\n"
+            f"Price: <code>{price:.5f}</code>\n"
+            f"<i>Holding full position — waiting for TP2 to activate Break-Even</i>"
+        )
+
     def paper_tp_hit(self, pos, tp_level: int, price: float, pnl: float, balance: float):
-        emojis = {1: "🎯", 2: "🎯🎯", 3: "🏆"}
+        emojis = {2: "🎯🎯", 3: "🏆"}
         emoji  = emojis.get(tp_level, "🎯")
         strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
-        # TP2+ activates break-even; TP1 just banks profit, SL stays
         be_note = "\n🔒 <b>SL moved to Break-Even</b>" if tp_level == 2 else ""
         self.send(
             f"{emoji} <b>[PAPER] TP{tp_level} — {pos.symbol}</b>{strat_tag}\n"
             f"{DLINE}\n"
-            f"Price:     <code>{price:.4f}</code>\n"
+            f"Price:     <code>{price:.5f}</code>\n"
             f"PnL:       <code>{pnl:+.2f} USDT</code>\n"
             f"Remaining: <code>{pos.size_remaining:.4f}</code>"
             f"{be_note}\n"
@@ -335,7 +344,7 @@ class Notifier:
 
     def paper_closed(self, pos, reason: str, exit_price: float,
                      total_pnl: float, balance: float, tp_level: int = 0,
-                     stats: dict | None = None):
+                     stats=None):
         if tp_level == 3:
             emoji = "🏆"
         elif reason == "SL hit" and pos.be_activated:
@@ -385,7 +394,7 @@ class Notifier:
     def paper_batch_summary(self, total: int, wins: int, losses: int,
                              total_pnl: float, win_pct: float,
                              start_balance: float, current_balance: float,
-                             stats: dict, strategy_stats: dict | None = None):
+                             stats: dict, strategy_stats=None):
         pnl_emoji  = "📈" if total_pnl >= 0 else "📉"
         bal_change = current_balance - start_balance
         all_win_pct = stats["wins"] / stats["total"] * 100 if stats["total"] > 0 else 0

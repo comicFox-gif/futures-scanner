@@ -647,7 +647,7 @@ class Strategy:
                 pos.tp2_hit = True
                 pos.be_activated = True
             elif not pos.tp1_hit and current_price >= pos.tp1:
-                actions.append({"action": "close_partial", "pct": tp1_close, "reason": "TP1 hit", "tp_level": 1})
+                actions.append({"action": "notify_tp1"})
                 pos.tp1_hit = True
 
         elif pos.direction == "short":
@@ -664,7 +664,7 @@ class Strategy:
                 pos.tp2_hit = True
                 pos.be_activated = True
             elif not pos.tp1_hit and current_price <= pos.tp1:
-                actions.append({"action": "close_partial", "pct": tp1_close, "reason": "TP1 hit", "tp_level": 1})
+                actions.append({"action": "notify_tp1"})
                 pos.tp1_hit = True
 
         return actions
