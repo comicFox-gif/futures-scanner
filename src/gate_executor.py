@@ -75,13 +75,14 @@ class GateExecutor:
             return None
 
     def _set_leverage(self, contract: str) -> bool:
-        """Set leverage. Returns True on success, False on failure."""
+        """Set leverage for cross margin mode. Returns True on success, False on failure."""
         try:
-            # Try isolated margin leverage first
+            # Cross margin: leverage="0", cross_leverage_limit sets the cap
             self._api.update_position_leverage(
-                self._settle, contract, str(self.leverage)
+                self._settle, contract, "0",
+                cross_leverage_limit=str(self.leverage)
             )
-            logger.info(f"[GATE] Leverage set to {self.leverage}x for {contract}")
+            logger.info(f"[GATE] Cross margin leverage cap set to {self.leverage}x for {contract}")
             return True
         except Exception as e:
             logger.warning(f"[GATE] set_leverage({contract}): {e}")
