@@ -102,7 +102,7 @@ class ForexBot:
         paper_cfg = cfg.get("paper_trading", {})
         self.paper_enabled     = paper_cfg.get("enabled", False)
         self.paper_balance     = paper_cfg.get("balance", 1000.0)
-        self.paper_risk_fixed  = paper_cfg.get("risk_fixed_usdt", 20.0)  # fixed $20 per trade
+        self.risk_pct  = paper_cfg.get("risk_pct", 0.03)  # 3% of balance per trade
         self.paper_start_bal   = self.paper_balance
 
         self.alerts_enabled = cfg.get("alerts_enabled", True)
@@ -179,7 +179,7 @@ class ForexBot:
             return
 
         # Fixed $20 risk per trade regardless of balance
-        risk_amount = self.paper_risk_fixed
+        risk_amount = round(self.paper_balance * self.risk_pct, 2)  # 3% of current balance
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return

@@ -44,7 +44,7 @@
   "paper_trading": {
     "enabled": true,
     "balance": 1000.0,
-    "risk_fixed_usdt": 10.0
+    "risk_pct": 0.03
   },
 
   "trend_inception": {

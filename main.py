@@ -106,7 +106,7 @@ def main():
         "GATE_API_SECRET":    os.getenv("GATE_API_SECRET", ""),
         "GATE_TESTNET":       os.getenv("GATE_TESTNET", "true"),
         "GATE_LEVERAGE":      os.getenv("GATE_LEVERAGE", "10"),
-        "GATE_RISK_USDT":     os.getenv("GATE_RISK_USDT", "100"),
+        "GATE_RISK_PCT":      os.getenv("GATE_RISK_PCT", "0.03"),
     }
 
     bot = Bot(cfg, env)

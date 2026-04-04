@@ -23,10 +23,10 @@ LIVE_HOST    = "https://api.gateio.ws/api/v4"
 
 class GateExecutor:
     def __init__(self, api_key: str = "", api_secret: str = "",
-                 testnet: bool = True, leverage: int = 10, risk_usdt: float = 10.0):
-        self.leverage  = leverage
-        self.risk_usdt = risk_usdt
-        self.enabled   = bool(api_key and api_secret)
+                 testnet: bool = True, leverage: int = 10, risk_pct: float = 0.03):
+        self.leverage = leverage
+        self.risk_pct = risk_pct   # e.g. 0.03 = 3% of account per trade
+        self.enabled  = bool(api_key and api_secret)
 
         if not self.enabled:
             logger.info("[GATE] No API keys — executor disabled")
@@ -43,7 +43,7 @@ class GateExecutor:
             logger.info(
                 f"[GATE] Executor ready | host={host} | "
                 f"key={masked_key} | secret={masked_secret} | "
-                f"leverage={leverage}x | risk=${risk_usdt}/trade"
+                f"leverage={leverage}x | risk={risk_pct*100:.0f}% per trade"
             )
         except ImportError:
             logger.error("[GATE] gate-api not installed — add gate-api to requirements.txt")
@@ -64,6 +64,15 @@ class GateExecutor:
     def _fmt_price(price: float) -> str:
         """Format price to max 8 decimal places — Gate.io rejects > 12 significant digits."""
         return f"{price:.8f}".rstrip("0").rstrip(".")
+
+    def _get_balance(self) -> float:
+        """Fetch current available balance from Gate.io demo account."""
+        try:
+            account = self._api.list_futures_accounts(self._settle)
+            return float(account.available)
+        except Exception as e:
+            logger.warning(f"[GATE] Could not fetch balance: {e} — using 1000 fallback")
+            return 1000.0
 
     def _get_quanto_multiplier(self, contract: str):
         """Return quanto_multiplier, or None if contract doesn't exist on this exchange."""
@@ -88,17 +97,17 @@ class GateExecutor:
             logger.warning(f"[GATE] set_leverage({contract}): {e}")
             return False
 
-    def _n_contracts(self, entry_price: float, quanto: float) -> int:
+    def _n_contracts(self, entry_price: float, quanto: float, risk_usdt: float) -> int:
         """
         Size by margin = risk_usdt at the given leverage.
         margin_per_contract = entry_price × quanto / leverage
         n = risk_usdt / margin_per_contract
-        → total margin locked ≤ risk_usdt ($10) regardless of SL distance.
+        → total margin locked ≤ risk_usdt regardless of SL distance.
         """
         margin_per_contract = entry_price * quanto / self.leverage
         if margin_per_contract <= 0:
             return 1
-        return max(1, int(self.risk_usdt / margin_per_contract))
+        return max(1, int(risk_usdt / margin_per_contract))
 
     def _close_position(self, contract: str, size: int):
         """Emergency close — used if TP/SL placement fails after entry."""
@@ -142,7 +151,10 @@ class GateExecutor:
         if quanto is None:
             return {}   # contract not listed on testnet — skip silently
 
-        n          = self._n_contracts(entry, quanto)
+        balance    = self._get_balance()
+        risk_usdt  = round(balance * self.risk_pct, 2)
+        logger.info(f"[GATE] Balance={balance:.2f} | Risk={self.risk_pct*100:.0f}%={risk_usdt:.2f} USDT for {contract}")
+        n          = self._n_contracts(entry, quanto, risk_usdt)
         entry_size =  n if direction == "long" else -n   # positive=buy, negative=sell
         close_size = -n if direction == "long" else  n   # opposite to close
 

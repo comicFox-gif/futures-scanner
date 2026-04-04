@@ -61,7 +61,7 @@ class Bot:
         paper_cfg = cfg.get("paper_trading", {})
         self.paper_enabled: bool = paper_cfg.get("enabled", False)
         self.paper_balance: float = paper_cfg.get("balance", 1000.0)
-        self.paper_risk_fixed: float = paper_cfg.get("risk_fixed_usdt", 20.0)  # fixed $20 per trade
+        self.risk_pct: float = paper_cfg.get("risk_pct", 0.03)  # 3% of balance per trade
         self.paper_start_balance: float = self.paper_balance
 
         self.tf_sr: str = cfg.get("timeframe_sr", "4h")
@@ -80,7 +80,7 @@ class Bot:
             api_secret = env.get("GATE_API_SECRET", ""),
             testnet    = env.get("GATE_TESTNET", "true").lower() != "false",
             leverage   = int(env.get("GATE_LEVERAGE", "10")),
-            risk_usdt  = float(env.get("GATE_RISK_USDT", str(self.paper_risk_fixed))),
+            risk_pct   = float(env.get("GATE_RISK_PCT", str(self.risk_pct))),
         )
         self.pair_selector = PairSelector(self.exchange, cfg)
 
@@ -204,7 +204,7 @@ class Bot:
             return
 
         # Fixed $20 risk per trade regardless of balance
-        risk_amount = self.paper_risk_fixed
+        risk_amount = round(self.paper_balance * self.risk_pct, 2)  # 3% of current balance
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -700,7 +700,7 @@ class Bot:
     def run(self):
         self._running = True
         paper_note = (
-            f" | Paper: ON (balance={self.paper_balance:.0f} USDT, risk=${self.paper_risk_fixed:.0f} fixed)"
+            f" | Paper: ON (balance={self.paper_balance:.0f} USDT, risk={self.risk_pct*100:.0f}% per trade)"
             if self.paper_enabled else " | Paper: OFF"
         )
         dp_cfg    = self.cfg.get("dynamic_pairs", {})
