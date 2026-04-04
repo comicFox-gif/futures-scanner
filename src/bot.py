@@ -39,10 +39,13 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 
 class Bot:
     def __init__(self, cfg: dict, env: dict):
-        # Mode switch: "scalp" swaps signal params before strategies load
+        # Mode switch: "scalp" swaps signal + filter params before strategies load
         self.mode = cfg.get("mode", "swing")
-        if self.mode == "scalp" and "scalp_signal" in cfg:
-            cfg = {**cfg, "signal": cfg["scalp_signal"]}
+        if self.mode == "scalp":
+            if "scalp_signal" in cfg:
+                cfg = {**cfg, "signal": cfg["scalp_signal"]}
+            if "scalp_filters" in cfg:
+                cfg = {**cfg, "filters": cfg["scalp_filters"]}
         self.cfg = cfg
         self.tf_trend: str = cfg["timeframe_trend"]
         self.tf_entry: str = cfg["timeframe_entry"]

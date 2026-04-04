@@ -84,10 +84,13 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
 
 class ForexBot:
     def __init__(self, cfg: dict):
-        # Mode switch: "scalp" swaps signal params before strategies load
+        # Mode switch: "scalp" swaps signal + filter params before strategies load
         self.mode = cfg.get("mode", "swing")
-        if self.mode == "scalp" and "scalp_signal" in cfg:
-            cfg = {**cfg, "signal": cfg["scalp_signal"]}
+        if self.mode == "scalp":
+            if "scalp_signal" in cfg:
+                cfg = {**cfg, "signal": cfg["scalp_signal"]}
+            if "scalp_filters" in cfg:
+                cfg = {**cfg, "filters": cfg["scalp_filters"]}
         self.cfg             = cfg
         self.pair_selector   = ForexPairSelector(cfg)
         self.tf_htf: str     = cfg.get("timeframe_htf", "4h")

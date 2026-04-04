@@ -90,6 +90,14 @@
     "signal_cooldown_minutes": 30
   },
 
+  "scalp_filters": {
+    "min_body_ratio": 0.25,
+    "max_wick_against_trade": 0.60,
+    "consecutive_closes": 1,
+    "macd_hist_atr_multiplier": 0.008,
+    "volume_building_candles": 1
+  },
+
   "rsi_macd_reversal": {
     "rsi_oversold": 30,
     "rsi_overbought": 70,
