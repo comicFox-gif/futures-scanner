@@ -86,6 +86,7 @@ class ForexBot:
     def __init__(self, cfg: dict):
         # Mode switch: "scalp" swaps signal + filter params before strategies load
         self.mode = cfg.get("mode", "swing")
+        self.send_warnings = (self.mode != "scalp")   # scalp = confirmed only
         if self.mode == "scalp":
             if "scalp_signal" in cfg:
                 cfg = {**cfg, "signal": cfg["scalp_signal"]}
@@ -331,7 +332,7 @@ class ForexBot:
                             self.notifier.fx_confirmed_signal(sig, "FX EMA Trend")
                             if self.paper_enabled:
                                 self._paper_open(sig)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(sig, "FX EMA Trend")
                         self._mark_sent(pair, sig["direction"] + "_ema", sig["stage"])
                         self._daily_alerts.append({"stage": sig["stage"], "direction": sig["direction"], "symbol": pair})
@@ -351,7 +352,7 @@ class ForexBot:
                             self.notifier.lb_confirmed_signal(lb_sig)
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(lb_sig)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(lb_sig, "London Breakout")
                         self._mark_sent(pair, lb_sig["direction"] + "_lb", lb_sig["stage"])
                         self._daily_alerts.append({"stage": lb_sig["stage"], "direction": lb_sig["direction"], "symbol": pair})
@@ -370,7 +371,7 @@ class ForexBot:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(ob_sig)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(ob_sig, "Order Block")
                         self._mark_sent(pair, ob_sig["direction"] + "_ob", ob_sig["stage"])
                         self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": pair})
@@ -389,7 +390,7 @@ class ForexBot:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(tl_sig)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(tl_sig, "Trendline")
                         self._mark_sent(pair, tl_sig["direction"] + "_tl", tl_sig["stage"])
                         self._daily_alerts.append({"stage": tl_sig["stage"], "direction": tl_sig["direction"], "symbol": pair})
@@ -408,7 +409,7 @@ class ForexBot:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rd_sig)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
                         self._mark_sent(pair, rd_sig["direction"] + "_rd", rd_sig["stage"])
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": pair})
@@ -427,7 +428,7 @@ class ForexBot:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rm_sig)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
                         self._mark_sent(pair, rm_sig["direction"] + "_rm", rm_sig["stage"])
                         self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": pair})

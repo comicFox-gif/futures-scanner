@@ -41,6 +41,7 @@ class Bot:
     def __init__(self, cfg: dict, env: dict):
         # Mode switch: "scalp" swaps signal + filter params before strategies load
         self.mode = cfg.get("mode", "swing")
+        self.send_warnings = (self.mode != "scalp")   # scalp = confirmed only
         if self.mode == "scalp":
             if "scalp_signal" in cfg:
                 cfg = {**cfg, "signal": cfg["scalp_signal"]}
@@ -360,7 +361,7 @@ class Bot:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.warning_signal(signal, "EMA Momentum")
 
                         self._mark_sent(symbol, signal.direction + "_ema", signal.stage)
@@ -392,7 +393,7 @@ class Bot:
                                     reason=sr_sig["reason"],
                                 )
                                 self._paper_open(dummy)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.sr_warning_signal(sr_sig)
 
                         self._mark_sent(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"])
@@ -418,7 +419,7 @@ class Bot:
                                             atr=ob_sig["atr"], rsi=ob_sig["rsi"], volume_ratio=0,
                                             reason=ob_sig["reason"])
                                 self._paper_open(dummy)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(ob_sig, "Order Block")
                         self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
                         self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": symbol})
@@ -443,7 +444,7 @@ class Bot:
                                             atr=tl_sig["atr"], rsi=tl_sig["rsi"], volume_ratio=0,
                                             reason=tl_sig["reason"])
                                 self._paper_open(dummy)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(tl_sig, "Trendline")
                         self._mark_sent(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"])
                         self._daily_alerts.append({"stage": tl_sig["stage"], "direction": tl_sig["direction"], "symbol": symbol})
@@ -468,7 +469,7 @@ class Bot:
                                             atr=rd_sig["atr"], rsi=rd_sig["rsi"], volume_ratio=0,
                                             reason=rd_sig["reason"])
                                 self._paper_open(dummy)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
@@ -493,7 +494,7 @@ class Bot:
                                             atr=rm_sig["atr"], rsi=rm_sig["rsi"], volume_ratio=0,
                                             reason=rm_sig["reason"])
                                 self._paper_open(dummy)
-                        else:
+                        elif self.send_warnings:
                             self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
                         self._mark_sent(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"])
                         self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": symbol})
