@@ -361,7 +361,7 @@ class Bot:
                 logger.info(f"[PAPER] SL moved{be_note} for {symbol}")
                 self.notifier.paper_tp_hit(pos, 2, pos.tp2, 0, self.paper_balance)
                 # Move SL to break-even on Gate.io testnet
-                if self.gate.enabled and pos.gate_sl_order_id is not None:
+                if self.gate.enabled and pos.gate_sl_order_id:
                     new_gate_sl_id = self.gate.move_sl_to_breakeven(
                         symbol=symbol, direction=pos.direction,
                         size=pos.size_remaining, entry_price=pos.entry_price,
