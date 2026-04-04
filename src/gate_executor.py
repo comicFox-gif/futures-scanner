@@ -38,9 +38,10 @@ class GateExecutor:
                 "enableRateLimit": True,
             })
             if testnet:
-                # Point all private/public calls to the testnet endpoint
+                # Only override futures endpoint keys — leave authentication/spot untouched
                 for key in list(self.exchange.urls.get("api", {})):
-                    self.exchange.urls["api"][key] = TESTNET_FUTURES_URL
+                    if "future" in key.lower() or "delivery" in key.lower() or "swap" in key.lower():
+                        self.exchange.urls["api"][key] = TESTNET_FUTURES_URL
             logger.info(
                 f"[GATE] Executor ready | testnet={testnet} | "
                 f"leverage={leverage}x | risk=${risk_usdt}/trade"
@@ -60,9 +61,10 @@ class GateExecutor:
         try:
             self.exchange.set_leverage(
                 self.leverage, symbol,
-                params=self._settle_params()
+                params={**self._settle_params(), "cross_leverage_limit": self.leverage}
             )
         except Exception as e:
+            # Leverage errors are non-fatal — default account leverage applies
             logger.warning(f"[GATE] set_leverage({symbol}): {e}")
 
     # ------------------------------------------------------------------
