@@ -116,7 +116,7 @@ class ForexBot:
 
         self._last_alert: dict[tuple, datetime] = {}
         self._paper_positions: dict[str, Position] = {}
-        self._max_paper_positions = 3
+        self._max_paper_positions = 10
         self._paper_paused = False
         self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
         self._strategy_stats: dict[str, dict] = {}
@@ -157,7 +157,7 @@ class ForexBot:
             self._paper_paused = True
             self.notifier.send(
                 f"⏸️ <b>Paper Trading Paused</b>\n"
-                f"3 positions open — waiting until ≤2 before new entries."
+                f"10 positions open — pausing until ≤3 remain before new entries."
             )
         if self._paper_paused:
             return
@@ -248,7 +248,7 @@ class ForexBot:
                 del self._paper_positions[pair]
                 open_count = len(self._paper_positions)
 
-                if self._paper_paused and open_count <= 2:
+                if self._paper_paused and open_count <= 3:
                     self._send_batch_summary()
                     self._paper_paused = False
                     self.notifier.send(
