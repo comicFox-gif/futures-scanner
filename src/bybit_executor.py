@@ -1,14 +1,13 @@
 """
-Bybit Demo/Testnet Order Executor
------------------------------------
+Bybit Testnet Order Executor
+------------------------------
 Places real orders on Bybit testnet when confirmed signals fire.
-Runs alongside internal paper trading for comparison.
+Runs alongside internal paper trading.
 
-Env vars required:
+Env vars required (set in Railway → Variables):
   BYBIT_KEY    — testnet API key
   BYBIT_SECRET — testnet API secret
-
-Set BYBIT_DEMO=true (default) to use testnet, false for live (not recommended).
+  BYBIT_DEMO   — "true" (default) uses testnet, "false" uses live
 """
 
 from __future__ import annotations
@@ -16,18 +15,20 @@ import logging
 import os
 import ccxt
 
-logger = logging.getLogger("futures_bot.bybit_executor")
+logger = logging.getLogger("futures_bot.bybit")
 
-# Bybit minimum order quantities (base currency) for common pairs
-# ccxt will raise InvalidOrder if below minimum — we catch and skip
+# Minimum contract sizes for Bybit linear perpetuals
 _MIN_QTY = {
-    "BTC/USDT:USDT": 0.001,
-    "ETH/USDT:USDT": 0.01,
-    "SOL/USDT:USDT": 0.1,
-    "BNB/USDT:USDT": 0.01,
-    "XRP/USDT:USDT": 1.0,
+    "BTC/USDT:USDT":  0.001,
+    "ETH/USDT:USDT":  0.01,
+    "SOL/USDT:USDT":  0.1,
+    "BNB/USDT:USDT":  0.01,
+    "XRP/USDT:USDT":  1.0,
+    "ADA/USDT:USDT":  1.0,
+    "DOGE/USDT:USDT": 1.0,
+    "MATIC/USDT:USDT":1.0,
 }
-_DEFAULT_MIN_QTY = 0.1
+_DEFAULT_MIN_QTY = 1.0
 
 
 class BybitExecutor:
@@ -35,11 +36,11 @@ class BybitExecutor:
         self.risk_pct = risk_pct
         api_key    = os.getenv("BYBIT_KEY", "")
         api_secret = os.getenv("BYBIT_SECRET", "")
-        use_demo   = os.getenv("BYBIT_DEMO", "true").lower() != "false"
+        use_testnet = os.getenv("BYBIT_DEMO", "true").lower() != "false"
 
         if not api_key or not api_secret:
-            logger.warning("BYBIT_KEY / BYBIT_SECRET not set — Bybit executor disabled")
-            self.enabled = False
+            logger.warning("BYBIT_KEY / BYBIT_SECRET not set in env — Bybit disabled")
+            self.enabled  = False
             self.exchange = None
             return
 
@@ -47,25 +48,37 @@ class BybitExecutor:
             "apiKey":          api_key,
             "secret":          api_secret,
             "enableRateLimit": True,
-            "options": {"defaultType": "linear"},  # USDT perpetuals
+            "options": {
+                "defaultType":    "linear",
+                "defaultSubType": "linear",
+            },
         })
-        if use_demo:
+
+        if use_testnet:
             self.exchange.set_sandbox_mode(True)
 
-        self.enabled = True
-        mode = "TESTNET" if use_demo else "LIVE"
-        logger.info(f"Bybit executor ready ({mode})")
+        # Verify connection
+        try:
+            self.exchange.load_markets()
+            self.enabled = True
+            mode = "TESTNET" if use_testnet else "LIVE"
+            logger.info(f"Bybit executor connected ({mode})")
+        except Exception as e:
+            logger.error(f"Bybit connection failed: {e}")
+            self.enabled = False
 
     # ------------------------------------------------------------------
-    # Fetch available USDT balance
+    # Balance
     # ------------------------------------------------------------------
 
     def _get_balance(self) -> float:
         try:
-            bal = self.exchange.fetch_balance({"type": "linear"})
-            return float(bal.get("USDT", {}).get("free", 0) or 0)
+            bal = self.exchange.fetch_balance(params={"category": "linear"})
+            usdt = bal.get("USDT") or bal.get("usdt") or {}
+            free = usdt.get("free") or usdt.get("total") or 0
+            return float(free or 0)
         except Exception as e:
-            logger.error(f"Bybit fetch_balance failed: {e}")
+            logger.error(f"Bybit fetch_balance error: {e}")
             return 0.0
 
     # ------------------------------------------------------------------
@@ -74,91 +87,102 @@ class BybitExecutor:
 
     def place_order(self, signal: dict) -> bool:
         """
-        Place a market order with SL + TP3 on Bybit testnet.
-        signal must have: symbol, direction, entry, sl, tp3, atr
-        Returns True if order placed successfully.
+        Market order with SL + TP on Bybit testnet.
+        signal keys: symbol, direction, entry, sl, tp3
         """
         if not self.enabled:
             return False
 
         symbol    = signal["symbol"]
         direction = signal["direction"]
-        sl_price  = signal["sl"]
-        tp_price  = signal["tp3"]   # use TP3 as the exchange take-profit
-        entry     = signal["entry"]
+        entry     = float(signal["entry"])
+        sl_price  = float(signal["sl"])
+        tp_price  = float(signal["tp3"])
         side      = "buy" if direction == "long" else "sell"
 
-        # Size from risk
-        balance     = self._get_balance()
-        if balance <= 0:
-            logger.warning("Bybit: zero balance, skipping order")
+        # Validate prices make sense
+        if direction == "long" and not (sl_price < entry < tp_price):
+            logger.warning(f"[BYBIT] Invalid levels for LONG {symbol}: SL={sl_price} entry={entry} TP={tp_price}")
+            return False
+        if direction == "short" and not (tp_price < entry < sl_price):
+            logger.warning(f"[BYBIT] Invalid levels for SHORT {symbol}: TP={tp_price} entry={entry} SL={sl_price}")
             return False
 
         sl_dist = abs(entry - sl_price)
         if sl_dist == 0:
             return False
 
-        risk_amount = balance * self.risk_pct
-        size        = round(risk_amount / sl_dist, 4)
+        balance = self._get_balance()
+        if balance < 1:
+            logger.warning(f"[BYBIT] Balance too low: ${balance:.2f}")
+            return False
 
-        # Enforce minimum qty
-        min_qty = _MIN_QTY.get(symbol, _DEFAULT_MIN_QTY)
-        if size < min_qty:
-            size = min_qty
+        # Position size
+        risk_amount = balance * self.risk_pct
+        raw_size    = risk_amount / sl_dist
+        min_qty     = _MIN_QTY.get(symbol, _DEFAULT_MIN_QTY)
+        size        = max(round(raw_size, 3), min_qty)
 
         try:
+            # Bybit v5 unified params — plain numbers for SL/TP
             params = {
-                "stopLoss":   {"triggerPrice": round(sl_price, 6),  "orderType": "Market"},
-                "takeProfit": {"triggerPrice": round(tp_price, 6), "orderType": "Market"},
-                "positionIdx": 0,  # one-way mode
+                "category":   "linear",
+                "positionIdx": 0,          # one-way mode
+                "stopLoss":   str(round(sl_price, 6)),
+                "takeProfit": str(round(tp_price, 6)),
+                "slTriggerBy": "LastPrice",
+                "tpTriggerBy": "LastPrice",
             }
-            order = self.exchange.create_order(symbol, "market", side, size, params=params)
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=side,
+                amount=size,
+                params=params,
+            )
             order_id = order.get("id", "?")
             logger.info(
-                f"[BYBIT] ORDER PLACED {direction.upper()} {symbol} "
-                f"| Size={size} | SL={sl_price:.4f} | TP={tp_price:.4f} "
-                f"| OrderID={order_id} | Balance=${balance:.2f}"
+                f"[BYBIT] ✅ {direction.upper()} {symbol} | "
+                f"Size={size} | SL={sl_price:.5f} | TP={tp_price:.5f} | "
+                f"Balance=${balance:.2f} | ID={order_id}"
             )
             return True
 
         except ccxt.InvalidOrder as e:
-            logger.warning(f"[BYBIT] Invalid order {symbol}: {e}")
+            logger.error(f"[BYBIT] InvalidOrder {symbol}: {e}")
         except ccxt.InsufficientFunds as e:
-            logger.warning(f"[BYBIT] Insufficient funds {symbol}: {e}")
+            logger.error(f"[BYBIT] InsufficientFunds {symbol}: {e}")
+        except ccxt.ExchangeError as e:
+            logger.error(f"[BYBIT] ExchangeError {symbol}: {e}")
         except Exception as e:
-            logger.error(f"[BYBIT] Order failed {symbol}: {e}")
+            logger.error(f"[BYBIT] Unexpected error {symbol}: {e}")
         return False
 
     # ------------------------------------------------------------------
-    # Fetch open positions (for status reporting)
+    # Open positions summary
     # ------------------------------------------------------------------
 
     def get_open_positions(self) -> list[dict]:
         if not self.enabled:
             return []
         try:
-            positions = self.exchange.fetch_positions()
-            open_pos  = [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
-            return open_pos
+            positions = self.exchange.fetch_positions(params={"category": "linear"})
+            return [p for p in positions if abs(float(p.get("contracts", 0) or 0)) > 0]
         except Exception as e:
-            logger.error(f"[BYBIT] fetch_positions failed: {e}")
+            logger.error(f"[BYBIT] fetch_positions error: {e}")
             return []
-
-    # ------------------------------------------------------------------
-    # Status summary string
-    # ------------------------------------------------------------------
 
     def status_summary(self) -> str:
         if not self.enabled:
-            return "Bybit: disabled"
-        positions = self.get_open_positions()
+            return "Bybit: disabled (check BYBIT_KEY/BYBIT_SECRET env vars)"
         balance   = self._get_balance()
+        positions = self.get_open_positions()
         if not positions:
             return f"Bybit testnet | Balance: ${balance:.2f} | No open positions"
-        lines = []
+        lines = [f"Bybit testnet | Balance: ${balance:.2f}"]
         for p in positions:
-            sym  = p.get("symbol", "?")
+            sym = p.get("symbol", "?")
             side = p.get("side", "?")
-            pnl  = p.get("unrealizedPnl", 0) or 0
-            lines.append(f"  {sym} {side} | uPnL: {float(pnl):+.2f}")
-        return f"Bybit testnet | ${balance:.2f}\n" + "\n".join(lines)
+            pnl  = float(p.get("unrealizedPnl", 0) or 0)
+            lines.append(f"  {sym} {side} | uPnL: {pnl:+.2f}")
+        return "\n".join(lines)
