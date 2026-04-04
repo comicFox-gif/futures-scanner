@@ -26,6 +26,7 @@ from src.strategies.rsi_divergence import RSIDivergenceStrategy
 from src.strategies.rsi_macd_reversal import RSIMACDReversalStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
+from src.bybit_executor import BybitExecutor
 
 logger = logging.getLogger("futures_bot")
 
@@ -72,6 +73,7 @@ class Bot:
         self.rm_strategy = RSIMACDReversalStrategy(cfg)
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
+        self.bybit       = BybitExecutor(risk_pct=self.paper_risk_pct)
         self.pair_selector = PairSelector(self.exchange, cfg)
 
         # Signal cooldown: (symbol, direction, stage) -> last alert time
@@ -282,6 +284,17 @@ class Bot:
                 be_note   = " → Break-Even" if new_sl == pos.entry_price else f" → {new_sl:.4f}"
                 logger.info(f"[PAPER] SL moved{be_note} for {symbol}")
 
+    def _bybit_order(self, sig):
+        """Place order on Bybit testnet. Accepts Signal dataclass or dict."""
+        if not self.bybit.enabled or self._paper_paused:
+            return
+        if hasattr(sig, "entry_price"):   # Signal dataclass
+            d = {"symbol": sig.symbol, "direction": sig.direction,
+                 "entry": sig.entry_price, "sl": sig.stop_loss, "tp3": sig.tp3, "atr": sig.atr}
+        else:
+            d = sig
+        self.bybit.place_order(d)
+
     def _calc_pnl(self, pos: Position, exit_price: float, size: float) -> float:
         if pos.direction == "long":
             return (exit_price - pos.entry_price) * size
@@ -397,6 +410,7 @@ class Bot:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal)
+                            self._bybit_order(signal)
                         elif self.send_warnings:
                             self.notifier.warning_signal(signal, "EMA Momentum")
 
@@ -417,6 +431,7 @@ class Bot:
                         )
                         if sr_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.sr_confirmed_signal(sr_sig)
+                            self._bybit_order(sr_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 # Build a Signal-compatible object for paper trading
                                 from src.strategy import Signal as Sig
@@ -447,6 +462,7 @@ class Bot:
                         )
                         if ob_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
+                            self._bybit_order(ob_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=ob_sig["direction"], symbol=symbol,
@@ -472,6 +488,7 @@ class Bot:
                         )
                         if tl_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
+                            self._bybit_order(tl_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=tl_sig["direction"], symbol=symbol,
@@ -497,6 +514,7 @@ class Bot:
                         )
                         if rd_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
+                            self._bybit_order(rd_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
@@ -522,6 +540,7 @@ class Bot:
                         )
                         if rm_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
+                            self._bybit_order(rm_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rm_sig["direction"], symbol=symbol,
@@ -580,11 +599,12 @@ class Bot:
             logger.error(f"Pair selector failed on startup: {e} — using fallback list")
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
+        bybit_note = f" | Bybit Testnet: {'ON' if self.bybit.enabled else 'OFF'}"
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
             strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
-            label="Crypto Futures Scanner",
+            label=f"Crypto Futures Scanner{bybit_note}",
         )
 
         while self._running:
