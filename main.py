@@ -102,6 +102,11 @@ def main():
         "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "bybit")),
         "API_KEY":            os.getenv("API_KEY", ""),
         "API_SECRET":         os.getenv("API_SECRET", ""),
+        "GATE_API_KEY":       os.getenv("GATE_API_KEY", ""),
+        "GATE_API_SECRET":    os.getenv("GATE_API_SECRET", ""),
+        "GATE_TESTNET":       os.getenv("GATE_TESTNET", "true"),
+        "GATE_LEVERAGE":      os.getenv("GATE_LEVERAGE", "10"),
+        "GATE_RISK_USDT":     os.getenv("GATE_RISK_USDT", "10"),
     }
 
     bot = Bot(cfg, env)

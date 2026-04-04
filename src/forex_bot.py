@@ -53,8 +53,9 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
             pos.tp3_hit = True
             return actions
         if not pos.tp2_hit and current_price >= pos.tp2:
-            actions.append({"action": "close_partial", "pct": tp2_pct, "tp_level": 2})
+            actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
             pos.tp2_hit = True
+            pos.be_activated = True
         elif not pos.tp1_hit and current_price >= pos.tp1:
             actions.append({"action": "notify_tp1"})
             pos.tp1_hit = True
@@ -67,8 +68,9 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
             pos.tp3_hit = True
             return actions
         if not pos.tp2_hit and current_price <= pos.tp2:
-            actions.append({"action": "close_partial", "pct": tp2_pct, "tp_level": 2})
+            actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
             pos.tp2_hit = True
+            pos.be_activated = True
         elif not pos.tp1_hit and current_price <= pos.tp1:
             actions.append({"action": "notify_tp1"})
             pos.tp1_hit = True

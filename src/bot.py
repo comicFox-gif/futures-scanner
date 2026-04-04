@@ -27,6 +27,7 @@ from src.strategies.rsi_macd_reversal import RSIMACDReversalStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 from src.bybit_executor import BybitExecutor
+from src.gate_executor import GateExecutor
 
 logger = logging.getLogger("futures_bot")
 
@@ -74,6 +75,13 @@ class Bot:
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
         self.bybit       = BybitExecutor()
+        self.gate        = GateExecutor(
+            api_key    = env.get("GATE_API_KEY", ""),
+            api_secret = env.get("GATE_API_SECRET", ""),
+            testnet    = env.get("GATE_TESTNET", "true").lower() != "false",
+            leverage   = int(env.get("GATE_LEVERAGE", "10")),
+            risk_usdt  = float(env.get("GATE_RISK_USDT", str(self.paper_risk_fixed))),
+        )
         self.pair_selector = PairSelector(self.exchange, cfg)
 
         # Signal cooldown: (symbol, direction, stage) -> last alert time
@@ -219,6 +227,14 @@ class Bot:
         self._paper_positions[signal.symbol] = pos
         self._session_count += 1
 
+        # Place real order on Gate.io testnet
+        gate_ids = self.gate.place_order({
+            "symbol": signal.symbol, "direction": signal.direction,
+            "entry": signal.entry_price, "sl": signal.stop_loss, "tp3": signal.tp3,
+        })
+        pos.gate_sl_order_id = gate_ids.get("sl_order_id", "")
+        pos.gate_tp_order_id = gate_ids.get("tp_order_id", "")
+
         sl_pct = sl_dist / signal.entry_price * 100
         open_count = len(self._paper_positions)
         logger.info(
@@ -343,6 +359,15 @@ class Bot:
                 pos.stop_loss = new_sl
                 be_note   = " → Break-Even" if new_sl == pos.entry_price else f" → {new_sl:.4f}"
                 logger.info(f"[PAPER] SL moved{be_note} for {symbol}")
+                self.notifier.paper_tp_hit(pos, 2, pos.tp2, 0, self.paper_balance)
+                # Move SL to break-even on Gate.io testnet
+                if self.gate.enabled and pos.gate_sl_order_id is not None:
+                    new_gate_sl_id = self.gate.move_sl_to_breakeven(
+                        symbol=symbol, direction=pos.direction,
+                        size=pos.size_remaining, entry_price=pos.entry_price,
+                        old_sl_order_id=pos.gate_sl_order_id,
+                    )
+                    pos.gate_sl_order_id = new_gate_sl_id or ""
 
     def _bybit_order(self, sig):
         """Place order on Bybit testnet. Accepts Signal dataclass or dict."""
@@ -692,7 +717,7 @@ class Bot:
             logger.error(f"Pair selector failed on startup: {e} — using fallback list")
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
-        bybit_note = f" | OKX Demo: {'ON' if self.bybit.enabled else 'OFF'}"
+        bybit_note = f" | Gate.io Testnet: {'ON' if self.gate.enabled else 'OFF'}"
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
