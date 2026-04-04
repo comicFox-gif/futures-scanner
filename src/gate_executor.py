@@ -61,14 +61,14 @@ class GateExecutor:
         """'BTC/USDT:USDT' → 'BTC_USDT'"""
         return symbol.split(":")[0].replace("/", "_")
 
-    def _get_quanto_multiplier(self, contract: str) -> float:
-        """Return quanto_multiplier (base currency per contract)."""
+    def _get_quanto_multiplier(self, contract: str):
+        """Return quanto_multiplier, or None if contract doesn't exist on this exchange."""
         try:
             info = self._api.get_futures_contract(self._settle, contract)
             return float(info.quanto_multiplier)
         except Exception as e:
-            logger.warning(f"[GATE] get_futures_contract({contract}): {e} — using 1.0")
-            return 1.0
+            logger.info(f"[GATE] {contract} not available on testnet — skipping order")
+            return None
 
     def _set_leverage(self, contract: str):
         try:
@@ -111,7 +111,10 @@ class GateExecutor:
         if sl_dist == 0:
             return {}
 
-        quanto     = self._get_quanto_multiplier(contract)
+        quanto = self._get_quanto_multiplier(contract)
+        if quanto is None:
+            return {}   # contract not listed on this testnet — skip silently
+
         n          = self._n_contracts(sl_dist, quanto)
         entry_size =  n if direction == "long" else -n   # positive=buy, negative=sell
         close_size = -n if direction == "long" else  n   # opposite direction to close
