@@ -599,7 +599,7 @@ class Bot:
             logger.error(f"Pair selector failed on startup: {e} — using fallback list")
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
-        bybit_note = f" | Bybit Testnet: {'ON' if self.bybit.enabled else 'OFF'}"
+        bybit_note = f" | OKX Demo: {'ON' if self.bybit.enabled else 'OFF'}"
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
