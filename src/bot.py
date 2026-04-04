@@ -227,14 +227,21 @@ class Bot:
             return
 
         for action in actions:
-            act    = action["action"]
-            reason = action["reason"]
+            act = action["action"]
 
             if act == "close_all":
-                pnl = self._calc_pnl(pos, current_price, pos.size_remaining)
+                # Use SL price as exit on SL hit — no slippage in paper trading
+                reason = action.get("reason", "")
+                tp_level = action.get("tp_level", 0)
+                if reason == "SL hit":
+                    exit_price = pos.stop_loss
+                elif tp_level == 3:
+                    exit_price = pos.tp3
+                else:
+                    exit_price = current_price
+                pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
                 pos.closed_pnl += pnl
                 self.paper_balance += pos.margin_locked + pnl
-                tp_level = action.get("tp_level", 0)
 
                 # Classify result
                 if tp_level == 3:
@@ -269,7 +276,7 @@ class Bot:
                 open_count = len(self._paper_positions)
 
                 # When 9 closed (1 remaining) send batch summary then resume
-                if self._paper_paused and open_count <= 1:
+                if self._paper_paused and open_count <= 3:
                     self._send_batch_summary()
                     self._paper_paused = False
                     self.notifier.send(
@@ -279,10 +286,10 @@ class Bot:
 
                 logger.info(
                     f"[PAPER] CLOSED {symbol} | {reason} "
-                    f"@ {current_price:.4f} | PnL={pos.closed_pnl:+.2f} | "
+                    f"@ {exit_price:.4f} | PnL={pos.closed_pnl:+.2f} | "
                     f"Balance=${self.paper_balance:.2f} | Open: {open_count}"
                 )
-                self.notifier.paper_closed(pos, reason, current_price, pos.closed_pnl,
+                self.notifier.paper_closed(pos, reason, exit_price, pos.closed_pnl,
                                            self.paper_balance, tp_level, self._trade_stats)
                 self._paper_trades.append({
                     "symbol": symbol, "direction": pos.direction,
@@ -297,7 +304,8 @@ class Bot:
                 pct        = action["pct"]
                 tp_level   = action.get("tp_level", 0)
                 close_size = round(pos.size_remaining * pct, 6)
-                pnl        = self._calc_pnl(pos, current_price, close_size)
+                partial_price = pos.tp2 if tp_level == 2 else current_price
+                pnl        = self._calc_pnl(pos, partial_price, close_size)
                 pos.size_remaining -= close_size
                 pos.closed_pnl += pnl
                 self.paper_balance += pnl
@@ -311,10 +319,10 @@ class Bot:
 
                 logger.info(
                     f"[PAPER] TP{tp_level} {symbol} | "
-                    f"{pct*100:.0f}% closed @ {current_price:.4f} | "
+                    f"{pct*100:.0f}% closed @ {partial_price:.4f} | "
                     f"PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
                 )
-                self.notifier.paper_tp_hit(pos, tp_level, current_price, pnl, self.paper_balance)
+                self.notifier.paper_tp_hit(pos, tp_level, partial_price, pnl, self.paper_balance)
 
             elif act == "move_sl":
                 new_sl    = action["new_sl"]
@@ -438,17 +446,19 @@ class Bot:
                     signal = self.strategy.generate_signal(symbol, htf_df, entry_df)
 
                     if signal.stage > 0 and not self._is_on_cooldown(symbol, signal.direction + "_ema", signal.stage):
+                        quality = 4  # EMA continuation requires 4/5 conditions → quality 4
                         stage_label = "CONFIRMED" if signal.stage == 2 else "WARNING"
-                        quality = 3  # default quality for EMA strategy
                         logger.info(
                             f"[EMA {stage_label}] {signal.direction.upper()} {symbol} "
-                            f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | {signal.reason}"
+                            f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | Q={quality} | {signal.reason}"
                         )
-                        if signal.stage == 2 and not self._paper_paused:
+                        if signal.stage == 2 and not self._paper_paused and quality >= 4:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal, "EMA Momentum")
                             self._bybit_order(signal)
+                        elif signal.stage == 2:
+                            logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 4")
                         elif self.send_warnings:
                             self.notifier.warning_signal(signal, "EMA Momentum")
 
@@ -461,17 +471,16 @@ class Bot:
                     sr_sig = self.sr_strategy.generate_signal(symbol, sr_df, entry_df)
 
                     if sr_sig and not self._is_on_cooldown(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"]):
+                        q = sr_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if sr_sig["stage"] == 2 else "WARNING"
                         logger.info(
                             f"[SR {stage_label}] {sr_sig['direction'].upper()} {symbol} "
-                            f"@ {sr_sig['entry']:.4f} | Lvl={sr_sig['level_price']:.4f} "
-                            f"({sr_sig['level_touches']} touches) | {sr_sig['reason']}"
+                            f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if sr_sig["stage"] == 2 and not self._paper_paused:
+                        if sr_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.sr_confirmed_signal(sr_sig)
                             self._bybit_order(sr_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
-                                # Build a Signal-compatible object for paper trading
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(
                                     stage=2, direction=sr_sig["direction"], symbol=symbol,
@@ -479,9 +488,11 @@ class Bot:
                                     tp1=sr_sig["tp1"], tp2=sr_sig["tp2"], tp3=sr_sig["tp3"],
                                     atr=sr_sig["atr"], rsi=sr_sig["rsi"],
                                     volume_ratio=sr_sig.get("vol_ratio", 0),
-                                    reason=sr_sig["reason"],
+                                    reason=sr_sig.get("reason", ""),
                                 )
                                 self._paper_open(dummy, "S/R Bounce")
+                        elif sr_sig["stage"] == 2:
+                            logger.info(f"[SR] Skipped {symbol} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.sr_warning_signal(sr_sig)
 
@@ -493,12 +504,13 @@ class Bot:
                 if sr_df is not None and not in_paper:
                     ob_sig = self.ob_strategy.generate_signal(symbol, sr_df, entry_df)
                     if ob_sig and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
+                        q = ob_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if ob_sig["stage"] == 2 else "WARNING"
                         logger.info(
                             f"[OB {stage_label}] {ob_sig['direction'].upper()} {symbol} "
-                            f"@ {ob_sig['entry']:.4f} | {ob_sig['reason']}"
+                            f"@ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}"
                         )
-                        if ob_sig["stage"] == 2 and not self._paper_paused:
+                        if ob_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             self._bybit_order(ob_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -507,8 +519,10 @@ class Bot:
                                             entry_price=ob_sig["entry"], stop_loss=ob_sig["sl"],
                                             tp1=ob_sig["tp1"], tp2=ob_sig["tp2"], tp3=ob_sig["tp3"],
                                             atr=ob_sig["atr"], rsi=ob_sig["rsi"], volume_ratio=0,
-                                            reason=ob_sig["reason"])
+                                            reason=ob_sig.get("reason", ""))
                                 self._paper_open(dummy, "Order Block")
+                        elif ob_sig["stage"] == 2:
+                            logger.info(f"[OB] Skipped {symbol} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(ob_sig, "Order Block")
                         self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
@@ -519,12 +533,13 @@ class Bot:
                 if not in_paper:
                     tl_sig = self.tl_strategy.generate_signal(symbol, htf_df, entry_df)
                     if tl_sig and not self._is_on_cooldown(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"]):
+                        q = tl_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if tl_sig["stage"] == 2 else "WARNING"
                         logger.info(
                             f"[TL {stage_label}] {tl_sig['direction'].upper()} {symbol} "
-                            f"@ {tl_sig['entry']:.4f} | {tl_sig['reason']}"
+                            f"@ {tl_sig['entry']:.4f} | Q={q} | {tl_sig['reason']}"
                         )
-                        if tl_sig["stage"] == 2 and not self._paper_paused:
+                        if tl_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             self._bybit_order(tl_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -533,8 +548,10 @@ class Bot:
                                             entry_price=tl_sig["entry"], stop_loss=tl_sig["sl"],
                                             tp1=tl_sig["tp1"], tp2=tl_sig["tp2"], tp3=tl_sig["tp3"],
                                             atr=tl_sig["atr"], rsi=tl_sig["rsi"], volume_ratio=0,
-                                            reason=tl_sig["reason"])
+                                            reason=tl_sig.get("reason", ""))
                                 self._paper_open(dummy, "Trendline")
+                        elif tl_sig["stage"] == 2:
+                            logger.info(f"[TL] Skipped {symbol} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(tl_sig, "Trendline")
                         self._mark_sent(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"])
@@ -545,12 +562,13 @@ class Bot:
                 if not in_paper:
                     rd_sig = self.rd_strategy.generate_signal(symbol, htf_df, entry_df)
                     if rd_sig and not self._is_on_cooldown(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"]):
+                        q = rd_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if rd_sig["stage"] == 2 else "WARNING"
                         logger.info(
                             f"[DIV {stage_label}] {rd_sig['direction'].upper()} {symbol} "
-                            f"@ {rd_sig['entry']:.4f} | {rd_sig['reason']}"
+                            f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if rd_sig["stage"] == 2 and not self._paper_paused:
+                        if rd_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             self._bybit_order(rd_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -559,8 +577,10 @@ class Bot:
                                             entry_price=rd_sig["entry"], stop_loss=rd_sig["sl"],
                                             tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
                                             atr=rd_sig["atr"], rsi=rd_sig["rsi"], volume_ratio=0,
-                                            reason=rd_sig["reason"])
+                                            reason=rd_sig.get("reason", ""))
                                 self._paper_open(dummy, "RSI Divergence")
+                        elif rd_sig["stage"] == 2:
+                            logger.info(f"[DIV] Skipped {symbol} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
@@ -571,12 +591,13 @@ class Bot:
                 if not in_paper:
                     rm_sig = self.rm_strategy.generate_signal(symbol, entry_df)
                     if rm_sig and not self._is_on_cooldown(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"]):
+                        q = rm_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if rm_sig["stage"] == 2 else "WARNING"
                         logger.info(
                             f"[RM {stage_label}] {rm_sig['direction'].upper()} {symbol} "
-                            f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | {rm_sig['reason']}"
+                            f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | Q={q} | {rm_sig['reason']}"
                         )
-                        if rm_sig["stage"] == 2 and not self._paper_paused:
+                        if rm_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             self._bybit_order(rm_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -585,8 +606,10 @@ class Bot:
                                             entry_price=rm_sig["entry"], stop_loss=rm_sig["sl"],
                                             tp1=rm_sig["tp1"], tp2=rm_sig["tp2"], tp3=rm_sig["tp3"],
                                             atr=rm_sig["atr"], rsi=rm_sig["rsi"], volume_ratio=0,
-                                            reason=rm_sig["reason"])
+                                            reason=rm_sig.get("reason", ""))
                                 self._paper_open(dummy, "RSI+MACD Reversal")
+                        elif rm_sig["stage"] == 2:
+                            logger.info(f"[RM] Skipped {symbol} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
                         self._mark_sent(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"])

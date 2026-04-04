@@ -208,11 +208,18 @@ class ForexBot:
         for action in actions:
             act = action["action"]
             if act == "close_all":
-                pnl = self._pnl(pos, price, pos.size_remaining)
-                pos.closed_pnl += pnl
-                self.paper_balance += pos.margin_locked + pnl
                 tp_level = action.get("tp_level", 0)
                 close_reason = action.get("reason", "")
+                # Use exact level price as exit — no slippage in paper trading
+                if close_reason == "SL hit":
+                    exit_price = pos.stop_loss
+                elif tp_level == 3:
+                    exit_price = pos.tp3
+                else:
+                    exit_price = price
+                pnl = self._pnl(pos, exit_price, pos.size_remaining)
+                pos.closed_pnl += pnl
+                self.paper_balance += pos.margin_locked + pnl
 
                 if tp_level == 3:
                     self._trade_stats["tp3"] += 1
@@ -245,7 +252,7 @@ class ForexBot:
                 del self._paper_positions[pair]
                 open_count = len(self._paper_positions)
 
-                if self._paper_paused and open_count <= 1:
+                if self._paper_paused and open_count <= 3:
                     self._send_batch_summary()
                     self._paper_paused = False
                     self.notifier.send(
@@ -255,9 +262,9 @@ class ForexBot:
 
                 logger.info(
                     f"[PAPER-FX] CLOSED {pair} | {close_reason} "
-                    f"@ {price:.5f} | PnL={pos.closed_pnl:+.2f} | Balance=${self.paper_balance:.2f} | Open: {open_count}"
+                    f"@ {exit_price:.5f} | PnL={pos.closed_pnl:+.2f} | Balance=${self.paper_balance:.2f} | Open: {open_count}"
                 )
-                self.notifier.paper_closed(pos, close_reason, price,
+                self.notifier.paper_closed(pos, close_reason, exit_price,
                                            pos.closed_pnl, self.paper_balance, tp_level, self._trade_stats)
                 self._paper_trades.append({
                     "symbol": pair, "direction": pos.direction,
@@ -271,7 +278,8 @@ class ForexBot:
                 pct  = action["pct"]
                 tp_l = action.get("tp_level", 0)
                 size = round(pos.size_remaining * pct, 6)
-                pnl  = self._pnl(pos, price, size)
+                partial_price = pos.tp2 if tp_l == 2 else price
+                pnl  = self._pnl(pos, partial_price, size)
                 pos.size_remaining -= size
                 pos.closed_pnl     += pnl
                 self.paper_balance += pnl
@@ -284,9 +292,9 @@ class ForexBot:
 
                 logger.info(
                     f"[PAPER-FX] TP{tp_l} {pair} | {pct*100:.0f}% closed "
-                    f"@ {price:.5f} | PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
+                    f"@ {partial_price:.5f} | PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
                 )
-                self.notifier.paper_tp_hit(pos, tp_l, price, pnl, self.paper_balance)
+                self.notifier.paper_tp_hit(pos, tp_l, partial_price, pnl, self.paper_balance)
             elif act == "move_sl":
                 pos.stop_loss = action["new_sl"]
                 note = " → Break-Even" if action["new_sl"] == pos.entry_price else f" → {action['new_sl']:.5f}"
@@ -392,15 +400,15 @@ class ForexBot:
                 if not in_paper:
                     sig = self.ema_strategy.generate_signal(pair, htf_df, itf_df, entry_df)
                     if sig and not self._is_on_cooldown(pair, sig["direction"] + "_ema", sig["stage"]):
+                        q = sig.get("quality", 3)
                         stage_label = "CONFIRMED" if sig["stage"] == 2 else "WARNING"
-                        logger.info(
-                            f"[EMA {stage_label}] {sig['direction'].upper()} {pair} "
-                            f"@ {sig['entry']:.5f} | RSI={sig['rsi']:.1f} | {sig['reason']}"
-                        )
-                        if sig["stage"] == 2 and not self._paper_paused:
+                        logger.info(f"[EMA {stage_label}] {sig['direction'].upper()} {pair} @ {sig['entry']:.5f} | Q={q}")
+                        if sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(sig, "FX EMA Trend")
                             if self.paper_enabled:
                                 self._paper_open(sig, "FX EMA Trend")
+                        elif sig["stage"] == 2:
+                            logger.info(f"[EMA] Skipped {pair} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(sig, "FX EMA Trend")
                         self._mark_sent(pair, sig["direction"] + "_ema", sig["stage"])
@@ -411,16 +419,15 @@ class ForexBot:
                 if not in_paper:
                     lb_sig = self.lb_strategy.generate_signal(pair, lb_df)
                     if lb_sig and not self._is_on_cooldown(pair, lb_sig["direction"] + "_lb", lb_sig["stage"]):
+                        q = lb_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if lb_sig["stage"] == 2 else "WARNING"
-                        logger.info(
-                            f"[LB {stage_label}] {lb_sig['direction'].upper()} {pair} "
-                            f"@ {lb_sig['entry']:.5f} | Range={lb_sig.get('range_pips', 0):.0f} pips | "
-                            f"{lb_sig['reason']}"
-                        )
-                        if lb_sig["stage"] == 2 and not self._paper_paused:
+                        logger.info(f"[LB {stage_label}] {lb_sig['direction'].upper()} {pair} @ {lb_sig['entry']:.5f} | Q={q}")
+                        if lb_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.lb_confirmed_signal(lb_sig)
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(lb_sig, "London Breakout")
+                        elif lb_sig["stage"] == 2:
+                            logger.info(f"[LB] Skipped {pair} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(lb_sig, "London Breakout")
                         self._mark_sent(pair, lb_sig["direction"] + "_lb", lb_sig["stage"])
@@ -431,15 +438,15 @@ class ForexBot:
                 if not in_paper:
                     ob_sig = self.ob_strategy.generate_signal(pair, htf_df, entry_df)
                     if ob_sig and not self._is_on_cooldown(pair, ob_sig["direction"] + "_ob", ob_sig["stage"]):
+                        q = ob_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if ob_sig["stage"] == 2 else "WARNING"
-                        logger.info(
-                            f"[OB {stage_label}] {ob_sig['direction'].upper()} {pair} "
-                            f"@ {ob_sig['entry']:.5f} | {ob_sig['reason']}"
-                        )
-                        if ob_sig["stage"] == 2 and not self._paper_paused:
+                        logger.info(f"[OB {stage_label}] {ob_sig['direction'].upper()} {pair} @ {ob_sig['entry']:.5f} | Q={q}")
+                        if ob_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(ob_sig, "Order Block")
+                        elif ob_sig["stage"] == 2:
+                            logger.info(f"[OB] Skipped {pair} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(ob_sig, "Order Block")
                         self._mark_sent(pair, ob_sig["direction"] + "_ob", ob_sig["stage"])
@@ -450,15 +457,15 @@ class ForexBot:
                 if not in_paper:
                     tl_sig = self.tl_strategy.generate_signal(pair, itf_df, entry_df)
                     if tl_sig and not self._is_on_cooldown(pair, tl_sig["direction"] + "_tl", tl_sig["stage"]):
+                        q = tl_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if tl_sig["stage"] == 2 else "WARNING"
-                        logger.info(
-                            f"[TL {stage_label}] {tl_sig['direction'].upper()} {pair} "
-                            f"@ {tl_sig['entry']:.5f} | {tl_sig['reason']}"
-                        )
-                        if tl_sig["stage"] == 2 and not self._paper_paused:
+                        logger.info(f"[TL {stage_label}] {tl_sig['direction'].upper()} {pair} @ {tl_sig['entry']:.5f} | Q={q}")
+                        if tl_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(tl_sig, "Trendline")
+                        elif tl_sig["stage"] == 2:
+                            logger.info(f"[TL] Skipped {pair} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(tl_sig, "Trendline")
                         self._mark_sent(pair, tl_sig["direction"] + "_tl", tl_sig["stage"])
@@ -469,15 +476,15 @@ class ForexBot:
                 if not in_paper:
                     rd_sig = self.rd_strategy.generate_signal(pair, itf_df, entry_df)
                     if rd_sig and not self._is_on_cooldown(pair, rd_sig["direction"] + "_rd", rd_sig["stage"]):
+                        q = rd_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if rd_sig["stage"] == 2 else "WARNING"
-                        logger.info(
-                            f"[DIV {stage_label}] {rd_sig['direction'].upper()} {pair} "
-                            f"@ {rd_sig['entry']:.5f} | {rd_sig['reason']}"
-                        )
-                        if rd_sig["stage"] == 2 and not self._paper_paused:
+                        logger.info(f"[DIV {stage_label}] {rd_sig['direction'].upper()} {pair} @ {rd_sig['entry']:.5f} | Q={q}")
+                        if rd_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rd_sig, "RSI Divergence")
+                        elif rd_sig["stage"] == 2:
+                            logger.info(f"[DIV] Skipped {pair} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
                         self._mark_sent(pair, rd_sig["direction"] + "_rd", rd_sig["stage"])
@@ -488,15 +495,15 @@ class ForexBot:
                 if not in_paper:
                     rm_sig = self.rm_strategy.generate_signal(pair, entry_df)
                     if rm_sig and not self._is_on_cooldown(pair, rm_sig["direction"] + "_rm", rm_sig["stage"]):
+                        q = rm_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if rm_sig["stage"] == 2 else "WARNING"
-                        logger.info(
-                            f"[RM {stage_label}] {rm_sig['direction'].upper()} {pair} "
-                            f"@ {rm_sig['entry']:.5f} | RSI={rm_sig['rsi']:.1f} | {rm_sig['reason']}"
-                        )
-                        if rm_sig["stage"] == 2 and not self._paper_paused:
+                        logger.info(f"[RM {stage_label}] {rm_sig['direction'].upper()} {pair} @ {rm_sig['entry']:.5f} | Q={q}")
+                        if rm_sig["stage"] == 2 and not self._paper_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rm_sig, "RSI+MACD Reversal")
+                        elif rm_sig["stage"] == 2:
+                            logger.info(f"[RM] Skipped {pair} — quality {q} < 4")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
                         self._mark_sent(pair, rm_sig["direction"] + "_rm", rm_sig["stage"])
