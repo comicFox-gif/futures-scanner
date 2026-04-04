@@ -298,10 +298,11 @@ class Notifier:
     # Paper trading alerts
     # ------------------------------------------------------------------
 
-    def paper_opened(self, pos, available_balance: float, open_count: int = 1):
+    def paper_opened(self, pos, available_balance: float, open_count: int = 1, session_count: int = 0):
         dir_tag  = self._dir_tag(pos.direction)
         sl_pct   = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
         risk_amt = pos.margin_locked
+        session_line = f"\nSession:     <code>{session_count}/50</code>" if session_count else ""
         self.send(
             f"📄 <b>Paper Trade Opened</b>\n"
             f"{DLINE}\n"
@@ -315,6 +316,7 @@ class Notifier:
             f"Risk locked: <code>${risk_amt:.2f}</code>\n"
             f"Available:   <code>${available_balance:.2f}</code>\n"
             f"Open trades: <code>{open_count}</code>"
+            f"{session_line}"
         )
 
     def paper_tp1_alert(self, pos, price: float):
@@ -436,6 +438,53 @@ class Notifier:
             f"({stats['total']} total trades)"
             f"{best_strat_line}\n"
             f"<i>New entries starting now...</i>"
+        )
+
+    # ------------------------------------------------------------------
+    # Session summary (fires after all 50 trades open+close)
+    # ------------------------------------------------------------------
+
+    def paper_session_summary(self, total: int, wins: int, losses: int,
+                               total_pnl: float, win_pct: float,
+                               start_balance: float, current_balance: float,
+                               stats: dict, strategy_stats=None):
+        pnl_emoji  = "📈" if total_pnl >= 0 else "📉"
+        bal_change = current_balance - start_balance
+
+        best_strat_line = ""
+        if strategy_stats:
+            ranked = sorted(
+                strategy_stats.items(),
+                key=lambda x: (x[1]["tp3"], x[1]["wins"] / max(x[1]["total"], 1)),
+                reverse=True,
+            )
+            best_name, best = ranked[0]
+            best_wr = best["wins"] / best["total"] * 100 if best["total"] > 0 else 0
+            best_strat_line = (
+                f"\n{DLINE}\n"
+                f"🥇 <b>Best Strategy: {best_name}</b>\n"
+                f"   TP3: <code>{best['tp3']}</code>  "
+                f"SL: <code>{best['sl']}</code>  "
+                f"Win: <code>{best_wr:.0f}%</code>  ({best['total']} trades)"
+            )
+
+        self.send(
+            f"📊 <b>SESSION COMPLETE — 50 Trades</b>\n"
+            f"{LINE}\n"
+            f"✅ Wins:     <code>{wins}</code>\n"
+            f"❌ Losses:   <code>{losses}</code>\n"
+            f"🎯 Win Rate: <code>{win_pct:.0f}%</code>\n"
+            f"{DLINE}\n"
+            f"🏆 TP3:   <code>{stats['tp3']}</code>  "
+            f"🛑 SL:  <code>{stats['sl']}</code>  "
+            f"🔒 BE-SL: <code>{stats['be_sl']}</code>\n"
+            f"{DLINE}\n"
+            f"{pnl_emoji} Session PnL: <code>{total_pnl:+.2f} USDT</code>\n"
+            f"💰 Balance:  <code>${current_balance:.2f}</code>  ({bal_change:+.2f})\n"
+            f"📌 Started:  <code>${start_balance:.2f}</code>"
+            f"{best_strat_line}\n"
+            f"{DLINE}\n"
+            f"<i>⏸️ Pausing 5 hours — next session starts automatically.</i>"
         )
 
     # ------------------------------------------------------------------

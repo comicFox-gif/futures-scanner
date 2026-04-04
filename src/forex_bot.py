@@ -116,15 +116,16 @@ class ForexBot:
 
         self._last_alert: dict[tuple, datetime] = {}
         self._paper_positions: dict[str, Position] = {}
-        self._max_paper_positions = 10
-        self._paper_paused = False
-        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+        self._session_count     = 0
+        self._session_paused    = False
+        self._resume_at         = None
+        self._session_start_bal = self.paper_balance
+        self._session_trades: list[dict] = []
+        self._trade_stats    = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
         self._strategy_stats: dict[str, dict] = {}
-        self._batch_trades: list[dict] = []
-        self._batch_start_balance: float = self.paper_balance
         self._daily_alerts: list[dict] = []
         self._paper_trades: list[dict] = []
-        self._last_summary_date: Optional[date] = None
+        self._last_summary_date         = None
         self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
 
@@ -145,21 +146,31 @@ class ForexBot:
     # Paper trading
     # ------------------------------------------------------------------
 
+    def _check_session_resume(self):
+        if self._session_paused and self._resume_at and datetime.utcnow() >= self._resume_at:
+            self._session_paused    = False
+            self._resume_at         = None
+            self._session_count     = 0
+            self._session_trades    = []
+            self._paper_positions   = {}
+            self.paper_balance      = self.paper_start_bal
+            self._session_start_bal = self.paper_balance
+            self._trade_stats       = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+            self._strategy_stats    = {}
+            self.notifier.send(
+                f"🔄 <b>New Session Started</b>\n"
+                f"Balance reset to <code>${self.paper_balance:.0f}</code> — scanning for signals..."
+            )
+            logger.info("[PAPER-FX] Session reset — new 50-trade cycle started")
+
     def _paper_open(self, sig: dict, strategy_name: str = ""):
+        self._check_session_resume()
+        if self._session_paused:
+            return
         pair = sig["symbol"]
         if pair in self._paper_positions:
             return
-
-        if len(self._paper_positions) == 0:
-            self._batch_start_balance = self.paper_balance
-
-        if len(self._paper_positions) >= self._max_paper_positions and not self._paper_paused:
-            self._paper_paused = True
-            self.notifier.send(
-                f"⏸️ <b>Paper Trading Paused</b>\n"
-                f"10 positions open — pausing until ≤3 remain before new entries."
-            )
-        if self._paper_paused:
+        if self._session_count >= 50:
             return
         sl_dist = abs(sig["entry"] - sig["sl"])
         if sl_dist == 0:
@@ -187,14 +198,18 @@ class ForexBot:
             strategy_name=strategy_name,
         )
         self._paper_positions[pair] = pos
+        self._session_count += 1
         sl_pct = sl_dist / sig["entry"] * 100
         open_count = len(self._paper_positions)
         logger.info(
             f"[PAPER-FX] OPENED {sig['direction'].upper()} {pair} "
             f"@ {sig['entry']:.5f} | Risk=${risk_amount:.2f} | Size={size:.6f} | "
-            f"SL={sig['sl']:.5f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f}"
+            f"SL={sig['sl']:.5f} (-{sl_pct:.2f}%) | Session: {self._session_count}/50"
         )
-        self.notifier.paper_opened(pos, self.paper_balance, open_count)
+        self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
+
+        if self._session_count >= 50:
+            self._session_paused = True
 
     def _paper_tick(self, pair: str, price: float):
         pos = self._paper_positions.get(pair)
@@ -243,18 +258,15 @@ class ForexBot:
                 elif result == "sl":      ss["sl"]    += 1
                 if pos.closed_pnl > 0:    ss["wins"]  += 1
 
-                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
+                self._session_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
 
                 del self._paper_positions[pair]
                 open_count = len(self._paper_positions)
 
-                if self._paper_paused and open_count <= 3:
-                    self._send_batch_summary()
-                    self._paper_paused = False
-                    self.notifier.send(
-                        f"▶️ <b>Paper Trading Resumed</b>\n"
-                        f"Open positions: {open_count} — accepting new entries."
-                    )
+                if self._session_count >= 50 and open_count == 0:
+                    self._send_session_summary()
+                    self._resume_at = datetime.utcnow() + timedelta(hours=5)
+                    logger.info("[PAPER-FX] Session complete — 5h pause started")
 
                 logger.info(
                     f"[PAPER-FX] CLOSED {pair} | {close_reason} "
@@ -356,6 +368,7 @@ class ForexBot:
     # ------------------------------------------------------------------
 
     def _tick(self):
+        self._check_session_resume()
         now      = datetime.utcnow().strftime("%H:%M:%S")
         open_pos = len(self._paper_positions)
         bal_info = f" | Paper: ${self.paper_balance:.2f} | Pos: {open_pos}" if self.paper_enabled else ""
@@ -399,7 +412,7 @@ class ForexBot:
                         q = sig.get("quality", 3)
                         stage_label = "CONFIRMED" if sig["stage"] == 2 else "WARNING"
                         logger.info(f"[EMA {stage_label}] {sig['direction'].upper()} {pair} @ {sig['entry']:.5f} | Q={q}")
-                        if sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(sig, "FX EMA Trend")
                             if self.paper_enabled:
                                 self._paper_open(sig, "FX EMA Trend")
@@ -418,7 +431,7 @@ class ForexBot:
                         q = lb_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if lb_sig["stage"] == 2 else "WARNING"
                         logger.info(f"[LB {stage_label}] {lb_sig['direction'].upper()} {pair} @ {lb_sig['entry']:.5f} | Q={q}")
-                        if lb_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if lb_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.lb_confirmed_signal(lb_sig)
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(lb_sig, "London Breakout")
@@ -437,7 +450,7 @@ class ForexBot:
                         q = ob_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if ob_sig["stage"] == 2 else "WARNING"
                         logger.info(f"[OB {stage_label}] {ob_sig['direction'].upper()} {pair} @ {ob_sig['entry']:.5f} | Q={q}")
-                        if ob_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if ob_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(ob_sig, "Order Block")
@@ -456,7 +469,7 @@ class ForexBot:
                         q = tl_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if tl_sig["stage"] == 2 else "WARNING"
                         logger.info(f"[TL {stage_label}] {tl_sig['direction'].upper()} {pair} @ {tl_sig['entry']:.5f} | Q={q}")
-                        if tl_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if tl_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(tl_sig, "Trendline")
@@ -475,7 +488,7 @@ class ForexBot:
                         q = rd_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if rd_sig["stage"] == 2 else "WARNING"
                         logger.info(f"[DIV {stage_label}] {rd_sig['direction'].upper()} {pair} @ {rd_sig['entry']:.5f} | Q={q}")
-                        if rd_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if rd_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rd_sig, "RSI Divergence")
@@ -494,7 +507,7 @@ class ForexBot:
                         q = rm_sig.get("quality", 3)
                         stage_label = "CONFIRMED" if rm_sig["stage"] == 2 else "WARNING"
                         logger.info(f"[RM {stage_label}] {rm_sig['direction'].upper()} {pair} @ {rm_sig['entry']:.5f} | Q={q}")
-                        if rm_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if rm_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rm_sig, "RSI+MACD Reversal")
@@ -515,23 +528,22 @@ class ForexBot:
         self._maybe_daily_summary()
         self._maybe_send_positions_report()
 
-    def _send_batch_summary(self):
-        trades = self._batch_trades
+    def _send_session_summary(self):
+        trades = self._session_trades
         if not trades:
             return
         wins      = [t for t in trades if t["pnl"] > 0]
         losses    = [t for t in trades if t["pnl"] <= 0]
         total_pnl = sum(t["pnl"] for t in trades)
-        win_pct   = len(wins) / len(trades) * 100
-        self.notifier.paper_batch_summary(
+        win_pct   = len(wins) / len(trades) * 100 if trades else 0
+        self.notifier.paper_session_summary(
             total=len(trades), wins=len(wins), losses=len(losses),
             total_pnl=total_pnl, win_pct=win_pct,
-            start_balance=self._batch_start_balance,
+            start_balance=self._session_start_bal,
             current_balance=self.paper_balance,
             stats=self._trade_stats,
             strategy_stats=self._strategy_stats,
         )
-        self._batch_trades = []
 
     def _maybe_send_positions_report(self):
         """Send open positions summary to Telegram every 60 minutes."""

@@ -81,22 +81,22 @@ class Bot:
 
         # Paper positions: symbol -> Position
         self._paper_positions: dict[str, Position] = {}
-        self._max_paper_positions = 10
-        self._paper_paused = False
 
-        # Lifetime trade stats
-        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
-        # Per-strategy stats: strategy_name -> {tp3, sl, be_sl, total, wins}
+        # Session tracking: 50 trades opened → 5h pause → reset
+        self._session_count     = 0          # trades opened this session
+        self._session_paused    = False
+        self._resume_at         = None       # datetime when pause ends
+        self._session_start_bal = self.paper_balance
+        self._session_trades: list[dict] = []   # all closed trades this session
+
+        # Lifetime trade stats (reset each session)
+        self._trade_stats    = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
         self._strategy_stats: dict[str, dict] = {}
-
-        # Batch tracking (resets each cycle of 10 positions)
-        self._batch_trades: list[dict] = []
-        self._batch_start_balance: float = self.paper_balance
 
         # Stats
         self._daily_alerts: list[dict] = []
-        self._paper_trades: list[dict] = []   # closed paper trades for daily summary
-        self._last_summary_date: Optional[date] = None
+        self._paper_trades: list[dict] = []
+        self._last_summary_date         = None
         self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
 
@@ -159,26 +159,37 @@ class Bot:
     # Paper trading
     # ------------------------------------------------------------------
 
+    def _check_session_resume(self):
+        """Auto-resume after 5h pause and reset everything."""
+        if self._session_paused and self._resume_at and datetime.utcnow() >= self._resume_at:
+            self._session_paused    = False
+            self._resume_at         = None
+            self._session_count     = 0
+            self._session_trades    = []
+            self._paper_positions   = {}
+            self.paper_balance      = self.paper_start_balance
+            self._session_start_bal = self.paper_balance
+            self._trade_stats       = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+            self._strategy_stats    = {}
+            self.notifier.send(
+                f"🔄 <b>New Session Started</b>\n"
+                f"Balance reset to <code>${self.paper_balance:.0f}</code> — scanning for signals..."
+            )
+            logger.info("[PAPER] Session reset — new 50-trade cycle started")
+
     def _paper_open(self, signal: Signal, strategy_name: str = ""):
         """Open a simulated position from a confirmed signal."""
+        self._check_session_resume()
+
+        if self._session_paused:
+            return
+
         if signal.symbol in self._paper_positions:
             logger.debug(f"[PAPER] Already in position for {signal.symbol}, skipping")
             return
 
-        # Record balance at start of each fresh batch
-        if len(self._paper_positions) == 0:
-            self._batch_start_balance = self.paper_balance
-
-        # Cap at 10 open positions; resume only when count drops to ≤1
-        if len(self._paper_positions) >= self._max_paper_positions and not self._paper_paused:
-            self._paper_paused = True
-            self.notifier.send(
-                f"⏸️ <b>Paper Trading Paused</b>\n"
-                f"10 positions open — pausing until ≤3 remain before new entries."
-            )
-        if self._paper_paused:
-            logger.debug(f"[PAPER] Paused — {len(self._paper_positions)} positions open")
-            return
+        if self._session_count >= 50:
+            return  # safety guard, pause already triggered
 
         sl_dist = abs(signal.entry_price - signal.stop_loss)
         if sl_dist == 0:
@@ -206,15 +217,21 @@ class Bot:
             strategy_name=strategy_name,
         )
         self._paper_positions[signal.symbol] = pos
+        self._session_count += 1
 
         sl_pct = sl_dist / signal.entry_price * 100
         open_count = len(self._paper_positions)
         logger.info(
             f"[PAPER] OPENED {signal.direction.upper()} {signal.symbol} "
             f"@ {signal.entry_price:.4f} | Risk=${risk_amount:.2f} | Size={size:.4f} | "
-            f"SL={signal.stop_loss:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f}"
+            f"SL={signal.stop_loss:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f} | "
+            f"Session: {self._session_count}/50"
         )
-        self.notifier.paper_opened(pos, self.paper_balance, open_count)
+        self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
+
+        # Stop opening new trades once 50 have been opened
+        if self._session_count >= 50:
+            self._session_paused = True  # no new entries — wait for all to close
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""
@@ -270,19 +287,16 @@ class Bot:
                 elif result == "sl":      ss["sl"]    += 1
                 if pos.closed_pnl > 0:    ss["wins"]  += 1
 
-                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
+                self._session_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
 
                 del self._paper_positions[symbol]
                 open_count = len(self._paper_positions)
 
-                # When 9 closed (1 remaining) send batch summary then resume
-                if self._paper_paused and open_count <= 3:
-                    self._send_batch_summary()
-                    self._paper_paused = False
-                    self.notifier.send(
-                        f"▶️ <b>Paper Trading Resumed</b>\n"
-                        f"Open positions: {open_count} — accepting new entries."
-                    )
+                # All 50 trades opened AND all positions now closed → send summary + 5h pause
+                if self._session_count >= 50 and open_count == 0:
+                    self._send_session_summary()
+                    self._resume_at = datetime.utcnow() + timedelta(hours=5)
+                    logger.info("[PAPER] Session complete — 5h pause started")
 
                 logger.info(
                     f"[PAPER] CLOSED {symbol} | {reason} "
@@ -332,7 +346,7 @@ class Bot:
 
     def _bybit_order(self, sig):
         """Place order on Bybit testnet. Accepts Signal dataclass or dict."""
-        if not self.bybit.enabled or self._paper_paused:
+        if not self.bybit.enabled or self._session_paused:
             return
         if hasattr(sig, "entry_price"):   # Signal dataclass
             d = {"symbol": sig.symbol, "direction": sig.direction,
@@ -403,6 +417,7 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _tick(self):
+        self._check_session_resume()
         symbols   = self.pair_selector.get_symbols()
         now       = datetime.utcnow().strftime("%H:%M:%S")
         open_pos  = len(self._paper_positions)
@@ -452,7 +467,7 @@ class Bot:
                             f"[EMA {stage_label}] {signal.direction.upper()} {symbol} "
                             f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | Q={quality} | {signal.reason}"
                         )
-                        if signal.stage == 2 and not self._paper_paused and quality >= 4:
+                        if signal.stage == 2 and not self._session_paused and quality >= 4:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal, "EMA Momentum")
@@ -477,7 +492,7 @@ class Bot:
                             f"[SR {stage_label}] {sr_sig['direction'].upper()} {symbol} "
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if sr_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if sr_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.sr_confirmed_signal(sr_sig)
                             self._bybit_order(sr_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -510,7 +525,7 @@ class Bot:
                             f"[OB {stage_label}] {ob_sig['direction'].upper()} {symbol} "
                             f"@ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}"
                         )
-                        if ob_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if ob_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             self._bybit_order(ob_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -539,7 +554,7 @@ class Bot:
                             f"[TL {stage_label}] {tl_sig['direction'].upper()} {symbol} "
                             f"@ {tl_sig['entry']:.4f} | Q={q} | {tl_sig['reason']}"
                         )
-                        if tl_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if tl_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             self._bybit_order(tl_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -568,7 +583,7 @@ class Bot:
                             f"[DIV {stage_label}] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if rd_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if rd_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             self._bybit_order(rd_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -597,7 +612,7 @@ class Bot:
                             f"[RM {stage_label}] {rm_sig['direction'].upper()} {symbol} "
                             f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | Q={q} | {rm_sig['reason']}"
                         )
-                        if rm_sig["stage"] == 2 and not self._paper_paused and q >= 4:
+                        if rm_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             self._bybit_order(rm_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -627,23 +642,22 @@ class Bot:
         self._maybe_send_daily_summary()
         self._maybe_send_positions_report()
 
-    def _send_batch_summary(self):
-        trades = self._batch_trades
+    def _send_session_summary(self):
+        trades = self._session_trades
         if not trades:
             return
         wins      = [t for t in trades if t["pnl"] > 0]
         losses    = [t for t in trades if t["pnl"] <= 0]
         total_pnl = sum(t["pnl"] for t in trades)
-        win_pct   = len(wins) / len(trades) * 100
-        self.notifier.paper_batch_summary(
+        win_pct   = len(wins) / len(trades) * 100 if trades else 0
+        self.notifier.paper_session_summary(
             total=len(trades), wins=len(wins), losses=len(losses),
             total_pnl=total_pnl, win_pct=win_pct,
-            start_balance=self._batch_start_balance,
+            start_balance=self._session_start_bal,
             current_balance=self.paper_balance,
             stats=self._trade_stats,
             strategy_stats=self._strategy_stats,
         )
-        self._batch_trades = []   # reset for next batch
 
     def _maybe_send_positions_report(self):
         """Send open positions summary to Telegram every 60 minutes."""
