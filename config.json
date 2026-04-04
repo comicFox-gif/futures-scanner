@@ -49,7 +49,7 @@
   "trend_inception": {
     "ema_cross_max_candles_ago": 20,
     "ema_cross_proximity_pct": 0.003,
-    "pullback_atr_tolerance": 1.2
+    "pullback_atr_tolerance": 2.0
   },
 
   "filters": {

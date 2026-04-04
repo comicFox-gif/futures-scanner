@@ -387,21 +387,19 @@ class Strategy:
     # ------------------------------------------------------------------
 
     def _htf_long_aligned(self, htf_df: pd.DataFrame) -> bool:
-        """1H EMA9 > EMA21 > EMA50 and price above EMA200 — established bull trend."""
+        """1H EMA9 > EMA21 and price above EMA50 — bull trend. Relaxed from EMA9>21>50."""
         row = htf_df.iloc[-2]
         return (
             row[f"ema_{self.ema_fast}"] > row[f"ema_{self.ema_mid}"]
-            and row[f"ema_{self.ema_mid}"] > row[f"ema_{self.ema_slow}"]
-            and row["close"] > row[f"ema_{self.ema_trend}"]
+            and row["close"] > row[f"ema_{self.ema_slow}"]
         )
 
     def _htf_short_aligned(self, htf_df: pd.DataFrame) -> bool:
-        """1H EMA9 < EMA21 < EMA50 and price below EMA200 — established bear trend."""
+        """1H EMA9 < EMA21 and price below EMA50 — bear trend."""
         row = htf_df.iloc[-2]
         return (
             row[f"ema_{self.ema_fast}"] < row[f"ema_{self.ema_mid}"]
-            and row[f"ema_{self.ema_mid}"] < row[f"ema_{self.ema_slow}"]
-            and row["close"] < row[f"ema_{self.ema_trend}"]
+            and row["close"] < row[f"ema_{self.ema_slow}"]
         )
 
     def _score_long(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[int, float, float, list[str], list[str]]:
@@ -502,21 +500,21 @@ class Strategy:
         return len(passed), rsi, vol_ratio, passed, failed
 
     def _long_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
-        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or 5 conditions pass."""
+        """Returns (fires, rsi, vol_ratio, reason). Fires if 3 or more of 5 conditions pass."""
         score, rsi, vol_ratio, passed, failed = self._score_long(htf_df, entry_df)
-        if score >= 4:
+        if score >= 3:
             score_tag = f"✅ {score}/5 conditions"
-            missing   = f" | Missing: {failed[0]}" if failed else ""
+            missing   = f" | Missing: {', '.join(failed)}" if failed else ""
             reason    = f"1H bull trend | {score_tag}{missing}"
             return True, rsi, vol_ratio, reason
         return False, rsi, vol_ratio, ""
 
     def _short_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
-        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or 5 conditions pass."""
+        """Returns (fires, rsi, vol_ratio, reason). Fires if 3 or more of 5 conditions pass."""
         score, rsi, vol_ratio, passed, failed = self._score_short(htf_df, entry_df)
-        if score >= 4:
+        if score >= 3:
             score_tag = f"✅ {score}/5 conditions"
-            missing   = f" | Missing: {failed[0]}" if failed else ""
+            missing   = f" | Missing: {', '.join(failed)}" if failed else ""
             reason    = f"1H bear trend | {score_tag}{missing}"
             return True, rsi, vol_ratio, reason
         return False, rsi, vol_ratio, ""
@@ -553,24 +551,22 @@ class Strategy:
                 "1H EMA cross imminent — watch for pullback entry",
             )
 
-        # Continuation warning: score 4 conditions, fire if 3+ pass
+        # Continuation warning: 2+ of 4 conditions → fire warning
         if self._htf_long_aligned(htf_df):
             w_row  = entry_df.iloc[-2]
             w_rsi  = float(w_row["rsi"])
-            w_macd = float(w_row["macd_hist"]) if not pd.isna(w_row.get("macd_hist", float("nan"))) else 0.0
-            near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
-            near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance * 2)
-
+            near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 3)
+            near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance * 3)
             w_conds = {
                 "EMA approaching": near_fast or near_mid,
                 f"RSI {w_rsi:.0f} in range": self.rsi_long_min <= w_rsi <= self.rsi_long_max,
                 "MACD turning up": macd_histogram_turning_positive(entry_df),
-                "Candle bullish": candle_body_ratio(entry_df.iloc[-2]) >= self.min_body_ratio,
+                "Candle bullish": candle_body_ratio(entry_df) >= self.min_body_ratio,
             }
             w_passed = [k for k, v in w_conds.items() if v]
             w_failed = [k for k, v in w_conds.items() if not v]
-            if len(w_passed) >= 3:
-                missing = f" | Missing: {w_failed[0]}" if w_failed else ""
+            if len(w_passed) >= 2:
+                missing = f" | Missing: {', '.join(w_failed)}" if w_failed else ""
                 return self._build_signal(
                     symbol, "long", 1, price, atr, w_rsi, 0,
                     f"1H bull trend | ⚡ {len(w_passed)}/4 warning conditions{missing}",
@@ -595,23 +591,22 @@ class Strategy:
                 "1H EMA cross imminent — watch for pullback entry",
             )
 
-        # Continuation warning: score 4 conditions, fire if 3+ pass
+        # Continuation warning: 2+ of 4 conditions → fire warning
         if self._htf_short_aligned(htf_df):
             w_row  = entry_df.iloc[-2]
             w_rsi  = float(w_row["rsi"])
-            near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 2)
-            near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance * 2)
-
+            near_fast = price_near_ema(entry_df, f"ema_{self.ema_fast}", self.pullback_atr_tolerance * 3)
+            near_mid  = price_near_ema(entry_df, f"ema_{self.ema_mid}",  self.pullback_atr_tolerance * 3)
             w_conds = {
                 "EMA approaching": near_fast or near_mid,
                 f"RSI {w_rsi:.0f} in range": self.rsi_short_min <= w_rsi <= self.rsi_short_max,
                 "MACD turning down": macd_histogram_turning_negative(entry_df),
-                "Candle bearish": candle_body_ratio(entry_df.iloc[-2]) >= self.min_body_ratio,
+                "Candle bearish": candle_body_ratio(entry_df) >= self.min_body_ratio,
             }
             w_passed = [k for k, v in w_conds.items() if v]
             w_failed = [k for k, v in w_conds.items() if not v]
-            if len(w_passed) >= 3:
-                missing = f" | Missing: {w_failed[0]}" if w_failed else ""
+            if len(w_passed) >= 2:
+                missing = f" | Missing: {', '.join(w_failed)}" if w_failed else ""
                 return self._build_signal(
                     symbol, "short", 1, price, atr, w_rsi, 0,
                     f"1H bear trend | ⚡ {len(w_passed)}/4 warning conditions{missing}",
