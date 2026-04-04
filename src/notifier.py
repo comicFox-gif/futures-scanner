@@ -331,7 +331,7 @@ class Notifier:
         emojis = {2: "🎯🎯", 3: "🏆"}
         emoji  = emojis.get(tp_level, "🎯")
         strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
-        be_note = "\n🔒 <b>SL moved to Break-Even</b>" if tp_level == 2 else ""
+        be_note = "\n📌 <b>Holding to TP3 — SL unchanged</b>" if tp_level == 2 else ""
         self.send(
             f"{emoji} <b>[PAPER] TP{tp_level} — {pos.symbol}</b>{strat_tag}\n"
             f"{DLINE}\n"

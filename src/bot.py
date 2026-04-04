@@ -81,7 +81,7 @@ class Bot:
 
         # Paper positions: symbol -> Position
         self._paper_positions: dict[str, Position] = {}
-        self._max_paper_positions = 10
+        self._max_paper_positions = 3
         self._paper_paused = False
 
         # Lifetime trade stats
@@ -174,7 +174,7 @@ class Bot:
             self._paper_paused = True
             self.notifier.send(
                 f"⏸️ <b>Paper Trading Paused</b>\n"
-                f"10 positions open — waiting until ≤1 remains before new entries."
+                f"3 positions open — waiting until ≤2 before new entries."
             )
         if self._paper_paused:
             logger.debug(f"[PAPER] Paused — {len(self._paper_positions)} positions open")
@@ -276,7 +276,7 @@ class Bot:
                 open_count = len(self._paper_positions)
 
                 # When 9 closed (1 remaining) send batch summary then resume
-                if self._paper_paused and open_count <= 3:
+                if self._paper_paused and open_count <= 2:
                     self._send_batch_summary()
                     self._paper_paused = False
                     self.notifier.send(
