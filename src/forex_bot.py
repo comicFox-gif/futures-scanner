@@ -26,6 +26,7 @@ from src.strategies.london_breakout import LondonBreakoutStrategy
 from src.strategies.order_block import OrderBlockStrategy
 from src.strategies.trendline_break import TrendlineBreakStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
+from src.strategies.rsi_macd_reversal import RSIMACDReversalStrategy
 from src.notifier import Notifier
 from src.strategy import Position   # reuse Position dataclass
 
@@ -83,6 +84,10 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
 
 class ForexBot:
     def __init__(self, cfg: dict):
+        # Mode switch: "scalp" swaps signal params before strategies load
+        self.mode = cfg.get("mode", "swing")
+        if self.mode == "scalp" and "scalp_signal" in cfg:
+            cfg = {**cfg, "signal": cfg["scalp_signal"]}
         self.cfg             = cfg
         self.pair_selector   = ForexPairSelector(cfg)
         self.tf_htf: str     = cfg.get("timeframe_htf", "4h")
@@ -105,6 +110,7 @@ class ForexBot:
         self.ob_strategy  = OrderBlockStrategy(cfg)
         self.tl_strategy  = TrendlineBreakStrategy(cfg)
         self.rd_strategy  = RSIDivergenceStrategy(cfg)
+        self.rm_strategy  = RSIMACDReversalStrategy(cfg)
         self.notifier     = Notifier(channel_name=cfg.get("channel_name", ""))
 
         self._last_alert: dict[tuple, datetime] = {}
@@ -398,6 +404,25 @@ class ForexBot:
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": pair})
                         signals_found += 1
 
+                # ── Strategy 6: RSI+MACD Reversal ────────────────────────
+                if not in_paper:
+                    rm_sig = self.rm_strategy.generate_signal(pair, entry_df)
+                    if rm_sig and not self._is_on_cooldown(pair, rm_sig["direction"] + "_rm", rm_sig["stage"]):
+                        stage_label = "CONFIRMED" if rm_sig["stage"] == 2 else "WARNING"
+                        logger.info(
+                            f"[RM {stage_label}] {rm_sig['direction'].upper()} {pair} "
+                            f"@ {rm_sig['entry']:.5f} | RSI={rm_sig['rsi']:.1f} | {rm_sig['reason']}"
+                        )
+                        if rm_sig["stage"] == 2:
+                            self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
+                            if self.paper_enabled and pair not in self._paper_positions:
+                                self._paper_open(rm_sig)
+                        else:
+                            self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
+                        self._mark_sent(pair, rm_sig["direction"] + "_rm", rm_sig["stage"])
+                        self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": pair})
+                        signals_found += 1
+
             except Exception as e:
                 logger.error(f"Error scanning {pair}: {e}")
                 logger.debug(traceback.format_exc())
@@ -424,7 +449,7 @@ class ForexBot:
             cooldown_min=self.cooldown_min,
             paper_enabled=self.paper_enabled,
             paper_balance=self.paper_balance,
-            strategies=["FX EMA Trend", "London Breakout", "Order Block", "Trendline", "RSI Divergence"],
+            strategies=["FX EMA Trend", "London Breakout", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
             label="Forex Scanner",
         )
         while self._running:

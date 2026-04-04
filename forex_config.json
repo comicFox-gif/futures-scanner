@@ -1,5 +1,6 @@
 {
   "channel_name": "",
+  "mode": "swing",
 
   "dynamic_pairs": {
     "top_n": 80,
@@ -79,6 +80,21 @@
     "min_rsi_difference": 3.0,
     "bull_div_rsi_max": 55,
     "bear_div_rsi_min": 45
+  },
+
+  "scalp_signal": {
+    "tp1_rr": 1.0,
+    "tp2_rr": 1.5,
+    "tp3_rr": 2.0,
+    "atr_sl_multiplier": 0.5,
+    "signal_cooldown_minutes": 30
+  },
+
+  "rsi_macd_reversal": {
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "rsi_warn_long": 35,
+    "rsi_warn_short": 65
   },
 
   "signal": {

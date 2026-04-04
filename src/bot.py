@@ -23,6 +23,7 @@ from src.strategies.sr_bounce import SRBounceStrategy
 from src.strategies.order_block import OrderBlockStrategy
 from src.strategies.trendline_break import TrendlineBreakStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
+from src.strategies.rsi_macd_reversal import RSIMACDReversalStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 
@@ -38,6 +39,10 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 
 class Bot:
     def __init__(self, cfg: dict, env: dict):
+        # Mode switch: "scalp" swaps signal params before strategies load
+        self.mode = cfg.get("mode", "swing")
+        if self.mode == "scalp" and "scalp_signal" in cfg:
+            cfg = {**cfg, "signal": cfg["scalp_signal"]}
         self.cfg = cfg
         self.tf_trend: str = cfg["timeframe_trend"]
         self.tf_entry: str = cfg["timeframe_entry"]
@@ -60,6 +65,7 @@ class Bot:
         self.ob_strategy = OrderBlockStrategy(cfg)
         self.tl_strategy = TrendlineBreakStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
+        self.rm_strategy = RSIMACDReversalStrategy(cfg)
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
         self.pair_selector = PairSelector(self.exchange, cfg)
@@ -457,6 +463,31 @@ class Bot:
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
+                # ── Strategy 6: RSI+MACD Reversal ────────────────────────
+                if not in_paper:
+                    rm_sig = self.rm_strategy.generate_signal(symbol, entry_df)
+                    if rm_sig and not self._is_on_cooldown(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"]):
+                        stage_label = "CONFIRMED" if rm_sig["stage"] == 2 else "WARNING"
+                        logger.info(
+                            f"[RM {stage_label}] {rm_sig['direction'].upper()} {symbol} "
+                            f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | {rm_sig['reason']}"
+                        )
+                        if rm_sig["stage"] == 2:
+                            self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=rm_sig["direction"], symbol=symbol,
+                                            entry_price=rm_sig["entry"], stop_loss=rm_sig["sl"],
+                                            tp1=rm_sig["tp1"], tp2=rm_sig["tp2"], tp3=rm_sig["tp3"],
+                                            atr=rm_sig["atr"], rsi=rm_sig["rsi"], volume_ratio=0,
+                                            reason=rm_sig["reason"])
+                                self._paper_open(dummy)
+                        else:
+                            self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
+                        self._mark_sent(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"])
+                        self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
                 self.notifier.error_alert(f"Scanning {symbol}", str(e)[:200])
@@ -480,7 +511,7 @@ class Bot:
         dp_cfg    = self.cfg.get("dynamic_pairs", {})
         dp_note   = f"Dynamic pairs: TOP {dp_cfg.get('top_n', 30)} by 24h volume | Refresh: every {dp_cfg.get('refresh_hours', 4)}h"
         logger.info("=" * 60)
-        logger.info(f"Scanner started — {dp_note}{paper_note}")
+        logger.info(f"Scanner started — {dp_note}{paper_note} | Mode: {self.mode.upper()}")
         logger.info(f"Trend TF: {self.tf_trend} | Entry TF: {self.tf_entry} | SR TF: {self.tf_sr}")
         logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
         logger.info("=" * 60)
@@ -494,7 +525,7 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence"],
+            strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
             label="Crypto Futures Scanner",
         )
 
