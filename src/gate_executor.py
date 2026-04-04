@@ -1,15 +1,14 @@
 """
 Gate.io Futures Executor — Testnet (official gate-api SDK)
 ------------------------------------------------------------
-Uses Gate.io's own Python SDK instead of ccxt — cleaner auth,
-no URL override hacks, testnet just needs host= in Configuration.
+Uses Gate.io's own Python SDK. Testnet = just set host= in Configuration.
 
 pip install gate-api
 
-Entry  : market order (price="0", tif="ioc")
-TP3    : limit order (reduce-only, gtc)
-SL     : price-triggered order (stop-market, reduce-only)
-TP2 BE : cancel old SL price-triggered order → place new one at entry
+Entry  : market order (FuturesOrder, price="0", tif="ioc")
+TP3    : limit order  (FuturesOrder, reduce_only=True, tif="gtc")
+SL     : price-triggered stop (FuturesPriceTriggeredOrder)
+TP2 BE : cancel old SL → place new FuturesPriceTriggeredOrder at entry
 """
 
 from __future__ import annotations
@@ -55,18 +54,16 @@ class GateExecutor:
     # ------------------------------------------------------------------
 
     def _to_contract(self, symbol: str) -> str:
-        """Convert ccxt symbol to Gate.io contract name.
-        'BTC/USDT:USDT' → 'BTC_USDT'
-        """
+        """'BTC/USDT:USDT' → 'BTC_USDT'"""
         return symbol.split(":")[0].replace("/", "_")
 
     def _get_quanto_multiplier(self, contract: str) -> float:
-        """Return the quanto_multiplier (contract size in base currency)."""
+        """Return quanto_multiplier (base currency per contract)."""
         try:
             info = self._api.get_futures_contract(self._settle, contract)
             return float(info.quanto_multiplier)
         except Exception as e:
-            logger.warning(f"[GATE] get_futures_contract({contract}): {e} — using multiplier=1")
+            logger.warning(f"[GATE] get_futures_contract({contract}): {e} — using 1.0")
             return 1.0
 
     def _set_leverage(self, contract: str):
@@ -79,13 +76,11 @@ class GateExecutor:
             logger.warning(f"[GATE] set_leverage({contract}): {e}")
 
     def _n_contracts(self, sl_dist: float, quanto: float) -> int:
-        """Calculate number of contracts from dollar risk and SL distance."""
-        # Each contract moves `quanto` base units per price unit.
-        # Dollar risk per contract = sl_dist (price units) * quanto
-        dollar_risk_per_contract = sl_dist * quanto
-        if dollar_risk_per_contract <= 0:
+        """Dollar risk → number of integer contracts."""
+        risk_per_contract = sl_dist * quanto
+        if risk_per_contract <= 0:
             return 1
-        return max(1, round(self.risk_usdt / dollar_risk_per_contract))
+        return max(1, round(self.risk_usdt / risk_per_contract))
 
     # ------------------------------------------------------------------
     # Open position
@@ -99,7 +94,7 @@ class GateExecutor:
         if not self.enabled:
             return {}
 
-        from gate_api import FuturesOrder, FuturesPriceOrder, FuturesPriceTrigger
+        from gate_api import FuturesOrder, FuturesPriceTriggeredOrder, FuturesPriceTrigger, FuturesInitialOrder
 
         symbol    = signal["symbol"]
         direction = signal["direction"]
@@ -112,16 +107,16 @@ class GateExecutor:
         if sl_dist == 0:
             return {}
 
-        quanto      = self._get_quanto_multiplier(contract)
-        n           = self._n_contracts(sl_dist, quanto)
-        entry_size  =  n if direction == "long" else -n   # positive=buy, negative=sell
-        close_size  = -n if direction == "long" else  n   # opposite to close
+        quanto     = self._get_quanto_multiplier(contract)
+        n          = self._n_contracts(sl_dist, quanto)
+        entry_size =  n if direction == "long" else -n   # positive=buy, negative=sell
+        close_size = -n if direction == "long" else  n   # opposite direction to close
 
         result = {}
         try:
             self._set_leverage(contract)
 
-            # ── Entry (market) ─────────────────────────────────────────
+            # ── Entry (market) ──────────────────────────────────────────
             entry_order = self._api.create_futures_order(
                 self._settle,
                 FuturesOrder(contract=contract, size=entry_size, price="0", tif="ioc")
@@ -143,12 +138,12 @@ class GateExecutor:
             logger.info(f"[GATE] TP3 limit @ {tp3} | id={result['tp_order_id']}")
 
             # ── SL price-triggered stop-market (reduce-only) ────────────
-            # rule=2: trigger when last price <= stop (for longs, SL below entry)
-            # rule=1: trigger when last price >= stop (for shorts, SL above entry)
+            # Long SL: trigger when last_price <= sl  → rule=2
+            # Short SL: trigger when last_price >= sl → rule=1
             trigger_rule = 2 if direction == "long" else 1
             sl_order = self._api.create_price_triggered_order(
                 self._settle,
-                FuturesPriceOrder(
+                FuturesPriceTriggeredOrder(
                     trigger=FuturesPriceTrigger(
                         strategy_type=0,   # 0 = by price
                         price_type=0,      # 0 = last price
@@ -156,9 +151,12 @@ class GateExecutor:
                         rule=trigger_rule,
                         expiration=604800  # 7 days
                     ),
-                    initial=FuturesOrder(
-                        contract=contract, size=close_size,
-                        price="0", tif="ioc", reduce_only=True
+                    initial=FuturesInitialOrder(
+                        contract=contract,
+                        size=close_size,
+                        price="0",
+                        tif="ioc",
+                        reduce_only=True
                     )
                 )
             )
@@ -177,11 +175,11 @@ class GateExecutor:
     def move_sl_to_breakeven(self, symbol: str, direction: str,
                               size: float, entry_price: float,
                               old_sl_order_id: str) -> str:
-        """Cancel old SL price-triggered order, place new one at entry (break-even)."""
+        """Cancel old SL, place new price-triggered order at entry (break-even)."""
         if not self.enabled:
             return ""
 
-        from gate_api import FuturesPriceOrder, FuturesPriceTrigger, FuturesOrder
+        from gate_api import FuturesPriceTriggeredOrder, FuturesPriceTrigger, FuturesInitialOrder
 
         contract   = self._to_contract(symbol)
         close_size = -round(size) if direction == "long" else round(size)
@@ -194,21 +192,24 @@ class GateExecutor:
             except Exception as e:
                 logger.warning(f"[GATE] Cancel SL failed ({old_sl_order_id}): {e}")
 
-        # Place new SL at entry price (break-even)
+        # New SL at entry price (break-even)
         try:
             trigger_rule = 2 if direction == "long" else 1
             new_sl = self._api.create_price_triggered_order(
                 self._settle,
-                FuturesPriceOrder(
+                FuturesPriceTriggeredOrder(
                     trigger=FuturesPriceTrigger(
                         strategy_type=0, price_type=0,
                         price=str(entry_price),
                         rule=trigger_rule,
                         expiration=604800
                     ),
-                    initial=FuturesOrder(
-                        contract=contract, size=close_size,
-                        price="0", tif="ioc", reduce_only=True
+                    initial=FuturesInitialOrder(
+                        contract=contract,
+                        size=close_size,
+                        price="0",
+                        tif="ioc",
+                        reduce_only=True
                     )
                 )
             )
