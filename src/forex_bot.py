@@ -119,6 +119,9 @@ class ForexBot:
 
         self._last_alert: dict[tuple, datetime] = {}
         self._paper_positions: dict[str, Position] = {}
+        self._max_paper_positions = 10
+        self._paper_paused = False
+        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0}
         self._daily_alerts: list[dict] = []
         self._paper_trades: list[dict] = []
         self._last_summary_date: Optional[date] = None
@@ -145,6 +148,15 @@ class ForexBot:
     def _paper_open(self, sig: dict):
         pair = sig["symbol"]
         if pair in self._paper_positions:
+            return
+
+        if len(self._paper_positions) >= self._max_paper_positions and not self._paper_paused:
+            self._paper_paused = True
+            self.notifier.send(
+                f"⏸️ <b>Paper Trading Paused</b>\n"
+                f"10 positions open — waiting until ≤1 remains before new entries."
+            )
+        if self._paper_paused:
             return
         sl_dist = abs(sig["entry"] - sig["sl"])
         if sl_dist == 0:
@@ -190,20 +202,41 @@ class ForexBot:
                 pos.closed_pnl += pnl
                 self.paper_balance += pos.margin_locked + pnl
                 tp_level = action.get("tp_level", 0)
-                open_count = len(self._paper_positions) - 1
+                close_reason = action.get("reason", "")
+
+                if tp_level == 3:
+                    self._trade_stats["tp3"] += 1
+                    result = "tp3"
+                elif close_reason == "SL hit" and pos.be_activated:
+                    self._trade_stats["be_sl"] += 1
+                    result = "be_sl"
+                elif close_reason == "SL hit":
+                    self._trade_stats["sl"] += 1
+                    result = "sl"
+                else:
+                    result = "other"
+                self._trade_stats["total"] += 1
+
+                del self._paper_positions[pair]
+                open_count = len(self._paper_positions)
+
+                if self._paper_paused and open_count <= 1:
+                    self._paper_paused = False
+                    self.notifier.send(
+                        f"▶️ <b>Paper Trading Resumed</b>\n"
+                        f"Open positions back to {open_count} — accepting new entries."
+                    )
+
                 logger.info(
-                    f"[PAPER-FX] CLOSED {pair} | {action.get('reason', '')} "
+                    f"[PAPER-FX] CLOSED {pair} | {close_reason} "
                     f"@ {price:.5f} | PnL={pos.closed_pnl:+.2f} | Balance=${self.paper_balance:.2f} | Open: {open_count}"
                 )
-                self.notifier.paper_closed(pos, action.get("reason", ""), price,
-                                           pos.closed_pnl, self.paper_balance, tp_level)
+                self.notifier.paper_closed(pos, close_reason, price,
+                                           pos.closed_pnl, self.paper_balance, tp_level, self._trade_stats)
                 self._paper_trades.append({
                     "symbol": pair, "direction": pos.direction,
-                    "pnl": pos.closed_pnl,
-                    "result": "win" if pos.closed_pnl > 0 else "loss",
-                    "tp_level": tp_level,
+                    "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
                 })
-                del self._paper_positions[pair]
                 return
             elif act == "close_partial":
                 pct  = action["pct"]

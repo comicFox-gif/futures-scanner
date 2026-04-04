@@ -333,20 +333,41 @@ class Notifier:
         )
 
     def paper_closed(self, pos, reason: str, exit_price: float,
-                     total_pnl: float, balance: float, tp_level: int = 0):
-        emoji = "🏆" if tp_level == 3 else ("✅" if total_pnl >= 0 else "🛑")
-        pct   = (exit_price - pos.entry_price) / pos.entry_price * 100
+                     total_pnl: float, balance: float, tp_level: int = 0,
+                     stats: dict | None = None):
+        if tp_level == 3:
+            emoji = "🏆"
+        elif reason == "SL hit" and pos.be_activated:
+            emoji = "🔒"   # BE-SL: break-even stop hit
+        elif reason == "SL hit":
+            emoji = "🛑"
+        else:
+            emoji = "✅"
+        pct = (exit_price - pos.entry_price) / pos.entry_price * 100
         if pos.direction == "short":
             pct = -pct
+
+        stats_line = ""
+        if stats:
+            total = stats["total"]
+            stats_line = (
+                f"\n{DLINE}\n"
+                f"📊 <b>Trade Stats</b> ({total} closed)\n"
+                f"🛑 SL:    <code>{stats['sl']}</code>\n"
+                f"🏆 TP3:   <code>{stats['tp3']}</code>\n"
+                f"🔒 BE-SL: <code>{stats['be_sl']}</code>"
+            )
+
         self.send(
             f"{emoji} <b>[PAPER] Closed — {pos.symbol}</b>\n"
             f"{DLINE}\n"
             f"Reason:    {reason}\n"
-            f"Entry:     <code>{pos.entry_price:.4f}</code>\n"
-            f"Exit:      <code>{exit_price:.4f}</code>  ({pct:+.2f}%)\n"
+            f"Entry:     <code>{pos.entry_price:.5f}</code>\n"
+            f"Exit:      <code>{exit_price:.5f}</code>  ({pct:+.2f}%)\n"
             f"Total PnL: <code>{total_pnl:+.2f} USDT</code>\n"
             f"{DLINE}\n"
-            f"Balance: <code>{balance:.2f} USDT</code>"
+            f"Balance: <code>${balance:.2f}</code>"
+            f"{stats_line}"
         )
 
     # ------------------------------------------------------------------
