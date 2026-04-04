@@ -38,7 +38,7 @@
     "atr_sl_multiplier": 1.5,
     "volume_sma_period": 20,
     "volume_filter_multiplier": 1.2,
-    "lookback_candles": 300
+    "lookback_candles": 600
   },
 
   "paper_trading": {
