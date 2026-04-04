@@ -83,6 +83,7 @@ class Bot:
         self._daily_alerts: list[dict] = []
         self._paper_trades: list[dict] = []   # closed paper trades for daily summary
         self._last_summary_date: Optional[date] = None
+        self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
 
     # ------------------------------------------------------------------
@@ -159,6 +160,8 @@ class Bot:
         if size <= 0:
             return
 
+        self.paper_balance -= risk_amount   # lock margin immediately
+
         pos = Position(
             symbol=signal.symbol,
             direction=signal.direction,
@@ -169,17 +172,18 @@ class Bot:
             tp3=signal.tp3,
             size=size,
             size_remaining=size,
+            margin_locked=risk_amount,
         )
         self._paper_positions[signal.symbol] = pos
 
         sl_pct = sl_dist / signal.entry_price * 100
+        open_count = len(self._paper_positions)
         logger.info(
             f"[PAPER] OPENED {signal.direction.upper()} {signal.symbol} "
-            f"@ {signal.entry_price:.4f} | Size={size:.4f} | "
-            f"SL={signal.stop_loss:.4f} (-{sl_pct:.2f}%) | "
-            f"TP1={signal.tp1:.4f} | TP2={signal.tp2:.4f} | TP3={signal.tp3:.4f}"
+            f"@ {signal.entry_price:.4f} | Risk=${risk_amount:.2f} | Size={size:.4f} | "
+            f"SL={signal.stop_loss:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f}"
         )
-        self.notifier.paper_opened(pos, self.paper_balance)
+        self.notifier.paper_opened(pos, self.paper_balance, open_count)
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""
@@ -198,13 +202,15 @@ class Bot:
             if act == "close_all":
                 pnl = self._calc_pnl(pos, current_price, pos.size_remaining)
                 pos.closed_pnl += pnl
-                self.paper_balance += pnl
+                # Return locked margin + final PnL (partial PnL already added at TP1/TP2)
+                self.paper_balance += pos.margin_locked + pnl
                 tp_level = action.get("tp_level", 0)
+                open_count = len(self._paper_positions) - 1
 
                 logger.info(
                     f"[PAPER] CLOSED {symbol} | {reason} "
-                    f"@ {current_price:.4f} | PnL={pnl:+.2f} | "
-                    f"Balance={self.paper_balance:.2f}"
+                    f"@ {current_price:.4f} | PnL={pos.closed_pnl:+.2f} | "
+                    f"Balance=${self.paper_balance:.2f} | Open positions: {open_count}"
                 )
                 self.notifier.paper_closed(pos, reason, current_price, pos.closed_pnl, self.paper_balance, tp_level)
                 self._paper_trades.append({
@@ -502,6 +508,16 @@ class Bot:
         logger.info(f"    Pairs: {' | '.join(s.split('/')[0] for s in symbols)}")
 
         self._maybe_send_daily_summary()
+        self._maybe_send_positions_report()
+
+    def _maybe_send_positions_report(self):
+        """Send open positions summary to Telegram every 60 minutes."""
+        if not self.paper_enabled:
+            return
+        if (datetime.utcnow() - self._last_positions_report).total_seconds() < 3600:
+            return
+        self._last_positions_report = datetime.utcnow()
+        self.notifier.paper_positions_update(self._paper_positions, self.paper_balance, self.paper_start_balance)
 
     # ------------------------------------------------------------------
     # Run

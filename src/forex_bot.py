@@ -121,6 +121,7 @@ class ForexBot:
         self._daily_alerts: list[dict] = []
         self._paper_trades: list[dict] = []
         self._last_summary_date: Optional[date] = None
+        self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
 
     # ------------------------------------------------------------------
@@ -147,9 +148,13 @@ class ForexBot:
         sl_dist = abs(sig["entry"] - sig["sl"])
         if sl_dist == 0:
             return
-        size = round(self.paper_balance * self.paper_risk_pct / sl_dist, 6)
+        risk_amount = self.paper_balance * self.paper_risk_pct
+        size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
+
+        self.paper_balance -= risk_amount   # lock margin immediately
+
         pos = Position(
             symbol=pair,
             direction=sig["direction"],
@@ -160,16 +165,17 @@ class ForexBot:
             tp3=sig["tp3"],
             size=size,
             size_remaining=size,
+            margin_locked=risk_amount,
         )
         self._paper_positions[pair] = pos
         sl_pct = sl_dist / sig["entry"] * 100
+        open_count = len(self._paper_positions)
         logger.info(
             f"[PAPER-FX] OPENED {sig['direction'].upper()} {pair} "
-            f"@ {sig['entry']:.5f} | Size={size:.6f} | "
-            f"SL={sig['sl']:.5f} (-{sl_pct:.2f}%) | "
-            f"TP3={sig['tp3']:.5f}"
+            f"@ {sig['entry']:.5f} | Risk=${risk_amount:.2f} | Size={size:.6f} | "
+            f"SL={sig['sl']:.5f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f}"
         )
-        self.notifier.paper_opened(pos, self.paper_balance)
+        self.notifier.paper_opened(pos, self.paper_balance, open_count)
 
     def _paper_tick(self, pair: str, price: float):
         pos = self._paper_positions.get(pair)
@@ -181,11 +187,12 @@ class ForexBot:
             if act == "close_all":
                 pnl = self._pnl(pos, price, pos.size_remaining)
                 pos.closed_pnl += pnl
-                self.paper_balance += pnl
+                self.paper_balance += pos.margin_locked + pnl
                 tp_level = action.get("tp_level", 0)
+                open_count = len(self._paper_positions) - 1
                 logger.info(
                     f"[PAPER-FX] CLOSED {pair} | {action.get('reason', '')} "
-                    f"@ {price:.5f} | PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
+                    f"@ {price:.5f} | PnL={pos.closed_pnl:+.2f} | Balance=${self.paper_balance:.2f} | Open: {open_count}"
                 )
                 self.notifier.paper_closed(pos, action.get("reason", ""), price,
                                            pos.closed_pnl, self.paper_balance, tp_level)
@@ -433,6 +440,16 @@ class ForexBot:
         if signals_found == 0:
             logger.info("No signals this tick")
         self._maybe_daily_summary()
+        self._maybe_send_positions_report()
+
+    def _maybe_send_positions_report(self):
+        """Send open positions summary to Telegram every 60 minutes."""
+        if not self.paper_enabled:
+            return
+        if (datetime.utcnow() - self._last_positions_report).total_seconds() < 3600:
+            return
+        self._last_positions_report = datetime.utcnow()
+        self.notifier.paper_positions_update(self._paper_positions, self.paper_balance, self.paper_start_bal)
 
     # ------------------------------------------------------------------
     # Run loop

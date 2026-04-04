@@ -56,6 +56,7 @@ class Position:
     tp3: float
     size: float             # units
     size_remaining: float
+    margin_locked: float = 0.0  # capital reserved for this trade (returned on close)
     tp1_hit: bool = False
     tp2_hit: bool = False
     tp3_hit: bool = False

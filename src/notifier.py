@@ -298,21 +298,23 @@ class Notifier:
     # Paper trading alerts
     # ------------------------------------------------------------------
 
-    def paper_opened(self, pos, balance: float):
-        dir_tag = self._dir_tag(pos.direction)
-        sl_pct  = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
+    def paper_opened(self, pos, available_balance: float, open_count: int = 1):
+        dir_tag  = self._dir_tag(pos.direction)
+        sl_pct   = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
+        risk_amt = pos.margin_locked
         self.send(
-            f"📄 <b>Paper Trade Opened — {pos.symbol}</b>\n"
+            f"📄 <b>Paper Trade Opened</b>\n"
             f"{DLINE}\n"
-            f"Direction: {dir_tag}\n"
-            f"Entry:  <code>{pos.entry_price:.4f}</code>\n"
-            f"Size:   <code>{pos.size:.4f}</code>\n"
-            f"SL:     <code>{pos.stop_loss:.4f}</code>  (-{sl_pct:.2f}%)\n"
-            f"TP1:    <code>{pos.tp1:.4f}</code>\n"
-            f"TP2:    <code>{pos.tp2:.4f}</code>\n"
-            f"TP3:    <code>{pos.tp3:.4f}</code>\n"
+            f"{dir_tag}  •  <b>{pos.symbol}</b>\n"
+            f"Entry:  <code>{pos.entry_price:.5f}</code>\n"
+            f"🛑 SL:  <code>{pos.stop_loss:.5f}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 TP1: <code>{pos.tp1:.5f}</code>\n"
+            f"🎯 TP2: <code>{pos.tp2:.5f}</code>\n"
+            f"🏆 TP3: <code>{pos.tp3:.5f}</code>\n"
             f"{DLINE}\n"
-            f"Balance: <code>{balance:.2f} USDT</code>"
+            f"Risk locked: <code>${risk_amt:.2f}</code>\n"
+            f"Available:   <code>${available_balance:.2f}</code>\n"
+            f"Open trades: <code>{open_count}</code>"
         )
 
     def paper_tp_hit(self, pos, tp_level: int, price: float, pnl: float, balance: float):
@@ -345,6 +347,38 @@ class Notifier:
             f"Total PnL: <code>{total_pnl:+.2f} USDT</code>\n"
             f"{DLINE}\n"
             f"Balance: <code>{balance:.2f} USDT</code>"
+        )
+
+    # ------------------------------------------------------------------
+    # Open positions status (hourly)
+    # ------------------------------------------------------------------
+
+    def paper_positions_update(self, positions: dict, balance: float, start_balance: float):
+        pct   = (balance - start_balance) / start_balance * 100
+        emoji = "📈" if balance >= start_balance else "📉"
+        if not positions:
+            self.send(
+                f"📊 <b>Paper Status</b>\n"
+                f"{DLINE}\n"
+                f"No open positions\n"
+                f"{emoji} Available: <code>${balance:.2f}</code>  ({pct:+.1f}%)"
+            )
+            return
+        lines = []
+        for sym, pos in positions.items():
+            d  = "🟢" if pos.direction == "long" else "🔴"
+            tp = "✅TP1" if pos.tp1_hit else ""
+            tp += " ✅TP2" if pos.tp2_hit else ""
+            be = " 🔒BE" if pos.be_activated else ""
+            lines.append(f"{d} <b>{sym}</b> @ <code>{pos.entry_price:.5f}</code>{tp}{be}")
+        self.send(
+            f"📊 <b>Paper Positions Update</b>\n"
+            f"{DLINE}\n"
+            f"Open: <b>{len(positions)}</b>\n"
+            + "\n".join(lines) +
+            f"\n{DLINE}\n"
+            f"{emoji} Available: <code>${balance:.2f}</code>  ({pct:+.1f}%)\n"
+            f"<i>{datetime.utcnow().strftime('%H:%M UTC')}</i>"
         )
 
     # ------------------------------------------------------------------
