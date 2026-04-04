@@ -638,7 +638,7 @@ class Bot:
     def run(self):
         self._running = True
         paper_note = (
-            f" | Paper: ON (balance={self.paper_balance:.0f} USDT, risk={self.paper_risk_pct*100:.1f}%)"
+            f" | Paper: ON (balance={self.paper_balance:.0f} USDT, risk=${self.paper_risk_fixed:.0f} fixed)"
             if self.paper_enabled else " | Paper: OFF"
         )
         dp_cfg    = self.cfg.get("dynamic_pairs", {})
