@@ -17,7 +17,7 @@ import traceback
 
 logger = logging.getLogger("futures_bot.gate")
 
-TESTNET_HOST = "https://api-testnet.gateio.io/api/v4"
+TESTNET_HOST = "https://fx-api-testnet.gateio.ws/api/v4"
 LIVE_HOST    = "https://api.gateio.ws/api/v4"
 
 
