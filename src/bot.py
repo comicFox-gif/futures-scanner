@@ -85,7 +85,11 @@ class Bot:
         self._paper_paused = False
 
         # Lifetime trade stats
-        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0}
+        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+
+        # Batch tracking (resets each cycle of 10 positions)
+        self._batch_trades: list[dict] = []
+        self._batch_start_balance: float = self.paper_balance
 
         # Stats
         self._daily_alerts: list[dict] = []
@@ -158,6 +162,10 @@ class Bot:
         if signal.symbol in self._paper_positions:
             logger.debug(f"[PAPER] Already in position for {signal.symbol}, skipping")
             return
+
+        # Record balance at start of each fresh batch
+        if len(self._paper_positions) == 0:
+            self._batch_start_balance = self.paper_balance
 
         # Cap at 10 open positions; resume only when count drops to ≤1
         if len(self._paper_positions) >= self._max_paper_positions and not self._paper_paused:
@@ -237,16 +245,21 @@ class Bot:
                 else:
                     result = "other"
                 self._trade_stats["total"] += 1
+                if pos.closed_pnl > 0:
+                    self._trade_stats["wins"] += 1
+
+                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result})
 
                 del self._paper_positions[symbol]
                 open_count = len(self._paper_positions)
 
-                # Resume if paused and slots are available again
+                # When 9 closed (1 remaining) send batch summary then resume
                 if self._paper_paused and open_count <= 1:
+                    self._send_batch_summary()
                     self._paper_paused = False
                     self.notifier.send(
                         f"▶️ <b>Paper Trading Resumed</b>\n"
-                        f"Open positions back to {open_count} — accepting new entries."
+                        f"Open positions: {open_count} — accepting new entries."
                     )
 
                 logger.info(
@@ -565,6 +578,23 @@ class Bot:
 
         self._maybe_send_daily_summary()
         self._maybe_send_positions_report()
+
+    def _send_batch_summary(self):
+        trades = self._batch_trades
+        if not trades:
+            return
+        wins     = [t for t in trades if t["pnl"] > 0]
+        losses   = [t for t in trades if t["pnl"] <= 0]
+        total_pnl = sum(t["pnl"] for t in trades)
+        win_pct  = len(wins) / len(trades) * 100
+        self.notifier.paper_batch_summary(
+            total=len(trades), wins=len(wins), losses=len(losses),
+            total_pnl=total_pnl, win_pct=win_pct,
+            start_balance=self._batch_start_balance,
+            current_balance=self.paper_balance,
+            stats=self._trade_stats,
+        )
+        self._batch_trades = []   # reset for next batch
 
     def _maybe_send_positions_report(self):
         """Send open positions summary to Telegram every 60 minutes."""

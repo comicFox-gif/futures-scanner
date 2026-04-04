@@ -348,13 +348,13 @@ class Notifier:
             pct = -pct
 
         stats_line = ""
-        if stats:
-            total = stats["total"]
+        if stats and stats["total"] > 0:
+            win_pct = stats["wins"] / stats["total"] * 100
             stats_line = (
                 f"\n{DLINE}\n"
-                f"📊 <b>Trade Stats</b> ({total} closed)\n"
-                f"🛑 SL:    <code>{stats['sl']}</code>\n"
-                f"🏆 TP3:   <code>{stats['tp3']}</code>\n"
+                f"📊 <b>All-time</b> ({stats['total']} trades)  Win: <code>{win_pct:.0f}%</code>\n"
+                f"🏆 TP3: <code>{stats['tp3']}</code>  "
+                f"🛑 SL: <code>{stats['sl']}</code>  "
                 f"🔒 BE-SL: <code>{stats['be_sl']}</code>"
             )
 
@@ -368,6 +368,37 @@ class Notifier:
             f"{DLINE}\n"
             f"Balance: <code>${balance:.2f}</code>"
             f"{stats_line}"
+        )
+
+    # ------------------------------------------------------------------
+    # Batch summary (fires after 9/10 positions close, before resume)
+    # ------------------------------------------------------------------
+
+    def paper_batch_summary(self, total: int, wins: int, losses: int,
+                             total_pnl: float, win_pct: float,
+                             start_balance: float, current_balance: float,
+                             stats: dict):
+        pnl_emoji  = "📈" if total_pnl >= 0 else "📉"
+        bal_change = current_balance - start_balance
+        all_win_pct = stats["wins"] / stats["total"] * 100 if stats["total"] > 0 else 0
+        self.send(
+            f"📋 <b>Batch Report — {total} Trades</b>\n"
+            f"{LINE}\n"
+            f"✅ Wins:   <code>{wins}</code>\n"
+            f"❌ Losses: <code>{losses}</code>\n"
+            f"🎯 Win Rate: <code>{win_pct:.0f}%</code>\n"
+            f"{DLINE}\n"
+            f"🏆 TP3:   <code>{stats['tp3']}</code>  "
+            f"🛑 SL: <code>{stats['sl']}</code>  "
+            f"🔒 BE-SL: <code>{stats['be_sl']}</code>\n"
+            f"{DLINE}\n"
+            f"{pnl_emoji} Batch PnL:  <code>{total_pnl:+.2f} USDT</code>\n"
+            f"💰 Balance:  <code>${current_balance:.2f}</code>  "
+            f"({bal_change:+.2f} this batch)\n"
+            f"{DLINE}\n"
+            f"📊 All-time win rate: <code>{all_win_pct:.0f}%</code>  "
+            f"({stats['total']} total trades)\n"
+            f"<i>New entries starting now...</i>"
         )
 
     # ------------------------------------------------------------------

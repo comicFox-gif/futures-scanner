@@ -124,7 +124,9 @@ class ForexBot:
         self._paper_positions: dict[str, Position] = {}
         self._max_paper_positions = 10
         self._paper_paused = False
-        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0}
+        self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+        self._batch_trades: list[dict] = []
+        self._batch_start_balance: float = self.paper_balance
         self._daily_alerts: list[dict] = []
         self._paper_trades: list[dict] = []
         self._last_summary_date: Optional[date] = None
@@ -152,6 +154,9 @@ class ForexBot:
         pair = sig["symbol"]
         if pair in self._paper_positions:
             return
+
+        if len(self._paper_positions) == 0:
+            self._batch_start_balance = self.paper_balance
 
         if len(self._paper_positions) >= self._max_paper_positions and not self._paper_paused:
             self._paper_paused = True
@@ -219,15 +224,20 @@ class ForexBot:
                 else:
                     result = "other"
                 self._trade_stats["total"] += 1
+                if pos.closed_pnl > 0:
+                    self._trade_stats["wins"] += 1
+
+                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result})
 
                 del self._paper_positions[pair]
                 open_count = len(self._paper_positions)
 
                 if self._paper_paused and open_count <= 1:
+                    self._send_batch_summary()
                     self._paper_paused = False
                     self.notifier.send(
                         f"▶️ <b>Paper Trading Resumed</b>\n"
-                        f"Open positions back to {open_count} — accepting new entries."
+                        f"Open positions: {open_count} — accepting new entries."
                     )
 
                 logger.info(
@@ -478,6 +488,23 @@ class ForexBot:
             logger.info("No signals this tick")
         self._maybe_daily_summary()
         self._maybe_send_positions_report()
+
+    def _send_batch_summary(self):
+        trades = self._batch_trades
+        if not trades:
+            return
+        wins      = [t for t in trades if t["pnl"] > 0]
+        losses    = [t for t in trades if t["pnl"] <= 0]
+        total_pnl = sum(t["pnl"] for t in trades)
+        win_pct   = len(wins) / len(trades) * 100
+        self.notifier.paper_batch_summary(
+            total=len(trades), wins=len(wins), losses=len(losses),
+            total_pnl=total_pnl, win_pct=win_pct,
+            start_balance=self._batch_start_balance,
+            current_balance=self.paper_balance,
+            stats=self._trade_stats,
+        )
+        self._batch_trades = []
 
     def _maybe_send_positions_report(self):
         """Send open positions summary to Telegram every 60 minutes."""
