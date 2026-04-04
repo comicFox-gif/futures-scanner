@@ -109,6 +109,7 @@ class ForexBot:
         self.paper_risk_pct    = paper_cfg.get("risk_per_trade_pct", 1.0) / 100.0
         self.paper_start_bal   = self.paper_balance
 
+        self.alerts_enabled = cfg.get("alerts_enabled", True)
         self.ema_strategy = ForexEmaTrendStrategy(cfg)
         self.lb_strategy  = LondonBreakoutStrategy(cfg)
         self.ob_strategy  = OrderBlockStrategy(cfg)
@@ -116,6 +117,8 @@ class ForexBot:
         self.rd_strategy  = RSIDivergenceStrategy(cfg)
         self.rm_strategy  = RSIMACDReversalStrategy(cfg)
         self.notifier     = Notifier(channel_name=cfg.get("channel_name", ""))
+        if not self.alerts_enabled:
+            self.notifier.enabled = False   # suppress all Telegram output
 
         self._last_alert: dict[tuple, datetime] = {}
         self._paper_positions: dict[str, Position] = {}
@@ -361,7 +364,7 @@ class ForexBot:
                             f"[EMA {stage_label}] {sig['direction'].upper()} {pair} "
                             f"@ {sig['entry']:.5f} | RSI={sig['rsi']:.1f} | {sig['reason']}"
                         )
-                        if sig["stage"] == 2:
+                        if sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(sig, "FX EMA Trend")
                             if self.paper_enabled:
                                 self._paper_open(sig)
@@ -381,7 +384,7 @@ class ForexBot:
                             f"@ {lb_sig['entry']:.5f} | Range={lb_sig.get('range_pips', 0):.0f} pips | "
                             f"{lb_sig['reason']}"
                         )
-                        if lb_sig["stage"] == 2:
+                        if lb_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.lb_confirmed_signal(lb_sig)
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(lb_sig)
@@ -400,7 +403,7 @@ class ForexBot:
                             f"[OB {stage_label}] {ob_sig['direction'].upper()} {pair} "
                             f"@ {ob_sig['entry']:.5f} | {ob_sig['reason']}"
                         )
-                        if ob_sig["stage"] == 2:
+                        if ob_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(ob_sig)
@@ -419,7 +422,7 @@ class ForexBot:
                             f"[TL {stage_label}] {tl_sig['direction'].upper()} {pair} "
                             f"@ {tl_sig['entry']:.5f} | {tl_sig['reason']}"
                         )
-                        if tl_sig["stage"] == 2:
+                        if tl_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(tl_sig)
@@ -438,7 +441,7 @@ class ForexBot:
                             f"[DIV {stage_label}] {rd_sig['direction'].upper()} {pair} "
                             f"@ {rd_sig['entry']:.5f} | {rd_sig['reason']}"
                         )
-                        if rd_sig["stage"] == 2:
+                        if rd_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rd_sig)
@@ -457,7 +460,7 @@ class ForexBot:
                             f"[RM {stage_label}] {rm_sig['direction'].upper()} {pair} "
                             f"@ {rm_sig['entry']:.5f} | RSI={rm_sig['rsi']:.1f} | {rm_sig['reason']}"
                         )
-                        if rm_sig["stage"] == 2:
+                        if rm_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(rm_sig)

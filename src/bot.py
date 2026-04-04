@@ -393,7 +393,7 @@ class Bot:
                             f"[EMA {stage_label}] {signal.direction.upper()} {symbol} "
                             f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | {signal.reason}"
                         )
-                        if signal.stage == 2:
+                        if signal.stage == 2 and not self._paper_paused:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal)
@@ -415,7 +415,7 @@ class Bot:
                             f"@ {sr_sig['entry']:.4f} | Lvl={sr_sig['level_price']:.4f} "
                             f"({sr_sig['level_touches']} touches) | {sr_sig['reason']}"
                         )
-                        if sr_sig["stage"] == 2:
+                        if sr_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.sr_confirmed_signal(sr_sig)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 # Build a Signal-compatible object for paper trading
@@ -445,7 +445,7 @@ class Bot:
                             f"[OB {stage_label}] {ob_sig['direction'].upper()} {symbol} "
                             f"@ {ob_sig['entry']:.4f} | {ob_sig['reason']}"
                         )
-                        if ob_sig["stage"] == 2:
+                        if ob_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -470,7 +470,7 @@ class Bot:
                             f"[TL {stage_label}] {tl_sig['direction'].upper()} {symbol} "
                             f"@ {tl_sig['entry']:.4f} | {tl_sig['reason']}"
                         )
-                        if tl_sig["stage"] == 2:
+                        if tl_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -495,7 +495,7 @@ class Bot:
                             f"[DIV {stage_label}] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | {rd_sig['reason']}"
                         )
-                        if rd_sig["stage"] == 2:
+                        if rd_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -520,7 +520,7 @@ class Bot:
                             f"[RM {stage_label}] {rm_sig['direction'].upper()} {symbol} "
                             f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | {rm_sig['reason']}"
                         )
-                        if rm_sig["stage"] == 2:
+                        if rm_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
