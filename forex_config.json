@@ -1,6 +1,6 @@
 {
   "channel_name": "",
-  "mode": "swing",
+  "mode": "scalp",
 
   "dynamic_pairs": {
     "top_n": 80,
@@ -13,9 +13,9 @@
     "GBPCAD", "EURCAD", "CHFJPY", "NZDJPY", "AUDCAD", "AUDCHF"
   ],
 
-  "timeframe_htf":   "4h",
-  "timeframe_trend": "1h",
-  "timeframe_entry": "15m",
+  "timeframe_htf":   "1h",
+  "timeframe_trend": "15m",
+  "timeframe_entry": "5m",
 
   "strategy": {
     "ema_fast": 9,

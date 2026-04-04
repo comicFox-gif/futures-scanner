@@ -1,8 +1,8 @@
 {
   "exchange": "okx",
   "channel_name": "",
-  "mode": "swing",
-  "timeframe_sr": "4h",
+  "mode": "scalp",
+  "timeframe_sr": "1h",
 
   "dynamic_pairs": {
     "enabled": true,
@@ -18,8 +18,8 @@
     "BNB/USDT:USDT",
     "XRP/USDT:USDT"
   ],
-  "timeframe_trend": "1h",
-  "timeframe_entry": "15m",
+  "timeframe_trend": "15m",
+  "timeframe_entry": "5m",
 
   "strategy": {
     "ema_fast": 9,
