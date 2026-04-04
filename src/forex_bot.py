@@ -54,13 +54,12 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
             return actions
         if not pos.tp2_hit and current_price >= pos.tp2:
             actions.append({"action": "close_partial", "pct": tp2_pct, "tp_level": 2})
-            actions.append({"action": "move_sl", "new_sl": pos.tp1})
+            actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
             pos.tp2_hit = True
+            pos.be_activated = True
         elif not pos.tp1_hit and current_price >= pos.tp1:
             actions.append({"action": "close_partial", "pct": tp1_pct, "tp_level": 1})
-            actions.append({"action": "move_sl", "new_sl": pos.entry_price})
             pos.tp1_hit = True
-            pos.be_activated = True
     else:
         if current_price >= pos.stop_loss:
             actions.append({"action": "close_all", "reason": "SL hit"})
@@ -71,13 +70,12 @@ def _check_position(pos: Position, current_price: float) -> list[dict]:
             return actions
         if not pos.tp2_hit and current_price <= pos.tp2:
             actions.append({"action": "close_partial", "pct": tp2_pct, "tp_level": 2})
-            actions.append({"action": "move_sl", "new_sl": pos.tp1})
+            actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
             pos.tp2_hit = True
+            pos.be_activated = True
         elif not pos.tp1_hit and current_price <= pos.tp1:
             actions.append({"action": "close_partial", "pct": tp1_pct, "tp_level": 1})
-            actions.append({"action": "move_sl", "new_sl": pos.entry_price})
             pos.tp1_hit = True
-            pos.be_activated = True
 
     return actions
 
@@ -106,7 +104,7 @@ class ForexBot:
         paper_cfg = cfg.get("paper_trading", {})
         self.paper_enabled     = paper_cfg.get("enabled", False)
         self.paper_balance     = paper_cfg.get("balance", 1000.0)
-        self.paper_risk_pct    = paper_cfg.get("risk_per_trade_pct", 1.0) / 100.0
+        self.paper_risk_fixed  = paper_cfg.get("risk_fixed_usdt", 20.0)  # fixed $20 per trade
         self.paper_start_bal   = self.paper_balance
 
         self.alerts_enabled = cfg.get("alerts_enabled", True)
@@ -125,6 +123,7 @@ class ForexBot:
         self._max_paper_positions = 10
         self._paper_paused = False
         self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+        self._strategy_stats: dict[str, dict] = {}
         self._batch_trades: list[dict] = []
         self._batch_start_balance: float = self.paper_balance
         self._daily_alerts: list[dict] = []
@@ -150,7 +149,7 @@ class ForexBot:
     # Paper trading
     # ------------------------------------------------------------------
 
-    def _paper_open(self, sig: dict):
+    def _paper_open(self, sig: dict, strategy_name: str = ""):
         pair = sig["symbol"]
         if pair in self._paper_positions:
             return
@@ -169,7 +168,9 @@ class ForexBot:
         sl_dist = abs(sig["entry"] - sig["sl"])
         if sl_dist == 0:
             return
-        risk_amount = self.paper_balance * self.paper_risk_pct
+
+        # Fixed $20 risk per trade regardless of balance
+        risk_amount = self.paper_risk_fixed
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -187,6 +188,7 @@ class ForexBot:
             size=size,
             size_remaining=size,
             margin_locked=risk_amount,
+            strategy_name=strategy_name,
         )
         self._paper_positions[pair] = pos
         sl_pct = sl_dist / sig["entry"] * 100
@@ -227,7 +229,18 @@ class ForexBot:
                 if pos.closed_pnl > 0:
                     self._trade_stats["wins"] += 1
 
-                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result})
+                # Per-strategy stats
+                sn = pos.strategy_name or "Unknown"
+                if sn not in self._strategy_stats:
+                    self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+                ss = self._strategy_stats[sn]
+                ss["total"] += 1
+                if result == "tp3":       ss["tp3"]   += 1
+                elif result == "be_sl":   ss["be_sl"] += 1
+                elif result == "sl":      ss["sl"]    += 1
+                if pos.closed_pnl > 0:    ss["wins"]  += 1
+
+                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
 
                 del self._paper_positions[pair]
                 open_count = len(self._paper_positions)
@@ -259,6 +272,13 @@ class ForexBot:
                 pos.size_remaining -= size
                 pos.closed_pnl     += pnl
                 self.paper_balance += pnl
+
+                if tp_l == 2:
+                    sn = pos.strategy_name or "Unknown"
+                    if sn not in self._strategy_stats:
+                        self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+                    self._strategy_stats[sn]["tp2"] += 1
+
                 logger.info(
                     f"[PAPER-FX] TP{tp_l} {pair} | {pct*100:.0f}% closed "
                     f"@ {price:.5f} | PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
@@ -377,7 +397,7 @@ class ForexBot:
                         if sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(sig, "FX EMA Trend")
                             if self.paper_enabled:
-                                self._paper_open(sig)
+                                self._paper_open(sig, "FX EMA Trend")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(sig, "FX EMA Trend")
                         self._mark_sent(pair, sig["direction"] + "_ema", sig["stage"])
@@ -397,7 +417,7 @@ class ForexBot:
                         if lb_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.lb_confirmed_signal(lb_sig)
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(lb_sig)
+                                self._paper_open(lb_sig, "London Breakout")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(lb_sig, "London Breakout")
                         self._mark_sent(pair, lb_sig["direction"] + "_lb", lb_sig["stage"])
@@ -416,7 +436,7 @@ class ForexBot:
                         if ob_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(ob_sig)
+                                self._paper_open(ob_sig, "Order Block")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(ob_sig, "Order Block")
                         self._mark_sent(pair, ob_sig["direction"] + "_ob", ob_sig["stage"])
@@ -435,7 +455,7 @@ class ForexBot:
                         if tl_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(tl_sig)
+                                self._paper_open(tl_sig, "Trendline")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(tl_sig, "Trendline")
                         self._mark_sent(pair, tl_sig["direction"] + "_tl", tl_sig["stage"])
@@ -454,7 +474,7 @@ class ForexBot:
                         if rd_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(rd_sig)
+                                self._paper_open(rd_sig, "RSI Divergence")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
                         self._mark_sent(pair, rd_sig["direction"] + "_rd", rd_sig["stage"])
@@ -473,7 +493,7 @@ class ForexBot:
                         if rm_sig["stage"] == 2 and not self._paper_paused:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(rm_sig)
+                                self._paper_open(rm_sig, "RSI+MACD Reversal")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
                         self._mark_sent(pair, rm_sig["direction"] + "_rm", rm_sig["stage"])
@@ -503,6 +523,7 @@ class ForexBot:
             start_balance=self._batch_start_balance,
             current_balance=self.paper_balance,
             stats=self._trade_stats,
+            strategy_stats=self._strategy_stats,
         )
         self._batch_trades = []
 

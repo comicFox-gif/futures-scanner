@@ -320,15 +320,16 @@ class Notifier:
     def paper_tp_hit(self, pos, tp_level: int, price: float, pnl: float, balance: float):
         emojis = {1: "🎯", 2: "🎯🎯", 3: "🏆"}
         emoji  = emojis.get(tp_level, "🎯")
-        be_note = "\n🔒 <b>Break-Even activated</b>" if tp_level == 1 else ""
-        trail   = "\n📌 SL trailed to TP1" if tp_level == 2 else ""
+        strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
+        # TP2+ activates break-even; TP1 just banks profit, SL stays
+        be_note = "\n🔒 <b>SL moved to Break-Even</b>" if tp_level == 2 else ""
         self.send(
-            f"{emoji} <b>[PAPER] TP{tp_level} — {pos.symbol}</b>\n"
+            f"{emoji} <b>[PAPER] TP{tp_level} — {pos.symbol}</b>{strat_tag}\n"
             f"{DLINE}\n"
             f"Price:     <code>{price:.4f}</code>\n"
             f"PnL:       <code>{pnl:+.2f} USDT</code>\n"
             f"Remaining: <code>{pos.size_remaining:.4f}</code>"
-            f"{be_note}{trail}\n"
+            f"{be_note}\n"
             f"Balance: <code>{balance:.2f} USDT</code>"
         )
 
@@ -347,6 +348,12 @@ class Notifier:
         if pos.direction == "short":
             pct = -pct
 
+        strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
+        # Show strategy win note on TP2/TP3
+        strat_win_line = ""
+        if tp_level in (2, 3) and getattr(pos, "strategy_name", ""):
+            strat_win_line = f"\n🏅 Strategy: <b>{pos.strategy_name}</b>"
+
         stats_line = ""
         if stats and stats["total"] > 0:
             win_pct = stats["wins"] / stats["total"] * 100
@@ -359,12 +366,13 @@ class Notifier:
             )
 
         self.send(
-            f"{emoji} <b>[PAPER] Closed — {pos.symbol}</b>\n"
+            f"{emoji} <b>[PAPER] Closed — {pos.symbol}</b>{strat_tag}\n"
             f"{DLINE}\n"
             f"Reason:    {reason}\n"
             f"Entry:     <code>{pos.entry_price:.5f}</code>\n"
             f"Exit:      <code>{exit_price:.5f}</code>  ({pct:+.2f}%)\n"
-            f"Total PnL: <code>{total_pnl:+.2f} USDT</code>\n"
+            f"Total PnL: <code>{total_pnl:+.2f} USDT</code>"
+            f"{strat_win_line}\n"
             f"{DLINE}\n"
             f"Balance: <code>${balance:.2f}</code>"
             f"{stats_line}"
@@ -377,10 +385,29 @@ class Notifier:
     def paper_batch_summary(self, total: int, wins: int, losses: int,
                              total_pnl: float, win_pct: float,
                              start_balance: float, current_balance: float,
-                             stats: dict):
+                             stats: dict, strategy_stats: dict | None = None):
         pnl_emoji  = "📈" if total_pnl >= 0 else "📉"
         bal_change = current_balance - start_balance
         all_win_pct = stats["wins"] / stats["total"] * 100 if stats["total"] > 0 else 0
+
+        # Best strategy by TP3 count, then win rate
+        best_strat_line = ""
+        if strategy_stats:
+            ranked = sorted(
+                strategy_stats.items(),
+                key=lambda x: (x[1]["tp3"], x[1]["wins"] / max(x[1]["total"], 1)),
+                reverse=True,
+            )
+            best_name, best = ranked[0]
+            best_wr = best["wins"] / best["total"] * 100 if best["total"] > 0 else 0
+            best_strat_line = (
+                f"\n{DLINE}\n"
+                f"🥇 <b>Best Strategy: {best_name}</b>\n"
+                f"   TP3: <code>{best['tp3']}</code>  TP2: <code>{best['tp2']}</code>  "
+                f"SL: <code>{best['sl']}</code>  Win: <code>{best_wr:.0f}%</code>  "
+                f"({best['total']} trades)"
+            )
+
         self.send(
             f"📋 <b>Batch Report — {total} Trades</b>\n"
             f"{LINE}\n"
@@ -397,7 +424,8 @@ class Notifier:
             f"({bal_change:+.2f} this batch)\n"
             f"{DLINE}\n"
             f"📊 All-time win rate: <code>{all_win_pct:.0f}%</code>  "
-            f"({stats['total']} total trades)\n"
+            f"({stats['total']} total trades)"
+            f"{best_strat_line}\n"
             f"<i>New entries starting now...</i>"
         )
 

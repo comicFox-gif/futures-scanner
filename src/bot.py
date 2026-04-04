@@ -60,7 +60,7 @@ class Bot:
         paper_cfg = cfg.get("paper_trading", {})
         self.paper_enabled: bool = paper_cfg.get("enabled", False)
         self.paper_balance: float = paper_cfg.get("balance", 1000.0)
-        self.paper_risk_pct: float = paper_cfg.get("risk_per_trade_pct", 1.0) / 100.0
+        self.paper_risk_fixed: float = paper_cfg.get("risk_fixed_usdt", 20.0)  # fixed $20 per trade
         self.paper_start_balance: float = self.paper_balance
 
         self.tf_sr: str = cfg.get("timeframe_sr", "4h")
@@ -86,6 +86,8 @@ class Bot:
 
         # Lifetime trade stats
         self._trade_stats = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+        # Per-strategy stats: strategy_name -> {tp3, sl, be_sl, total, wins}
+        self._strategy_stats: dict[str, dict] = {}
 
         # Batch tracking (resets each cycle of 10 positions)
         self._batch_trades: list[dict] = []
@@ -157,7 +159,7 @@ class Bot:
     # Paper trading
     # ------------------------------------------------------------------
 
-    def _paper_open(self, signal: Signal):
+    def _paper_open(self, signal: Signal, strategy_name: str = ""):
         """Open a simulated position from a confirmed signal."""
         if signal.symbol in self._paper_positions:
             logger.debug(f"[PAPER] Already in position for {signal.symbol}, skipping")
@@ -182,7 +184,8 @@ class Bot:
         if sl_dist == 0:
             return
 
-        risk_amount = self.paper_balance * self.paper_risk_pct
+        # Fixed $20 risk per trade regardless of balance
+        risk_amount = self.paper_risk_fixed
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -200,6 +203,7 @@ class Bot:
             size=size,
             size_remaining=size,
             margin_locked=risk_amount,
+            strategy_name=strategy_name,
         )
         self._paper_positions[signal.symbol] = pos
 
@@ -248,7 +252,18 @@ class Bot:
                 if pos.closed_pnl > 0:
                     self._trade_stats["wins"] += 1
 
-                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result})
+                # Per-strategy stats
+                sn = pos.strategy_name or "Unknown"
+                if sn not in self._strategy_stats:
+                    self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+                ss = self._strategy_stats[sn]
+                ss["total"] += 1
+                if result == "tp3":       ss["tp3"]   += 1
+                elif result == "be_sl":   ss["be_sl"] += 1
+                elif result == "sl":      ss["sl"]    += 1
+                if pos.closed_pnl > 0:    ss["wins"]  += 1
+
+                self._batch_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
 
                 del self._paper_positions[symbol]
                 open_count = len(self._paper_positions)
@@ -283,6 +298,13 @@ class Bot:
                 pos.size_remaining -= close_size
                 pos.closed_pnl += pnl
                 self.paper_balance += pnl
+
+                # Track TP2 per strategy
+                if tp_level == 2:
+                    sn = pos.strategy_name or "Unknown"
+                    if sn not in self._strategy_stats:
+                        self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+                    self._strategy_stats[sn]["tp2"] += 1
 
                 logger.info(
                     f"[PAPER] TP{tp_level} {symbol} | "
@@ -422,7 +444,7 @@ class Bot:
                         if signal.stage == 2 and not self._paper_paused:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
-                                self._paper_open(signal)
+                                self._paper_open(signal, "EMA Momentum")
                             self._bybit_order(signal)
                         elif self.send_warnings:
                             self.notifier.warning_signal(signal, "EMA Momentum")
@@ -456,7 +478,7 @@ class Bot:
                                     volume_ratio=sr_sig.get("vol_ratio", 0),
                                     reason=sr_sig["reason"],
                                 )
-                                self._paper_open(dummy)
+                                self._paper_open(dummy, "S/R Bounce")
                         elif self.send_warnings:
                             self.notifier.sr_warning_signal(sr_sig)
 
@@ -483,7 +505,7 @@ class Bot:
                                             tp1=ob_sig["tp1"], tp2=ob_sig["tp2"], tp3=ob_sig["tp3"],
                                             atr=ob_sig["atr"], rsi=ob_sig["rsi"], volume_ratio=0,
                                             reason=ob_sig["reason"])
-                                self._paper_open(dummy)
+                                self._paper_open(dummy, "Order Block")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(ob_sig, "Order Block")
                         self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
@@ -509,7 +531,7 @@ class Bot:
                                             tp1=tl_sig["tp1"], tp2=tl_sig["tp2"], tp3=tl_sig["tp3"],
                                             atr=tl_sig["atr"], rsi=tl_sig["rsi"], volume_ratio=0,
                                             reason=tl_sig["reason"])
-                                self._paper_open(dummy)
+                                self._paper_open(dummy, "Trendline")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(tl_sig, "Trendline")
                         self._mark_sent(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"])
@@ -535,7 +557,7 @@ class Bot:
                                             tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
                                             atr=rd_sig["atr"], rsi=rd_sig["rsi"], volume_ratio=0,
                                             reason=rd_sig["reason"])
-                                self._paper_open(dummy)
+                                self._paper_open(dummy, "RSI Divergence")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
@@ -561,7 +583,7 @@ class Bot:
                                             tp1=rm_sig["tp1"], tp2=rm_sig["tp2"], tp3=rm_sig["tp3"],
                                             atr=rm_sig["atr"], rsi=rm_sig["rsi"], volume_ratio=0,
                                             reason=rm_sig["reason"])
-                                self._paper_open(dummy)
+                                self._paper_open(dummy, "RSI+MACD Reversal")
                         elif self.send_warnings:
                             self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
                         self._mark_sent(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"])
@@ -583,16 +605,17 @@ class Bot:
         trades = self._batch_trades
         if not trades:
             return
-        wins     = [t for t in trades if t["pnl"] > 0]
-        losses   = [t for t in trades if t["pnl"] <= 0]
+        wins      = [t for t in trades if t["pnl"] > 0]
+        losses    = [t for t in trades if t["pnl"] <= 0]
         total_pnl = sum(t["pnl"] for t in trades)
-        win_pct  = len(wins) / len(trades) * 100
+        win_pct   = len(wins) / len(trades) * 100
         self.notifier.paper_batch_summary(
             total=len(trades), wins=len(wins), losses=len(losses),
             total_pnl=total_pnl, win_pct=win_pct,
             start_balance=self._batch_start_balance,
             current_balance=self.paper_balance,
             stats=self._trade_stats,
+            strategy_stats=self._strategy_stats,
         )
         self._batch_trades = []   # reset for next batch
 

@@ -117,7 +117,7 @@
   "paper_trading": {
     "enabled": true,
     "balance": 1000.0,
-    "risk_per_trade_pct": 1.0
+    "risk_fixed_usdt": 20.0
   },
 
   "bot": {

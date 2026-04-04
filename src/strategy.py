@@ -57,6 +57,7 @@ class Position:
     size: float             # units
     size_remaining: float
     margin_locked: float = 0.0  # capital reserved for this trade (returned on close)
+    strategy_name: str = ""     # which strategy opened this trade
     tp1_hit: bool = False
     tp2_hit: bool = False
     tp3_hit: bool = False
@@ -501,9 +502,9 @@ class Strategy:
         return len(passed), rsi, vol_ratio, passed, failed
 
     def _long_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
-        """Returns (fires, rsi, vol_ratio, reason). Fires if 3 or more of 5 conditions pass."""
+        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or more of 5 conditions pass (high-probability only)."""
         score, rsi, vol_ratio, passed, failed = self._score_long(htf_df, entry_df)
-        if score >= 3:
+        if score >= 4:
             score_tag = f"✅ {score}/5 conditions"
             missing   = f" | Missing: {', '.join(failed)}" if failed else ""
             reason    = f"1H bull trend | {score_tag}{missing}"
@@ -511,9 +512,9 @@ class Strategy:
         return False, rsi, vol_ratio, ""
 
     def _short_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
-        """Returns (fires, rsi, vol_ratio, reason). Fires if 3 or more of 5 conditions pass."""
+        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or more of 5 conditions pass (high-probability only)."""
         score, rsi, vol_ratio, passed, failed = self._score_short(htf_df, entry_df)
-        if score >= 3:
+        if score >= 4:
             score_tag = f"✅ {score}/5 conditions"
             missing   = f" | Missing: {', '.join(failed)}" if failed else ""
             reason    = f"1H bear trend | {score_tag}{missing}"
@@ -642,13 +643,12 @@ class Strategy:
                 return actions
             if not pos.tp2_hit and current_price >= pos.tp2:
                 actions.append({"action": "close_partial", "pct": tp2_close, "reason": "TP2 hit", "tp_level": 2})
-                actions.append({"action": "move_sl", "new_sl": pos.tp1, "reason": "Trail SL to TP1"})
+                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp2_hit = True
+                pos.be_activated = True
             elif not pos.tp1_hit and current_price >= pos.tp1:
                 actions.append({"action": "close_partial", "pct": tp1_close, "reason": "TP1 hit", "tp_level": 1})
-                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp1_hit = True
-                pos.be_activated = True
 
         elif pos.direction == "short":
             if current_price >= pos.stop_loss:
@@ -660,12 +660,11 @@ class Strategy:
                 return actions
             if not pos.tp2_hit and current_price <= pos.tp2:
                 actions.append({"action": "close_partial", "pct": tp2_close, "reason": "TP2 hit", "tp_level": 2})
-                actions.append({"action": "move_sl", "new_sl": pos.tp1, "reason": "Trail SL to TP1"})
+                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp2_hit = True
+                pos.be_activated = True
             elif not pos.tp1_hit and current_price <= pos.tp1:
                 actions.append({"action": "close_partial", "pct": tp1_close, "reason": "TP1 hit", "tp_level": 1})
-                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp1_hit = True
-                pos.be_activated = True
 
         return actions
