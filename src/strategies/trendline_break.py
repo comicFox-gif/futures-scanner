@@ -189,11 +189,12 @@ class TrendlineBreakStrategy:
                             pattern = is_hammer(row) or is_bullish_engulfing(entry_df, -2)
                             if rsi_ok and pattern:
                                 quality = self._quality(touches, body, rsi)
-                                sl_dist = atr * self.atr_sl_mult
+                                sl      = lv_now - atr * 0.5
+                                sl_dist = price - sl
                                 return {
                                     "stage": 2, "direction": "long", "symbol": symbol,
                                     "entry": price,
-                                    "sl":    lv_now - atr * 0.5,
+                                    "sl":    sl,
                                     "tp1":   price + sl_dist * self.tp1_rr,
                                     "tp2":   price + sl_dist * self.tp2_rr,
                                     "tp3":   price + sl_dist * self.tp3_rr,
@@ -243,11 +244,12 @@ class TrendlineBreakStrategy:
                             rsi_ok = self.rsi_long_min <= rsi <= self.rsi_long_max
                             if rsi_ok and body >= 0.35:
                                 quality = self._quality(touches, body, rsi)
-                                sl_dist = atr * self.atr_sl_mult
+                                sl      = lv_now - atr * 0.3
+                                sl_dist = price - sl
                                 return {
                                     "stage": 2, "direction": "long", "symbol": symbol,
                                     "entry": price,
-                                    "sl":    lv_now - atr * 0.3,
+                                    "sl":    sl,
                                     "tp1":   price + sl_dist * self.tp1_rr,
                                     "tp2":   price + sl_dist * self.tp2_rr,
                                     "tp3":   price + sl_dist * self.tp3_rr,
@@ -281,11 +283,12 @@ class TrendlineBreakStrategy:
                             pattern = is_shooting_star(row) or is_bearish_engulfing(entry_df, -2)
                             if rsi_ok and pattern:
                                 quality = self._quality(touches, body, rsi)
-                                sl_dist = atr * self.atr_sl_mult
+                                sl      = lv_now + atr * 0.5
+                                sl_dist = sl - price
                                 return {
                                     "stage": 2, "direction": "short", "symbol": symbol,
                                     "entry": price,
-                                    "sl":    lv_now + atr * 0.5,
+                                    "sl":    sl,
                                     "tp1":   price - sl_dist * self.tp1_rr,
                                     "tp2":   price - sl_dist * self.tp2_rr,
                                     "tp3":   price - sl_dist * self.tp3_rr,

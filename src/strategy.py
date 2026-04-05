@@ -630,9 +630,13 @@ class Strategy:
         """
         Check open paper position against current price.
         Returns list of action dicts to execute.
+
+        Partial-close schedule:
+          TP1 → notify only (no close, no SL move)
+          TP2 → close 50% of position + move SL to break-even
+                (at 2R profit per coin, 50% close = exactly 1R locked)
+          TP3 → close all remaining 50%
         """
-        tp1_close  = 0.30
-        tp2_close  = 0.30
         actions = []
 
         if pos.direction == "long":
@@ -644,6 +648,7 @@ class Strategy:
                 pos.tp3_hit = True
                 return actions
             if not pos.tp2_hit and current_price >= pos.tp2:
+                actions.append({"action": "close_partial", "pct": 0.5, "tp_level": 2})
                 actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp2_hit = True
                 pos.be_activated = True
@@ -660,6 +665,7 @@ class Strategy:
                 pos.tp3_hit = True
                 return actions
             if not pos.tp2_hit and current_price <= pos.tp2:
+                actions.append({"action": "close_partial", "pct": 0.5, "tp_level": 2})
                 actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp2_hit = True
                 pos.be_activated = True

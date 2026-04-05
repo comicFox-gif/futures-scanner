@@ -328,7 +328,12 @@ class Bot:
                 pct        = action["pct"]
                 tp_level   = action.get("tp_level", 0)
                 close_size = round(pos.size_remaining * pct, 6)
-                partial_price = pos.tp2 if tp_level == 2 else current_price
+                if tp_level == 1:
+                    partial_price = pos.tp1
+                elif tp_level == 2:
+                    partial_price = pos.tp2
+                else:
+                    partial_price = current_price
                 pnl        = self._calc_pnl(pos, partial_price, close_size)
                 pos.size_remaining -= close_size
                 pos.closed_pnl += pnl
