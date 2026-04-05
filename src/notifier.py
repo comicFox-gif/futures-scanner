@@ -23,30 +23,39 @@ DLINE = "─" * 28
 
 class Notifier:
     def __init__(self, channel_name: str = ""):
-        self.token      = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id    = os.getenv("TELEGRAM_CHAT_ID", "")
-        self.enabled    = bool(self.token and self.chat_id)
-        self.channel    = channel_name  # e.g. "@YourSignalsChannel"
-        self._signal_no = 0            # auto-increments on every confirmed signal
+        # Main bot — private channel (all alerts: signals, errors, paper PnL)
+        self.token    = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.chat_id  = os.getenv("TELEGRAM_CHAT_ID", "")
+        self.enabled  = bool(self.token and self.chat_id)
+
+        # Forex signals bot — separate token + channel (confirmed signals only)
+        self.forex_token   = os.getenv("FOREX_BOT_TOKEN", "")
+        self.forex_chat_id = os.getenv("FOREX_CHAT_ID", "")
+        self.forex_enabled = bool(self.forex_token and self.forex_chat_id)
+
+        self.channel      = channel_name
+        self._signal_no   = 0
 
         if self.enabled:
-            logger.info("Telegram notifications enabled")
+            logger.info("Telegram main bot enabled")
         else:
-            logger.info("Telegram not configured — notifications disabled")
+            logger.info("Telegram main bot not configured — notifications disabled")
+
+        if self.forex_enabled:
+            logger.info("Telegram forex signals bot enabled")
 
     # ------------------------------------------------------------------
-    # Core send
+    # Core senders
     # ------------------------------------------------------------------
 
-    def send(self, message: str):
-        if not self.enabled:
-            return
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+    def _post(self, token: str, chat_id: str, message: str):
+        """Low-level send using a specific bot token and chat_id."""
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
         try:
             resp = requests.post(
                 url,
                 json={
-                    "chat_id":    self.chat_id,
+                    "chat_id":    chat_id,
                     "text":       message,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": True,
@@ -57,9 +66,49 @@ class Notifier:
         except requests.exceptions.RequestException as e:
             logger.warning(f"Telegram send failed: {e}")
 
+    def send(self, message: str):
+        """Send to main channel only (errors, paper PnL, system alerts)."""
+        if not self.enabled:
+            return
+        self._post(self.token, self.chat_id, message)
+
+    def send_signal(self, message: str, forex_message: str = ""):
+        """
+        Send confirmed signal to both channels.
+        - Main channel: full message (same as send())
+        - Forex channel: forex_message if provided, else same message
+        """
+        if self.enabled:
+            self._post(self.token, self.chat_id, message)
+        if self.forex_enabled:
+            self._post(self.forex_token, self.forex_chat_id,
+                       forex_message if forex_message else message)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _forex_signal_msg(self, no: int, strategy_name: str, direction: str,
+                          symbol: str, price: float, sl: float,
+                          tp1: float, tp2: float, tp3: float,
+                          sl_pct: float, reason: str) -> str:
+        """Clean signal format for the public forex channel."""
+        dir_tag = self._dir_tag(direction)
+        ts = datetime.utcnow().strftime("%H:%M UTC")
+        return (
+            f"🚨 <b>#{no:03d} {dir_tag}</b>\n"
+            f"{LINE}\n"
+            f"<b>{symbol}</b>  [{strategy_name}]\n"
+            f"{DLINE}\n"
+            f"📌 Entry:  <code>{price:.5f}</code>\n"
+            f"🛑 SL:     <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 TP1:    <code>{tp1:.5f}</code>  (+{sl_pct:.2f}%)\n"
+            f"🎯 TP2:    <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%)\n"
+            f"🏆 TP3:    <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%)\n"
+            f"{DLINE}\n"
+            f"<i>{reason}</i>\n"
+            f"<i>{ts}</i>"
+        )
 
     def _stars(self, quality: int) -> str:
         return "⭐" * quality + "☆" * (5 - quality)
@@ -152,7 +201,7 @@ class Notifier:
         sl_pct  = abs(price - sl) / price * 100
         dir_tag = self._dir_tag(direction)
 
-        self.send(
+        self.send_signal(
             f"🚨 <b>SIGNAL #{no:03d}</b>  [{strategy_name}]\n"
             f"{LINE}\n"
             f"{dir_tag}  •  <b>{symbol}</b>\n"
@@ -160,14 +209,18 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry:  <code>{price:.4f}</code>\n"
             f"🛑 SL:  <code>{sl:.4f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{sl_pct*1:.2f}%) → move to BE\n"
-            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{sl_pct*2:.2f}%) → Break-Even\n"
-            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{sl_pct*3:.2f}%) → full exit\n"
+            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{sl_pct:.2f}%)\n"
+            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{sl_pct*2:.2f}%)\n"
+            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{sl_pct*3:.2f}%)\n"
             f"R:R = 1 : 3\n"
             f"{DLINE}\n"
             f"📊 RSI: <code>{rsi:.1f}</code>  Vol: <code>{vol:.1f}x avg</code>\n"
             f"<i>{reason}</i>\n"
-            f"{self._footer()}"
+            f"{self._footer()}",
+            forex_message=self._forex_signal_msg(
+                no, strategy_name, direction, symbol,
+                price, sl, tp1, tp2, tp3, sl_pct, reason
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -192,7 +245,7 @@ class Notifier:
         dir_tag  = self._dir_tag(direction)
         lv_type  = "Support" if direction == "long" else "Resistance"
 
-        self.send(
+        self.send_signal(
             f"🚨 <b>SIGNAL #{no:03d}</b>  [S/R Bounce]\n"
             f"{LINE}\n"
             f"{dir_tag}  •  <b>{symbol}</b>\n"
@@ -200,15 +253,19 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry:  <code>{price:.4f}</code>\n"
             f"🛑 SL:  <code>{sl:.4f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{sl_pct*1:.2f}%) → move to BE\n"
-            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{sl_pct*2:.2f}%) → Break-Even\n"
-            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{sl_pct*3:.2f}%) → full exit\n"
+            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{sl_pct:.2f}%)\n"
+            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{sl_pct*2:.2f}%)\n"
+            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{sl_pct*3:.2f}%)\n"
             f"R:R = 1 : 3\n"
             f"{DLINE}\n"
             f"📐 {lv_type}: <code>{lv_price:.4f}</code>  ({lv_touch} touches)\n"
             f"📊 RSI: <code>{rsi:.1f}</code>  Vol: <code>{vol:.1f}x avg</code>\n"
             f"<i>{reason}</i>\n"
-            f"{self._footer()}"
+            f"{self._footer()}",
+            forex_message=self._forex_signal_msg(
+                no, "S/R Bounce", direction, symbol,
+                price, sl, tp1, tp2, tp3, sl_pct, reason
+            ),
         )
 
     def sr_warning_signal(self, sig: dict):
@@ -232,7 +289,7 @@ class Notifier:
         sl_pct    = abs(price - sl) / price * 100
         dir_tag   = self._dir_tag(direction)
 
-        self.send(
+        self.send_signal(
             f"🚨 <b>SIGNAL #{no:03d}</b>  [{strategy_name}]\n"
             f"{LINE}\n"
             f"{dir_tag}  •  <b>{symbol}</b>\n"
@@ -240,14 +297,18 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry:  <code>{price:.5f}</code>\n"
             f"🛑 SL:  <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1: <code>{tp1:.5f}</code>  (+{sl_pct*1:.2f}%) → move to BE\n"
-            f"🎯 TP2: <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%) → Break-Even\n"
-            f"🏆 TP3: <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%) → full exit\n"
+            f"🎯 TP1: <code>{tp1:.5f}</code>  (+{sl_pct:.2f}%)\n"
+            f"🎯 TP2: <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%)\n"
+            f"🏆 TP3: <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%)\n"
             f"R:R = 1 : 3\n"
             f"{DLINE}\n"
             f"📊 RSI: <code>{rsi:.1f}</code>\n"
             f"<i>{reason}</i>\n"
-            f"{self._footer()}"
+            f"{self._footer()}",
+            forex_message=self._forex_signal_msg(
+                no, strategy_name, direction, symbol,
+                price, sl, tp1, tp2, tp3, sl_pct, reason
+            ),
         )
 
     def fx_warning_signal(self, sig: dict, strategy_name: str = "FX EMA Trend"):
