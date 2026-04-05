@@ -40,25 +40,25 @@ class BybitExecutor:
 
         try:
             from pybit.unified_trading import HTTP
-            # Demo trading uses api-demo.bybit.com (NOT testnet)
             if demo:
-                base_url  = DEMO_HOST
                 env_label = "DEMO"
+                host      = DEMO_HOST
             elif testnet:
-                base_url  = TESTNET_HOST
                 env_label = "TESTNET"
+                host      = TESTNET_HOST
             else:
-                base_url  = LIVE_HOST
                 env_label = "LIVE"
+                host      = LIVE_HOST
 
             self.session = HTTP(
                 api_key=api_key,
                 api_secret=api_secret,
-                base_url=base_url,
+                demo=demo,
+                testnet=(testnet and not demo),
             )
             masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "???"
             logger.info(
-                f"[BYBIT] Executor ready | {env_label} ({base_url}) | key={masked_key} | "
+                f"[BYBIT] Executor ready | {env_label} ({host}) | key={masked_key} | "
                 f"leverage={leverage}x | risk={risk_pct*100:.0f}% per trade"
             )
         except ImportError:
