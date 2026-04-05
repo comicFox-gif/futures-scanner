@@ -1,7 +1,7 @@
 """
 Bybit Futures Executor (pybit SDK)
 ------------------------------------
-Places real orders on Bybit testnet when confirmed signals fire.
+Places real orders on Bybit demo/testnet when confirmed signals fire.
 Uses official pybit library — entry + SL + TP in a single place_order() call.
 
 pip install pybit
@@ -9,17 +9,25 @@ pip install pybit
 Env vars:
   BYBIT_KEY      — Bybit API key
   BYBIT_SECRET   — Bybit API secret
-  BYBIT_TESTNET  — "true" (default) or "false" for live
+  BYBIT_DEMO     — "true" (default) → api-demo.bybit.com
+  BYBIT_TESTNET  — "true" → api-testnet.bybit.com
+  BYBIT_LEVERAGE — default 10
 
-Risk: 1% of account balance per trade (SL always costs exactly 1%).
+Risk sizing:
+  risk_usdt = balance * risk_pct
+  qty       = risk_usdt / sl_dist          (coins to lose exactly risk_usdt if SL hit)
+  cap       = balance * leverage * 0.8     (never exceed 80% of available margin notional)
+  qty       = min(qty, cap / entry_price)  (apply cap)
+  qty       = rounded to instrument qtyStep, clamped to [minOrderQty, maxOrderQty]
 """
 
 from __future__ import annotations
 import logging
+import math
 import traceback
+from typing import Optional
 
 logger = logging.getLogger("futures_bot.bybit")
-
 
 DEMO_HOST    = "https://api-demo.bybit.com"
 TESTNET_HOST = "https://api-testnet.bybit.com"
@@ -33,6 +41,7 @@ class BybitExecutor:
         self.leverage = leverage
         self.risk_pct = risk_pct
         self.enabled  = bool(api_key and api_secret)
+        self._instrument_cache: dict[str, dict] = {}
 
         if not self.enabled:
             logger.info("[BYBIT] No API keys — executor disabled")
@@ -59,7 +68,7 @@ class BybitExecutor:
             masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "???"
             logger.info(
                 f"[BYBIT] Executor ready | {env_label} ({host}) | key={masked_key} | "
-                f"leverage={leverage}x | risk={risk_pct*100:.0f}% per trade"
+                f"leverage={leverage}x | risk={risk_pct*100:.1f}% per trade"
             )
         except ImportError:
             logger.error("[BYBIT] pybit not installed — run: pip install pybit")
@@ -69,17 +78,60 @@ class BybitExecutor:
             self.enabled = False
 
     # ------------------------------------------------------------------
+    # Instrument specs (cached per symbol)
+    # ------------------------------------------------------------------
+
+    def _get_instrument_info(self, symbol: str) -> dict:
+        """Fetch and cache lotSizeFilter + priceFilter for a symbol."""
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
+        try:
+            resp = self.session.get_instruments_info(category="linear", symbol=symbol)
+            info = resp["result"]["list"][0]
+            lot  = info["lotSizeFilter"]
+            pf   = info["priceFilter"]
+            spec = {
+                "min_qty":   float(lot["minOrderQty"]),
+                "max_qty":   float(lot["maxOrderQty"]),
+                "qty_step":  float(lot["qtyStep"]),
+                "tick_size": float(pf["tickSize"]),
+            }
+            logger.info(
+                f"[BYBIT] {symbol} spec — minQty={spec['min_qty']} maxQty={spec['max_qty']} "
+                f"step={spec['qty_step']} tick={spec['tick_size']}"
+            )
+        except Exception as e:
+            logger.warning(f"[BYBIT] get_instrument_info({symbol}) failed: {e} — using defaults")
+            spec = {"min_qty": 1.0, "max_qty": 9e9, "qty_step": 1.0, "tick_size": 0.0001}
+        self._instrument_cache[symbol] = spec
+        return spec
+
+    @staticmethod
+    def _decimal_places(value: float) -> int:
+        s = f"{value:.10f}".rstrip("0")
+        return len(s.split(".")[1]) if "." in s else 0
+
+    def _round_qty(self, qty: float, spec: dict) -> float:
+        """Floor qty to nearest qtyStep, clamp to [minOrderQty, maxOrderQty]."""
+        step = spec["qty_step"]
+        qty  = math.floor(qty / step) * step
+        qty  = max(spec["min_qty"], min(spec["max_qty"], qty))
+        return round(qty, self._decimal_places(step))
+
+    def _round_price(self, price: float, spec: dict) -> str:
+        """Round price to nearest tick_size and return as string."""
+        tick     = spec["tick_size"]
+        price    = round(round(price / tick) * tick, 8)
+        decimals = self._decimal_places(tick)
+        return f"{price:.{decimals}f}"
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _to_symbol(self, symbol: str) -> str:
         """'BTC/USDT:USDT' → 'BTCUSDT'"""
         return symbol.split(":")[0].replace("/", "")
-
-    @staticmethod
-    def _fmt(price: float, decimals: int = 4) -> str:
-        """Format price to avoid floating-point noise."""
-        return f"{price:.{decimals}f}".rstrip("0").rstrip(".")
 
     def _get_balance(self) -> float:
         """Fetch available USDT balance from Bybit unified account."""
@@ -106,7 +158,6 @@ class BybitExecutor:
             logger.info(f"[BYBIT] Leverage set to {self.leverage}x for {symbol}")
             return True
         except Exception as e:
-            # Bybit returns error if leverage is already set to the same value — that's fine
             if "leverage not modified" in str(e).lower() or "110043" in str(e):
                 logger.info(f"[BYBIT] Leverage already {self.leverage}x for {symbol}")
                 return True
@@ -134,9 +185,10 @@ class BybitExecutor:
 
         sl_dist = abs(entry - sl)
         if sl_dist == 0:
+            logger.warning(f"[BYBIT] Zero SL distance for {symbol} — skipping")
             return {}
 
-        # Sanity check direction
+        # Direction sanity check
         if direction == "long" and not (sl < entry < tp3):
             logger.warning(f"[BYBIT] Bad levels LONG {symbol}: SL={sl} E={entry} TP={tp3}")
             return {}
@@ -145,13 +197,37 @@ class BybitExecutor:
             return {}
 
         balance   = self._get_balance()
-        risk_usdt = round(balance * self.risk_pct, 2)
-        # qty in base currency: how many coins to buy/sell so SL = risk_usdt
-        qty       = round(risk_usdt / sl_dist, 6)
+        risk_usdt = balance * self.risk_pct
+
+        # --- qty = coins such that loss at SL == risk_usdt ---
+        qty = risk_usdt / sl_dist
+
+        # --- Safety cap: position notional ≤ 80% of available margin * leverage ---
+        max_notional = balance * self.leverage * 0.8
+        max_qty_by_margin = max_notional / entry
+        if qty > max_qty_by_margin:
+            logger.info(
+                f"[BYBIT] qty capped by margin: {qty:.4f} → {max_qty_by_margin:.4f} "
+                f"(notional cap={max_notional:.0f} USDT)"
+            )
+            qty = max_qty_by_margin
+
+        # --- Round to instrument step size and clamp to [min, max] ---
+        spec = self._get_instrument_info(symbol)
+        qty  = self._round_qty(qty, spec)
+
+        if qty <= 0:
+            logger.warning(f"[BYBIT] qty rounds to 0 for {symbol} — skipping")
+            return {}
+
+        sl_price  = self._round_price(sl, spec)
+        tp_price  = self._round_price(tp3, spec)
+        notional  = qty * entry
+        margin    = notional / self.leverage
 
         logger.info(
-            f"[BYBIT] Balance={balance:.2f} | Risk={self.risk_pct*100:.0f}%={risk_usdt:.2f} USDT | "
-            f"qty={qty} {symbol}"
+            f"[BYBIT] {symbol} | Balance={balance:.2f} | Risk={risk_usdt:.2f} USDT "
+            f"| qty={qty} | notional={notional:.2f} | margin={margin:.2f} | SL={sl_price} TP={tp_price}"
         )
 
         if not self._set_leverage(symbol):
@@ -165,16 +241,16 @@ class BybitExecutor:
                 side=side,
                 orderType="Market",
                 qty=str(qty),
-                stopLoss=self._fmt(sl),
-                takeProfit=self._fmt(tp3),
-                tpslMode="Full",        # apply TP/SL to full position
-                slOrderType="Market",   # SL triggers as market order
-                tpOrderType="Limit",    # TP as limit order
+                stopLoss=sl_price,
+                takeProfit=tp_price,
+                tpslMode="Full",
+                slOrderType="Market",
+                tpOrderType="Limit",
             )
             order_id = resp["result"]["orderId"]
             logger.info(
-                f"[BYBIT] ENTRY {side.upper()} {symbol} qty={qty} | "
-                f"SL={self._fmt(sl)} | TP3={self._fmt(tp3)} | id={order_id}"
+                f"[BYBIT] ORDER PLACED {side.upper()} {symbol} qty={qty} "
+                f"| SL={sl_price} | TP={tp_price} | id={order_id}"
             )
             return {"order_id": order_id}
 
@@ -193,15 +269,17 @@ class BybitExecutor:
             return False
 
         bybit_symbol = self._to_symbol(symbol)
+        spec         = self._get_instrument_info(bybit_symbol)
+        be_price     = self._round_price(entry_price, spec)
         try:
             self.session.set_trading_stop(
                 category="linear",
                 symbol=bybit_symbol,
-                stopLoss=self._fmt(entry_price),
-                positionIdx=0,      # one-way mode
+                stopLoss=be_price,
+                positionIdx=0,
                 tpslMode="Full",
             )
-            logger.info(f"[BYBIT] BE SL moved to {self._fmt(entry_price)} for {bybit_symbol}")
+            logger.info(f"[BYBIT] BE SL moved to {be_price} for {bybit_symbol}")
             return True
         except Exception as e:
             logger.error(f"[BYBIT] move_sl_to_breakeven({bybit_symbol}): {e}")
