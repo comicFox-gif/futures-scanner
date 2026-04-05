@@ -201,23 +201,28 @@ class BybitExecutor:
         balance   = self._get_balance()
         risk_usdt = balance * self.risk_pct
 
+        # Reference price for sizing: use the highest of entry/sl to guard against
+        # stale or wrong entry prices in signals (e.g. entry=0.08 when market=0.80).
+        # For LONG: entry > sl → ref = entry.  For SHORT: sl > entry → ref = sl.
+        # Either way max(entry, sl) is always a conservative (lower qty) estimate.
+        ref_price = max(entry, sl)
+
         # --- qty = coins such that loss at SL == risk_usdt ---
         qty = risk_usdt / sl_dist
 
-        # --- Margin cap: each slot gets balance/max_positions margin ---
-        # With 50 open positions, each one can use at most 1/50th of balance as margin.
-        # notional = margin * leverage → cap = (balance / max_positions) * leverage
-        slot_margin       = balance / self.max_positions
-        max_notional      = slot_margin * self.leverage
-        max_qty_by_margin = max_notional / entry
-        if qty > max_qty_by_margin:
+        # --- Margin cap: each slot = balance / max_positions ---
+        # With 50 simultaneous positions each uses at most 1/50th of balance as margin.
+        slot_margin  = balance / self.max_positions        # e.g. 100k/50 = 2 000 USDT
+        max_notional = slot_margin * self.leverage         # e.g. 2 000 * 10 = 20 000 USDT
+        max_qty_cap  = max_notional / ref_price            # conservative: uses highest price
+        if qty > max_qty_cap:
             logger.info(
-                f"[BYBIT] qty capped to slot margin: {qty:.4f} → {max_qty_by_margin:.4f} "
-                f"(slot={slot_margin:.0f} USDT margin | notional cap={max_notional:.0f} USDT)"
+                f"[BYBIT] qty capped: {qty:.4f} → {max_qty_cap:.4f} "
+                f"(slot margin={slot_margin:.0f} USDT | notional cap={max_notional:.0f} USDT | ref={ref_price:.6f})"
             )
-            qty = max_qty_by_margin
+            qty = max_qty_cap
 
-        # --- Round to instrument step size and clamp to [min, max] ---
+        # --- Round to instrument step size and clamp to [min, maxOrderQty] ---
         spec = self._get_instrument_info(symbol)
         qty  = self._round_qty(qty, spec)
 
@@ -225,44 +230,58 @@ class BybitExecutor:
             logger.warning(f"[BYBIT] qty rounds to 0 for {symbol} — skipping")
             return {}
 
-        sl_price  = self._round_price(sl, spec)
-        tp_price  = self._round_price(tp3, spec)
-        notional  = qty * entry
-        margin    = notional / self.leverage
+        sl_price = self._round_price(sl, spec)
+        tp_price = self._round_price(tp3, spec)
+        notional = qty * ref_price
+        margin   = notional / self.leverage
 
         logger.info(
             f"[BYBIT] {symbol} | Balance={balance:.2f} | Risk={risk_usdt:.2f} USDT "
-            f"| qty={qty} | notional={notional:.2f} | margin={margin:.2f} | SL={sl_price} TP={tp_price}"
+            f"| qty={qty} | notional≈{notional:.2f} | margin≈{margin:.2f} | SL={sl_price} TP={tp_price}"
         )
 
         if not self._set_leverage(symbol):
             logger.error(f"[BYBIT] Aborting {symbol} — could not set leverage")
             return {}
 
-        try:
-            resp = self.session.place_order(
-                category="linear",
-                symbol=symbol,
-                side=side,
-                orderType="Market",
-                qty=str(qty),
-                stopLoss=sl_price,
-                takeProfit=tp_price,
-                tpslMode="Full",
-                slOrderType="Market",
-                tpOrderType="Market",   # must be Market when tpslMode=Full
-            )
-            order_id = resp["result"]["orderId"]
-            logger.info(
-                f"[BYBIT] ORDER PLACED {side.upper()} {symbol} qty={qty} "
-                f"| SL={sl_price} | TP={tp_price} | id={order_id}"
-            )
-            return {"order_id": order_id}
+        return self._submit_order(symbol, side, qty, sl_price, tp_price, spec)
 
-        except Exception as e:
-            detail = getattr(e, "message", str(e))
-            logger.error(f"[BYBIT] place_order({symbol}): {detail}\n{traceback.format_exc()}")
-            return {}
+    def _submit_order(self, symbol: str, side: str, qty: float,
+                      sl_price: str, tp_price: str, spec: dict) -> dict:
+        """Submit the order; on 'too large' error halve qty and retry once."""
+        for attempt in range(2):
+            try:
+                resp = self.session.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=side,
+                    orderType="Market",
+                    qty=str(qty),
+                    stopLoss=sl_price,
+                    takeProfit=tp_price,
+                    tpslMode="Full",
+                    slOrderType="Market",
+                    tpOrderType="Market",   # must be Market when tpslMode=Full
+                )
+                order_id = resp["result"]["orderId"]
+                logger.info(
+                    f"[BYBIT] ORDER PLACED {side.upper()} {symbol} qty={qty} "
+                    f"| SL={sl_price} | TP={tp_price} | id={order_id}"
+                )
+                return {"order_id": order_id}
+
+            except Exception as e:
+                detail = str(getattr(e, "message", e))
+                # Bybit: "number of contracts exceeds maximum limit" → halve and retry
+                if attempt == 0 and ("too large" in detail.lower() or "exceeds maximum" in detail.lower()):
+                    qty = self._round_qty(qty / 2, spec)
+                    logger.warning(
+                        f"[BYBIT] qty too large — halving to {qty} and retrying"
+                    )
+                    continue
+                logger.error(f"[BYBIT] place_order({symbol}): {detail}\n{traceback.format_exc()}")
+                return {}
+        return {}
 
     # ------------------------------------------------------------------
     # Move SL to break-even (called when TP2 hit)
