@@ -42,7 +42,7 @@ class Bot:
     def __init__(self, cfg: dict, env: dict):
         # Mode switch: "scalp" swaps signal + filter params before strategies load
         self.mode = cfg.get("mode", "swing")
-        self.send_warnings = (self.mode != "scalp")   # scalp = confirmed only
+        self.send_warnings = False   # confirmed signals only — no setup/warning alerts
         if self.mode == "scalp":
             if "scalp_signal" in cfg:
                 cfg = {**cfg, "signal": cfg["scalp_signal"]}
@@ -111,19 +111,21 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _init_exchange(self, cfg: dict, env: dict):
-        exchange_id = env.get("EXCHANGE", cfg.get("exchange", "okx"))
-        default_type = "swap" if exchange_id == "okx" else "future"
-        api_key = env.get("API_KEY", "")
+        exchange_id = env.get("EXCHANGE", cfg.get("exchange", "bybit"))
+        # Bybit uses "linear" for USDT perps; OKX uses "swap"
+        type_map    = {"bybit": "linear", "okx": "swap"}
+        default_type = type_map.get(exchange_id, "linear")
+        api_key    = env.get("API_KEY", "")
         api_secret = env.get("API_SECRET", "")
         passphrase = env.get("API_PASSPHRASE", "")
 
         exchange_class = getattr(ccxt, exchange_id)
         exchange = exchange_class({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "password": passphrase,
+            "apiKey":    api_key,
+            "secret":    api_secret,
+            "password":  passphrase,
             "enableRateLimit": True,
-            "timeout": 15000,
+            "timeout":   15000,
             "options": {
                 "defaultType": default_type,
                 "adjustForTimeDifference": True,

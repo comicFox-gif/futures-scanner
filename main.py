@@ -114,7 +114,7 @@ def main():
         logger.info("Mode: SWING (4h trend / 1h entry)")
 
     env = {
-        "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "okx")),
+        "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "bybit")),
         "API_KEY":            os.getenv("API_KEY", ""),
         "API_SECRET":         os.getenv("API_SECRET", ""),
         "API_PASSPHRASE":     os.getenv("API_PASSPHRASE", ""),
