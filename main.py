@@ -98,6 +98,21 @@ def main():
     if args.symbol:
         cfg["symbols"] = [s.strip() for s in args.symbol.split(",")]
 
+    # SCALP_MODE switch — set in Railway env vars
+    # SCALP_MODE=true  → scalp  | trend=15m  entry=5m  | fast signals, tight SL
+    # SCALP_MODE=false → swing  | trend=4h   entry=1h  | slow signals, wide SL
+    scalp_mode = os.getenv("SCALP_MODE", "false").lower() == "true"
+    if scalp_mode:
+        cfg["mode"]             = "scalp"
+        cfg["timeframe_trend"]  = "15m"
+        cfg["timeframe_entry"]  = "5m"
+        logger.info("Mode: SCALP (15m trend / 5m entry)")
+    else:
+        cfg["mode"]             = "swing"
+        cfg["timeframe_trend"]  = "4h"
+        cfg["timeframe_entry"]  = "1h"
+        logger.info("Mode: SWING (4h trend / 1h entry)")
+
     env = {
         "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "okx")),
         "API_KEY":            os.getenv("API_KEY", ""),
