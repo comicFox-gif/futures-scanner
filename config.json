@@ -18,8 +18,8 @@
     "BNB/USDT:USDT",
     "XRP/USDT:USDT"
   ],
-  "timeframe_trend": "15m",
-  "timeframe_entry": "5m",
+  "timeframe_trend": "30m",
+  "timeframe_entry": "15m",
 
   "strategy": {
     "ema_fast": 9,
