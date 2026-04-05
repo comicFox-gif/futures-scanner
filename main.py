@@ -104,9 +104,9 @@ def main():
     scalp_mode = os.getenv("SCALP_MODE", "false").lower() == "true"
     if scalp_mode:
         cfg["mode"]             = "scalp"
-        cfg["timeframe_trend"]  = "15m"
-        cfg["timeframe_entry"]  = "5m"
-        logger.info("Mode: SCALP (15m trend / 5m entry)")
+        cfg["timeframe_trend"]  = "30m"
+        cfg["timeframe_entry"]  = "15m"
+        logger.info("Mode: SCALP (30m trend / 15m entry)")
     else:
         cfg["mode"]             = "swing"
         cfg["timeframe_trend"]  = "4h"
