@@ -202,8 +202,9 @@ class BybitExecutor:
         # --- qty = coins such that loss at SL == risk_usdt ---
         qty = risk_usdt / sl_dist
 
-        # --- Safety cap: position notional ≤ 80% of available margin * leverage ---
-        max_notional = balance * self.leverage * 0.8
+        # --- Hard cap: single position notional ≤ 20% of balance * leverage ---
+        # Prevents absurd sizes on tight SLs or large demo balances.
+        max_notional      = balance * self.leverage * 0.20
         max_qty_by_margin = max_notional / entry
         if qty > max_qty_by_margin:
             logger.info(
@@ -245,7 +246,7 @@ class BybitExecutor:
                 takeProfit=tp_price,
                 tpslMode="Full",
                 slOrderType="Market",
-                tpOrderType="Limit",
+                tpOrderType="Market",   # must be Market when tpslMode=Full
             )
             order_id = resp["result"]["orderId"]
             logger.info(
