@@ -113,6 +113,14 @@ def main():
         cfg["timeframe_entry"]  = "1h"
         logger.info("Mode: SWING (4h trend / 1h entry)")
 
+    # TREND_TF / ENTRY_TF — override individual timeframes without changing mode
+    # e.g. TREND_TF=4h ENTRY_TF=30m → swing trend with faster entries
+    if os.getenv("TREND_TF"):
+        cfg["timeframe_trend"] = os.getenv("TREND_TF")
+    if os.getenv("ENTRY_TF"):
+        cfg["timeframe_entry"] = os.getenv("ENTRY_TF")
+    logger.info(f"Timeframes: trend={cfg['timeframe_trend']} entry={cfg['timeframe_entry']}")
+
     # FOREX_SCALP_MODE — independent switch for forex paper trading mode label
     # Does not change scanning timeframes (same bot), only the forex startup message
     forex_scalp = os.getenv("FOREX_SCALP_MODE", "false").lower() == "true"
