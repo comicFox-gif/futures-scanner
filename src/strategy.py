@@ -632,10 +632,10 @@ class Strategy:
         Returns list of action dicts to execute.
 
         Partial-close schedule:
-          TP1 → notify only (no close, no SL move)
-          TP2 → close 50% of position + move SL to break-even
-                (at 2R profit per coin, 50% close = exactly 1R locked)
+          TP1 → notify only
+          TP2 → close 50% of position (banks 1R), SL stays at original
           TP3 → close all remaining 50%
+          SL  → original SL throughout, no break-even move
         """
         actions = []
 
@@ -649,9 +649,7 @@ class Strategy:
                 return actions
             if not pos.tp2_hit and current_price >= pos.tp2:
                 actions.append({"action": "close_partial", "pct": 0.5, "tp_level": 2})
-                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp2_hit = True
-                pos.be_activated = True
             elif not pos.tp1_hit and current_price >= pos.tp1:
                 actions.append({"action": "notify_tp1"})
                 pos.tp1_hit = True
@@ -666,9 +664,7 @@ class Strategy:
                 return actions
             if not pos.tp2_hit and current_price <= pos.tp2:
                 actions.append({"action": "close_partial", "pct": 0.5, "tp_level": 2})
-                actions.append({"action": "move_sl", "new_sl": pos.entry_price, "reason": "SL to Break-Even"})
                 pos.tp2_hit = True
-                pos.be_activated = True
             elif not pos.tp1_hit and current_price <= pos.tp1:
                 actions.append({"action": "notify_tp1"})
                 pos.tp1_hit = True
