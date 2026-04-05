@@ -98,9 +98,9 @@ def main():
     if args.symbol:
         cfg["symbols"] = [s.strip() for s in args.symbol.split(",")]
 
-    # SCALP_MODE switch — set in Railway env vars
-    # SCALP_MODE=true  → scalp  | trend=15m  entry=5m  | fast signals, tight SL
-    # SCALP_MODE=false → swing  | trend=4h   entry=1h  | slow signals, wide SL
+    # SCALP_MODE — controls crypto bot timeframes
+    # SCALP_MODE=true  → scalp  | trend=30m  entry=15m
+    # SCALP_MODE=false → swing  | trend=4h   entry=1h
     scalp_mode = os.getenv("SCALP_MODE", "false").lower() == "true"
     if scalp_mode:
         cfg["mode"]             = "scalp"
@@ -112,6 +112,15 @@ def main():
         cfg["timeframe_trend"]  = "4h"
         cfg["timeframe_entry"]  = "1h"
         logger.info("Mode: SWING (4h trend / 1h entry)")
+
+    # FOREX_SCALP_MODE — independent switch for forex paper trading mode label
+    # Does not change scanning timeframes (same bot), only the forex startup message
+    forex_scalp = os.getenv("FOREX_SCALP_MODE", "false").lower() == "true"
+    cfg["forex_paper"] = {
+        "balance": float(os.getenv("FOREX_PAPER_BALANCE", "1000")),
+        "mode":    "scalp" if forex_scalp else "swing",
+    }
+    logger.info(f"Forex paper mode: {'SCALP' if forex_scalp else 'SWING'}")
 
     env = {
         "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "bybit")),

@@ -800,6 +800,13 @@ class Bot:
             strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
             label=f"Crypto Futures Scanner{bybit_note}",
         )
+        # Forex channel startup alert
+        forex_cfg  = self.cfg.get("forex_paper", {})
+        forex_mode = forex_cfg.get("mode", self.mode)
+        self.notifier.forex_scanner_started(
+            symbols, self.tf_trend, self.tf_entry,
+            self.forex_paper_balance, forex_mode,
+        )
 
         while self._running:
             try:

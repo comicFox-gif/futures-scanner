@@ -598,6 +598,24 @@ class Notifier:
             return
         self._post(self.forex_token, self.forex_chat_id, message)
 
+    def forex_scanner_started(self, symbols: list, tf_trend: str, tf_entry: str,
+                              paper_balance: float, mode: str):
+        """Startup alert sent to the forex channel only."""
+        mode_label = "SCALP (30m/15m)" if mode == "scalp" else "SWING (4h/1h)"
+        self.send_forex(
+            f"🟢 <b>Forex Signals Bot Online</b>\n"
+            f"{LINE}\n"
+            f"Scanning <b>{len(symbols)} pairs</b>\n"
+            f"Mode: <code>{mode_label}</code>\n"
+            f"Trend TF: <code>{tf_trend}</code>  Entry TF: <code>{tf_entry}</code>\n"
+            f"Strategies: EMA • S/R • OB • Trendline • RSI Div • RSI+MACD\n"
+            f"Quality filter: <b>5/5 conditions required</b>\n"
+            f"{DLINE}\n"
+            f"📄 Paper trading: <b>ON</b>  balance: <code>{paper_balance:.0f} USDT</code>\n"
+            f"{LINE}\n"
+            f"<i>Signals will appear here when all 5 conditions align.</i>"
+        )
+
     def forex_paper_opened(self, pos, balance: float, open_count: int):
         sl_pct = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
         dir_tag = self._dir_tag(pos.direction)

@@ -72,6 +72,7 @@ class BybitExecutor:
                 f"[BYBIT] Executor ready | {env_label} ({host}) | key={masked_key} | "
                 f"leverage={leverage}x | risk={risk_pct*100:.1f}% per trade"
             )
+            self._set_position_mode()
         except ImportError:
             logger.error("[BYBIT] pybit not installed — run: pip install pybit")
             self.enabled = False
@@ -148,6 +149,31 @@ class BybitExecutor:
             logger.warning(f"[BYBIT] get_balance failed: {e} — using 1000 fallback")
             return 1000.0
 
+    def has_open_position(self, symbol: str) -> bool:
+        """Return True if there is already an open position for this symbol."""
+        try:
+            resp = self.session.get_positions(category="linear", symbol=symbol)
+            for pos in resp["result"]["list"]:
+                if float(pos.get("size", 0)) > 0:
+                    logger.info(f"[BYBIT] Skipping {symbol} — position already open (size={pos['size']})")
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"[BYBIT] get_positions({symbol}): {e} — assuming no position")
+            return False
+
+    def _set_position_mode(self):
+        """Switch account to one-way mode (positionIdx=0). Run once on init."""
+        try:
+            self.session.switch_position_mode(category="linear", mode=0)
+            logger.info("[BYBIT] Position mode set to one-way")
+        except Exception as e:
+            # Error 110025 = already in one-way mode — fine
+            if "110025" in str(e) or "already" in str(e).lower():
+                logger.info("[BYBIT] Already in one-way mode")
+            else:
+                logger.warning(f"[BYBIT] switch_position_mode: {e}")
+
     def _set_leverage(self, symbol: str) -> bool:
         """Set leverage for the symbol. Returns True on success."""
         try:
@@ -179,6 +205,10 @@ class BybitExecutor:
             return {}
 
         symbol    = self._to_symbol(signal["symbol"])
+
+        if self.has_open_position(symbol):
+            return {}
+
         direction = signal["direction"]
         entry     = float(signal["entry"])
         sl        = float(signal["sl"])
@@ -257,6 +287,7 @@ class BybitExecutor:
                     side=side,
                     orderType="Market",
                     qty=str(qty),
+                    positionIdx=0,          # one-way mode — never reduce-only
                     stopLoss=sl_price,
                     takeProfit=tp_price,
                     tpslMode="Full",
