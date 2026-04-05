@@ -1,7 +1,7 @@
 {
   "exchange": "okx",
   "channel_name": "",
-  "mode": "scalp",
+  "mode": "swing",
   "timeframe_sr": "1h",
 
   "dynamic_pairs": {

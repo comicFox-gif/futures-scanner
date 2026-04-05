@@ -354,15 +354,16 @@ class Bot:
                 if self.bybit.enabled:
                     self.bybit.move_sl_to_breakeven(symbol, pos.direction, pos.entry_price)
 
-    def _bybit_order(self, sig):
-        """Place order on Bybit testnet. Accepts Signal dataclass or dict."""
+    def _bybit_order(self, sig, symbol: str = ""):
+        """Place order on Bybit. Accepts Signal dataclass or dict."""
         if not self.bybit.enabled or self._session_paused:
             return
         if hasattr(sig, "entry_price"):   # Signal dataclass
             d = {"symbol": sig.symbol, "direction": sig.direction,
-                 "entry": sig.entry_price, "sl": sig.stop_loss, "tp3": sig.tp3, "atr": sig.atr}
+                 "entry": sig.entry_price, "sl": sig.stop_loss, "tp3": sig.tp3}
         else:
-            d = sig
+            # Dict signals don't include symbol — inject it from caller
+            d = {**sig, "symbol": symbol}
         self.bybit.place_order(d)
 
     def _calc_pnl(self, pos: Position, exit_price: float, size: float) -> float:
@@ -504,7 +505,7 @@ class Bot:
                         )
                         if sr_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.sr_confirmed_signal(sr_sig)
-                            self._bybit_order(sr_sig)
+                            self._bybit_order(sr_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(
@@ -537,7 +538,7 @@ class Bot:
                         )
                         if ob_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
-                            self._bybit_order(ob_sig)
+                            self._bybit_order(ob_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=ob_sig["direction"], symbol=symbol,
@@ -566,7 +567,7 @@ class Bot:
                         )
                         if tl_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
-                            self._bybit_order(tl_sig)
+                            self._bybit_order(tl_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=tl_sig["direction"], symbol=symbol,
@@ -595,7 +596,7 @@ class Bot:
                         )
                         if rd_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
-                            self._bybit_order(rd_sig)
+                            self._bybit_order(rd_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
@@ -624,7 +625,7 @@ class Bot:
                         )
                         if rm_sig["stage"] == 2 and not self._session_paused and q >= 4:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
-                            self._bybit_order(rm_sig)
+                            self._bybit_order(rm_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rm_sig["direction"], symbol=symbol,
