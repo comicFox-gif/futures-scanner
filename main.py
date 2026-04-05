@@ -121,7 +121,8 @@ def main():
         # Bybit
         "BYBIT_KEY":          os.getenv("BYBIT_KEY", ""),
         "BYBIT_SECRET":       os.getenv("BYBIT_SECRET", ""),
-        "BYBIT_TESTNET":      os.getenv("BYBIT_TESTNET", "true"),
+        "BYBIT_DEMO":         os.getenv("BYBIT_DEMO", "true"),   # demo trading (api-demo.bybit.com)
+        "BYBIT_TESTNET":      os.getenv("BYBIT_TESTNET", "false"),
         "BYBIT_LEVERAGE":     os.getenv("BYBIT_LEVERAGE", "10"),
         # Gate.io
         "GATE_API_KEY":       os.getenv("GATE_API_KEY", ""),

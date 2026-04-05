@@ -21,9 +21,15 @@ import traceback
 logger = logging.getLogger("futures_bot.bybit")
 
 
+DEMO_HOST    = "https://api-demo.bybit.com"
+TESTNET_HOST = "https://api-testnet.bybit.com"
+LIVE_HOST    = "https://api.bybit.com"
+
+
 class BybitExecutor:
     def __init__(self, api_key: str = "", api_secret: str = "",
-                 testnet: bool = True, leverage: int = 10, risk_pct: float = 0.01):
+                 demo: bool = True, testnet: bool = False,
+                 leverage: int = 10, risk_pct: float = 0.01):
         self.leverage = leverage
         self.risk_pct = risk_pct
         self.enabled  = bool(api_key and api_secret)
@@ -34,15 +40,25 @@ class BybitExecutor:
 
         try:
             from pybit.unified_trading import HTTP
+            # Demo trading uses api-demo.bybit.com (NOT testnet)
+            if demo:
+                base_url  = DEMO_HOST
+                env_label = "DEMO"
+            elif testnet:
+                base_url  = TESTNET_HOST
+                env_label = "TESTNET"
+            else:
+                base_url  = LIVE_HOST
+                env_label = "LIVE"
+
             self.session = HTTP(
-                testnet=testnet,
                 api_key=api_key,
                 api_secret=api_secret,
+                base_url=base_url,
             )
             masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "???"
-            env_label  = "TESTNET" if testnet else "LIVE"
             logger.info(
-                f"[BYBIT] Executor ready | {env_label} | key={masked_key} | "
+                f"[BYBIT] Executor ready | {env_label} ({base_url}) | key={masked_key} | "
                 f"leverage={leverage}x | risk={risk_pct*100:.0f}% per trade"
             )
         except ImportError:
