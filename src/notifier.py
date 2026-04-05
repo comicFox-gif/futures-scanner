@@ -74,15 +74,12 @@ class Notifier:
 
     def send_signal(self, message: str, forex_message: str = ""):
         """
-        Send confirmed signal to both channels.
-        - Main channel: full message (same as send())
-        - Forex channel: forex_message if provided, else same message
+        Send confirmed signal to main channel only.
+        Forex channel gets its own paper-trading notifications via send_forex().
+        forex_message param kept for signature compatibility but unused.
         """
         if self.enabled:
             self._post(self.token, self.chat_id, message)
-        if self.forex_enabled:
-            self._post(self.forex_token, self.forex_chat_id,
-                       forex_message if forex_message else message)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -589,4 +586,63 @@ class Notifier:
             f"{DLINE}\n"
             f"Context: {context}\n"
             f"<code>{error[:300]}</code>"
+        )
+
+    # ------------------------------------------------------------------
+    # Forex channel — paper trading notifications (forex bot only)
+    # ------------------------------------------------------------------
+
+    def send_forex(self, message: str):
+        """Send to forex channel only."""
+        if not self.forex_enabled:
+            return
+        self._post(self.forex_token, self.forex_chat_id, message)
+
+    def forex_paper_opened(self, pos, balance: float, open_count: int):
+        sl_pct = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
+        dir_tag = self._dir_tag(pos.direction)
+        self.send_forex(
+            f"📄 <b>Trade Opened</b>  [{pos.strategy_name}]\n"
+            f"{DLINE}\n"
+            f"{dir_tag}  •  <b>{pos.symbol}</b>\n"
+            f"📌 Entry:  <code>{pos.entry_price:.5f}</code>\n"
+            f"🛑 SL:     <code>{pos.stop_loss:.5f}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 TP1:    <code>{pos.tp1:.5f}</code>\n"
+            f"🎯 TP2:    <code>{pos.tp2:.5f}</code>\n"
+            f"🏆 TP3:    <code>{pos.tp3:.5f}</code>\n"
+            f"{DLINE}\n"
+            f"Risk: <code>${pos.margin_locked:.2f}</code>  |  "
+            f"Balance: <code>${balance:.2f}</code>  |  "
+            f"Open: <code>{open_count}</code>"
+        )
+
+    def forex_paper_tp_alert(self, pos, price: float, tp_level: int):
+        self.send_forex(
+            f"🎯 <b>TP{tp_level} Reached — {pos.symbol}</b>\n"
+            f"{DLINE}\n"
+            f"Price: <code>{price:.5f}</code>  |  TP3: <code>{pos.tp3:.5f}</code>\n"
+            f"<i>Holding — riding to TP3</i>"
+        )
+
+    def forex_paper_closed(self, pos, reason: str, exit_price: float,
+                           total_pnl: float, balance: float, tp_level: int, stats: dict):
+        emoji = "🏆" if tp_level == 3 else ("🛑" if reason == "SL hit" else "✅")
+        pct   = (exit_price - pos.entry_price) / pos.entry_price * 100
+        if pos.direction == "short":
+            pct = -pct
+
+        win_pct = stats["wins"] / stats["total"] * 100 if stats["total"] > 0 else 0
+        self.send_forex(
+            f"{emoji} <b>Trade Closed — {pos.symbol}</b>\n"
+            f"{DLINE}\n"
+            f"Result:  {reason}\n"
+            f"Entry:   <code>{pos.entry_price:.5f}</code>\n"
+            f"Exit:    <code>{exit_price:.5f}</code>  ({pct:+.2f}%)\n"
+            f"PnL:     <code>{total_pnl:+.2f} USDT</code>\n"
+            f"{DLINE}\n"
+            f"Balance: <code>${balance:.2f}</code>\n"
+            f"📊 <b>Stats</b> ({stats['total']} trades)  "
+            f"Win: <code>{win_pct:.0f}%</code>  "
+            f"TP3: <code>{stats['tp3']}</code>  "
+            f"SL: <code>{stats['sl']}</code>"
         )

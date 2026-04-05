@@ -90,6 +90,13 @@ class Bot:
         # Paper positions: symbol -> Position
         self._paper_positions: dict[str, Position] = {}
 
+        # Forex paper trading — parallel tracker, sends to forex channel
+        forex_cfg = cfg.get("forex_paper", {})
+        self.forex_paper_balance: float = forex_cfg.get("balance", 1000.0)
+        self.forex_paper_start:   float = self.forex_paper_balance
+        self._forex_positions:    dict[str, Position] = {}
+        self._forex_stats = {"tp3": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+
         # Session tracking: 50 trades opened → 5h pause → reset
         self._session_count     = 0          # trades opened this session
         self._session_paused    = False
@@ -366,6 +373,82 @@ class Bot:
                 if self.bybit.enabled:
                     self.bybit.move_sl_to_breakeven(symbol, pos.direction, pos.entry_price)
 
+    # ------------------------------------------------------------------
+    # Forex paper trading (parallel tracker → forex channel)
+    # ------------------------------------------------------------------
+
+    def _forex_paper_open(self, signal, strategy_name: str = ""):
+        """Open a forex paper position mirroring the confirmed signal."""
+        if not self.notifier.forex_enabled:
+            return
+        symbol = signal.symbol if hasattr(signal, "symbol") else signal.get("symbol", "")
+        if not symbol or symbol in self._forex_positions:
+            return
+
+        entry = signal.entry_price if hasattr(signal, "entry_price") else signal["entry"]
+        sl    = signal.stop_loss   if hasattr(signal, "stop_loss")   else signal["sl"]
+        tp1   = signal.tp1         if hasattr(signal, "tp1")         else signal["tp1"]
+        tp2   = signal.tp2         if hasattr(signal, "tp2")         else signal["tp2"]
+        tp3   = signal.tp3         if hasattr(signal, "tp3")         else signal["tp3"]
+        direction = signal.direction if hasattr(signal, "direction") else signal["direction"]
+
+        sl_dist = abs(entry - sl)
+        if sl_dist == 0:
+            return
+
+        risk_amount = round(self.forex_paper_balance * self.risk_pct, 2)
+        size        = round(risk_amount / sl_dist, 6)
+        if size <= 0:
+            return
+
+        self.forex_paper_balance -= risk_amount
+
+        pos = Position(
+            symbol=symbol, direction=direction,
+            entry_price=entry, stop_loss=sl,
+            tp1=tp1, tp2=tp2, tp3=tp3,
+            size=size, size_remaining=size,
+            margin_locked=risk_amount,
+            strategy_name=strategy_name,
+        )
+        self._forex_positions[symbol] = pos
+        logger.info(f"[FOREX PAPER] OPENED {direction.upper()} {symbol} @ {entry:.5f}")
+        self.notifier.forex_paper_opened(pos, self.forex_paper_balance, len(self._forex_positions))
+
+    def _forex_paper_tick(self, symbol: str, current_price: float):
+        """Check forex paper position and send updates to forex channel."""
+        pos = self._forex_positions.get(symbol)
+        if not pos:
+            return
+
+        actions = self.strategy.check_position(pos, current_price)
+        for action in actions:
+            act = action["action"]
+
+            if act == "close_all":
+                reason   = action.get("reason", "")
+                tp_level = action.get("tp_level", 0)
+                exit_price = pos.stop_loss if reason == "SL hit" else (pos.tp3 if tp_level == 3 else current_price)
+                pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
+                pos.closed_pnl += pnl
+                self.forex_paper_balance += pos.margin_locked + pnl
+
+                result = "tp3" if tp_level == 3 else ("sl" if reason == "SL hit" else "other")
+                self._forex_stats["total"] += 1
+                if tp_level == 3:        self._forex_stats["tp3"] += 1
+                elif reason == "SL hit": self._forex_stats["sl"]  += 1
+                if pos.closed_pnl > 0:   self._forex_stats["wins"] += 1
+
+                del self._forex_positions[symbol]
+                logger.info(f"[FOREX PAPER] CLOSED {symbol} | {reason} @ {exit_price:.5f} | PnL={pnl:+.2f}")
+                self.notifier.forex_paper_closed(pos, reason, exit_price, pos.closed_pnl,
+                                                 self.forex_paper_balance, tp_level, self._forex_stats)
+                return
+
+            elif act in ("notify_tp1", "notify_tp2"):
+                tp_level = 1 if act == "notify_tp1" else 2
+                self.notifier.forex_paper_tp_alert(pos, current_price, tp_level)
+
     def _bybit_order(self, sig, symbol: str = ""):
         """Place order on Bybit. Accepts Signal dataclass or dict."""
         if not self.bybit.enabled or self._session_paused:
@@ -476,6 +559,8 @@ class Bot:
                 # Paper position management (always runs if position is open)
                 if self.paper_enabled and symbol in self._paper_positions:
                     self._paper_tick(symbol, current_price)
+                if symbol in self._forex_positions:
+                    self._forex_paper_tick(symbol, current_price)
 
                 in_paper = self.paper_enabled and symbol in self._paper_positions
 
@@ -484,18 +569,19 @@ class Bot:
                     signal = self.strategy.generate_signal(symbol, htf_df, entry_df)
 
                     if signal.stage == 2 and not self._is_on_cooldown(symbol, signal.direction + "_ema", signal.stage):
-                        quality = 4  # EMA continuation requires 4/5 conditions → quality 4
+                        quality = 5  # EMA requires all 5 conditions
                         logger.info(
                             f"[EMA CONFIRMED] {signal.direction.upper()} {symbol} "
                             f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | Q={quality} | {signal.reason}"
                         )
-                        if not self._session_paused and quality >= 4:
+                        if not self._session_paused and quality >= 5:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal, "EMA Momentum")
+                            self._forex_paper_open(signal, "EMA Momentum")
                             self._bybit_order(signal)
                         else:
-                            logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 4")
+                            logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 5")
 
                         self._mark_sent(symbol, signal.direction + "_ema", signal.stage)
                         self._daily_alerts.append({"stage": signal.stage, "direction": signal.direction, "symbol": symbol})
@@ -511,9 +597,11 @@ class Bot:
                             f"[SR CONFIRMED] {sr_sig['direction'].upper()} {symbol} "
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 4:
+                        if not self._session_paused and q >= 5:
                             self.notifier.sr_confirmed_signal(sr_sig)
                             self._bybit_order(sr_sig, symbol)
+                            if symbol not in self._forex_positions:
+                                self._forex_paper_open(sr_sig, "S/R Bounce")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(
@@ -526,7 +614,7 @@ class Bot:
                                 )
                                 self._paper_open(dummy, "S/R Bounce")
                         else:
-                            logger.info(f"[SR] Skipped {symbol} — quality {q} < 4")
+                            logger.info(f"[SR] Skipped {symbol} — quality {q} < 5")
 
                         self._mark_sent(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"])
                         self._daily_alerts.append({"stage": sr_sig["stage"], "direction": sr_sig["direction"], "symbol": symbol})
@@ -541,9 +629,11 @@ class Bot:
                             f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} "
                             f"@ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 4:
+                        if not self._session_paused and q >= 5:
                             self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
                             self._bybit_order(ob_sig, symbol)
+                            if symbol not in self._forex_positions:
+                                self._forex_paper_open(ob_sig, "Order Block")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=ob_sig["direction"], symbol=symbol,
@@ -553,7 +643,7 @@ class Bot:
                                             reason=ob_sig.get("reason", ""))
                                 self._paper_open(dummy, "Order Block")
                         else:
-                            logger.info(f"[OB] Skipped {symbol} — quality {q} < 4")
+                            logger.info(f"[OB] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
                         self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -567,9 +657,11 @@ class Bot:
                             f"[TL CONFIRMED] {tl_sig['direction'].upper()} {symbol} "
                             f"@ {tl_sig['entry']:.4f} | Q={q} | {tl_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 4:
+                        if not self._session_paused and q >= 5:
                             self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
                             self._bybit_order(tl_sig, symbol)
+                            if symbol not in self._forex_positions:
+                                self._forex_paper_open(tl_sig, "Trendline")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=tl_sig["direction"], symbol=symbol,
@@ -579,7 +671,7 @@ class Bot:
                                             reason=tl_sig.get("reason", ""))
                                 self._paper_open(dummy, "Trendline")
                         else:
-                            logger.info(f"[TL] Skipped {symbol} — quality {q} < 4")
+                            logger.info(f"[TL] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"])
                         self._daily_alerts.append({"stage": tl_sig["stage"], "direction": tl_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -593,9 +685,11 @@ class Bot:
                             f"[DIV CONFIRMED] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 4:
+                        if not self._session_paused and q >= 5:
                             self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
                             self._bybit_order(rd_sig, symbol)
+                            if symbol not in self._forex_positions:
+                                self._forex_paper_open(rd_sig, "RSI Divergence")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
@@ -605,7 +699,7 @@ class Bot:
                                             reason=rd_sig.get("reason", ""))
                                 self._paper_open(dummy, "RSI Divergence")
                         else:
-                            logger.info(f"[DIV] Skipped {symbol} — quality {q} < 4")
+                            logger.info(f"[DIV] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -619,9 +713,11 @@ class Bot:
                             f"[RM CONFIRMED] {rm_sig['direction'].upper()} {symbol} "
                             f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | Q={q} | {rm_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 4:
+                        if not self._session_paused and q >= 5:
                             self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
                             self._bybit_order(rm_sig, symbol)
+                            if symbol not in self._forex_positions:
+                                self._forex_paper_open(rm_sig, "RSI+MACD Reversal")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rm_sig["direction"], symbol=symbol,
@@ -631,7 +727,7 @@ class Bot:
                                             reason=rm_sig.get("reason", ""))
                                 self._paper_open(dummy, "RSI+MACD Reversal")
                         else:
-                            logger.info(f"[RM] Skipped {symbol} — quality {q} < 4")
+                            logger.info(f"[RM] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"])
                         self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": symbol})
                         signals_found += 1
