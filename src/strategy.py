@@ -631,11 +631,8 @@ class Strategy:
         Check open paper position against current price.
         Returns list of action dicts to execute.
 
-        Partial-close schedule:
-          TP1 → notify only
-          TP2 → close 50% of position (banks 1R), SL stays at original
-          TP3 → close all remaining 50%
-          SL  → original SL throughout, no break-even move
+        Simple schedule — notify at TP1/TP2, close all at TP3 or SL.
+        No partials, no BE move. User manages manually if needed.
         """
         actions = []
 
@@ -648,7 +645,7 @@ class Strategy:
                 pos.tp3_hit = True
                 return actions
             if not pos.tp2_hit and current_price >= pos.tp2:
-                actions.append({"action": "close_partial", "pct": 0.5, "tp_level": 2})
+                actions.append({"action": "notify_tp2"})
                 pos.tp2_hit = True
             elif not pos.tp1_hit and current_price >= pos.tp1:
                 actions.append({"action": "notify_tp1"})
@@ -663,7 +660,7 @@ class Strategy:
                 pos.tp3_hit = True
                 return actions
             if not pos.tp2_hit and current_price <= pos.tp2:
-                actions.append({"action": "close_partial", "pct": 0.5, "tp_level": 2})
+                actions.append({"action": "notify_tp2"})
                 pos.tp2_hit = True
             elif not pos.tp1_hit and current_price <= pos.tp1:
                 actions.append({"action": "notify_tp1"})

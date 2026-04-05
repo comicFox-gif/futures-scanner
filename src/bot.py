@@ -322,7 +322,10 @@ class Bot:
                 return
 
             elif act == "notify_tp1":
-                self.notifier.paper_tp1_alert(pos, current_price)
+                self.notifier.paper_tp1_alert(pos, current_price, tp_level=1)
+
+            elif act == "notify_tp2":
+                self.notifier.paper_tp1_alert(pos, current_price, tp_level=2)
 
             elif act == "close_partial":
                 pct        = action["pct"]

@@ -319,14 +319,14 @@ class Notifier:
             f"{session_line}"
         )
 
-    def paper_tp1_alert(self, pos, price: float):
-        """TP1 reached — notify only, no position change, SL stays at original."""
+    def paper_tp1_alert(self, pos, price: float, tp_level: int = 1):
+        """TP1 or TP2 reached — notify only, no position change."""
         strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
         self.send(
-            f"🎯 <b>[PAPER] TP1 reached — {pos.symbol}</b>{strat_tag}\n"
+            f"🎯 <b>[PAPER] TP{tp_level} reached — {pos.symbol}</b>{strat_tag}\n"
             f"{DLINE}\n"
-            f"Price: <code>{price:.5f}</code>\n"
-            f"<i>Holding full position — waiting for TP2 to activate Break-Even</i>"
+            f"Price: <code>{price:.5f}</code>  |  TP3: <code>{pos.tp3:.5f}</code>\n"
+            f"<i>Holding full position — riding to TP3</i>"
         )
 
     def paper_tp_hit(self, pos, tp_level: int, price: float, pnl: float, balance: float):
