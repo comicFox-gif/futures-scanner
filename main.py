@@ -99,14 +99,21 @@ def main():
         cfg["symbols"] = [s.strip() for s in args.symbol.split(",")]
 
     env = {
-        "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "bybit")),
+        "EXCHANGE":           os.getenv("EXCHANGE", cfg.get("exchange", "okx")),
         "API_KEY":            os.getenv("API_KEY", ""),
         "API_SECRET":         os.getenv("API_SECRET", ""),
+        "API_PASSPHRASE":     os.getenv("API_PASSPHRASE", ""),
+        # Bybit
+        "BYBIT_KEY":          os.getenv("BYBIT_KEY", ""),
+        "BYBIT_SECRET":       os.getenv("BYBIT_SECRET", ""),
+        "BYBIT_TESTNET":      os.getenv("BYBIT_TESTNET", "true"),
+        "BYBIT_LEVERAGE":     os.getenv("BYBIT_LEVERAGE", "10"),
+        # Gate.io
         "GATE_API_KEY":       os.getenv("GATE_API_KEY", ""),
         "GATE_API_SECRET":    os.getenv("GATE_API_SECRET", ""),
         "GATE_TESTNET":       os.getenv("GATE_TESTNET", "true"),
         "GATE_LEVERAGE":      os.getenv("GATE_LEVERAGE", "10"),
-        "GATE_RISK_PCT":      os.getenv("GATE_RISK_PCT", "0.03"),
+        "GATE_RISK_PCT":      os.getenv("GATE_RISK_PCT", "0.01"),
     }
 
     bot = Bot(cfg, env)

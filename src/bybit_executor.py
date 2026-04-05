@@ -1,184 +1,192 @@
 """
-OKX Demo Trading Executor
----------------------------
-Places real orders on OKX simulated/demo trading when confirmed signals fire.
-Uses the same OKX API keys already configured — just adds x-simulated-trading header.
-No geo-blocking issues since OKX already works on Railway.
+Bybit Futures Executor (pybit SDK)
+------------------------------------
+Places real orders on Bybit testnet when confirmed signals fire.
+Uses official pybit library — entry + SL + TP in a single place_order() call.
 
-Env vars (same ones already set for the scanner):
-  API_KEY        — OKX API key
-  API_SECRET     — OKX API secret
-  API_PASSPHRASE — OKX passphrase
+pip install pybit
 
-OKX simulated trading runs on real market data with virtual funds.
+Env vars:
+  BYBIT_KEY      — Bybit API key
+  BYBIT_SECRET   — Bybit API secret
+  BYBIT_TESTNET  — "true" (default) or "false" for live
+
+Risk: 1% of account balance per trade (SL always costs exactly 1%).
 """
 
 from __future__ import annotations
 import logging
-import os
-import ccxt
+import traceback
 
-logger = logging.getLogger("futures_bot.demo_executor")
-
-# OKX minimum order sizes (contracts) for USDT swap pairs
-_MIN_QTY = {
-    "BTC/USDT:USDT":  0.01,
-    "ETH/USDT:USDT":  0.1,
-    "SOL/USDT:USDT":  1.0,
-    "BNB/USDT:USDT":  0.1,
-    "XRP/USDT:USDT":  10.0,
-    "ADA/USDT:USDT":  10.0,
-    "DOGE/USDT:USDT": 10.0,
-}
-_DEFAULT_MIN_QTY = 1.0
+logger = logging.getLogger("futures_bot.bybit")
 
 
-class BybitExecutor:  # keep class name so bot.py import doesn't break
-    """OKX demo trading executor (Bybit was geo-blocked on Railway)."""
-
-    def __init__(self, risk_pct: float = 0.01):
+class BybitExecutor:
+    def __init__(self, api_key: str = "", api_secret: str = "",
+                 testnet: bool = True, leverage: int = 10, risk_pct: float = 0.01):
+        self.leverage = leverage
         self.risk_pct = risk_pct
-        api_key    = os.getenv("API_KEY", "")
-        api_secret = os.getenv("API_SECRET", "")
-        passphrase = os.getenv("API_PASSPHRASE", "")
+        self.enabled  = bool(api_key and api_secret)
 
-        if not api_key or not api_secret or not passphrase:
-            logger.warning("OKX API keys not set — demo executor disabled")
-            self.enabled  = False
-            self.exchange = None
+        if not self.enabled:
+            logger.info("[BYBIT] No API keys — executor disabled")
             return
 
-        # x-simulated-trading: 1 switches OKX to demo/paper mode
-        self.exchange = ccxt.okx({
-            "apiKey":    api_key,
-            "secret":    api_secret,
-            "password":  passphrase,
-            "enableRateLimit": True,
-            "options":   {"defaultType": "swap"},
-            "headers":   {"x-simulated-trading": "1"},
-        })
-
         try:
-            self.exchange.load_markets()
-            self.enabled = True
-            logger.info("OKX demo executor connected (simulated trading ON)")
+            from pybit.unified_trading import HTTP
+            self.session = HTTP(
+                testnet=testnet,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "???"
+            env_label  = "TESTNET" if testnet else "LIVE"
+            logger.info(
+                f"[BYBIT] Executor ready | {env_label} | key={masked_key} | "
+                f"leverage={leverage}x | risk={risk_pct*100:.0f}% per trade"
+            )
+        except ImportError:
+            logger.error("[BYBIT] pybit not installed — run: pip install pybit")
+            self.enabled = False
         except Exception as e:
-            logger.error(f"OKX demo connection failed: {e}")
+            logger.error(f"[BYBIT] Init failed: {e}")
             self.enabled = False
 
     # ------------------------------------------------------------------
-    # Balance
+    # Helpers
     # ------------------------------------------------------------------
+
+    def _to_symbol(self, symbol: str) -> str:
+        """'BTC/USDT:USDT' → 'BTCUSDT'"""
+        return symbol.split(":")[0].replace("/", "")
+
+    @staticmethod
+    def _fmt(price: float, decimals: int = 4) -> str:
+        """Format price to avoid floating-point noise."""
+        return f"{price:.{decimals}f}".rstrip("0").rstrip(".")
 
     def _get_balance(self) -> float:
+        """Fetch available USDT balance from Bybit unified account."""
         try:
-            bal  = self.exchange.fetch_balance(params={"type": "swap"})
-            usdt = bal.get("USDT", {})
-            return float(usdt.get("free") or usdt.get("total") or 0)
-        except Exception as e:
-            logger.error(f"OKX demo fetch_balance error: {e}")
+            resp  = self.session.get_wallet_balance(accountType="UNIFIED")
+            coins = resp["result"]["list"][0]["coin"]
+            for c in coins:
+                if c["coin"] == "USDT":
+                    return float(c["availableToWithdraw"] or c["walletBalance"] or 0)
             return 0.0
+        except Exception as e:
+            logger.warning(f"[BYBIT] get_balance failed: {e} — using 1000 fallback")
+            return 1000.0
 
-    # ------------------------------------------------------------------
-    # Place order
-    # ------------------------------------------------------------------
-
-    def place_order(self, signal: dict) -> bool:
-        """
-        Market order with SL + TP on OKX demo trading.
-        signal keys: symbol, direction, entry, sl, tp3
-        """
-        if not self.enabled:
+    def _set_leverage(self, symbol: str) -> bool:
+        """Set leverage for the symbol. Returns True on success."""
+        try:
+            self.session.set_leverage(
+                category="linear",
+                symbol=symbol,
+                buyLeverage=str(self.leverage),
+                sellLeverage=str(self.leverage),
+            )
+            logger.info(f"[BYBIT] Leverage set to {self.leverage}x for {symbol}")
+            return True
+        except Exception as e:
+            # Bybit returns error if leverage is already set to the same value — that's fine
+            if "leverage not modified" in str(e).lower() or "110043" in str(e):
+                logger.info(f"[BYBIT] Leverage already {self.leverage}x for {symbol}")
+                return True
+            logger.warning(f"[BYBIT] set_leverage({symbol}): {e}")
             return False
 
-        symbol    = signal["symbol"]
+    # ------------------------------------------------------------------
+    # Open position
+    # ------------------------------------------------------------------
+
+    def place_order(self, signal: dict) -> dict:
+        """
+        Place market entry + SL + TP3 on Bybit in a single API call.
+        Returns {"order_id": str} or {} on failure.
+        """
+        if not self.enabled:
+            return {}
+
+        symbol    = self._to_symbol(signal["symbol"])
         direction = signal["direction"]
         entry     = float(signal["entry"])
-        sl_price  = float(signal["sl"])
-        tp_price  = float(signal["tp3"])
-        side      = "buy" if direction == "long" else "sell"
+        sl        = float(signal["sl"])
+        tp3       = float(signal["tp3"])
+        side      = "Buy" if direction == "long" else "Sell"
 
-        # Sanity check
-        if direction == "long" and not (sl_price < entry < tp_price):
-            logger.warning(f"[DEMO] Bad levels LONG {symbol}: SL={sl_price} E={entry} TP={tp_price}")
-            return False
-        if direction == "short" and not (tp_price < entry < sl_price):
-            logger.warning(f"[DEMO] Bad levels SHORT {symbol}: TP={tp_price} E={entry} SL={sl_price}")
-            return False
-
-        sl_dist = abs(entry - sl_price)
+        sl_dist = abs(entry - sl)
         if sl_dist == 0:
-            return False
+            return {}
 
-        balance = self._get_balance()
-        if balance < 1:
-            logger.warning(f"[DEMO] Balance too low: ${balance:.2f}")
-            return False
+        # Sanity check direction
+        if direction == "long" and not (sl < entry < tp3):
+            logger.warning(f"[BYBIT] Bad levels LONG {symbol}: SL={sl} E={entry} TP={tp3}")
+            return {}
+        if direction == "short" and not (tp3 < entry < sl):
+            logger.warning(f"[BYBIT] Bad levels SHORT {symbol}: TP={tp3} E={entry} SL={sl}")
+            return {}
 
-        risk_amount = balance * self.risk_pct
-        raw_size    = risk_amount / sl_dist
-        min_qty     = _MIN_QTY.get(symbol, _DEFAULT_MIN_QTY)
-        size        = max(round(raw_size, 2), min_qty)
-
-        try:
-            params = {
-                "tdMode": "cross",      # cross margin for swaps
-                "posSide": "net",       # one-way mode
-                "slOrdPx": str(round(sl_price, 6)),
-                "slTriggerPx": str(round(sl_price, 6)),
-                "tpOrdPx": str(round(tp_price, 6)),
-                "tpTriggerPx": str(round(tp_price, 6)),
-            }
-            order = self.exchange.create_order(
-                symbol=symbol,
-                type="market",
-                side=side,
-                amount=size,
-                params=params,
-            )
-            order_id = order.get("id", "?")
-            logger.info(
-                f"[DEMO] ✅ {direction.upper()} {symbol} | "
-                f"Size={size} | SL={sl_price:.5f} | TP={tp_price:.5f} | "
-                f"Balance=${balance:.2f} | ID={order_id}"
-            )
-            return True
-
-        except ccxt.InvalidOrder as e:
-            logger.error(f"[DEMO] InvalidOrder {symbol}: {e}")
-        except ccxt.InsufficientFunds as e:
-            logger.error(f"[DEMO] InsufficientFunds {symbol}: {e}")
-        except ccxt.ExchangeError as e:
-            logger.error(f"[DEMO] ExchangeError {symbol}: {e}")
-        except Exception as e:
-            logger.error(f"[DEMO] Unexpected error {symbol}: {e}")
-        return False
-
-    # ------------------------------------------------------------------
-    # Open positions
-    # ------------------------------------------------------------------
-
-    def get_open_positions(self) -> list[dict]:
-        if not self.enabled:
-            return []
-        try:
-            positions = self.exchange.fetch_positions()
-            return [p for p in positions if abs(float(p.get("contracts", 0) or 0)) > 0]
-        except Exception as e:
-            logger.error(f"[DEMO] fetch_positions error: {e}")
-            return []
-
-    def status_summary(self) -> str:
-        if not self.enabled:
-            return "OKX Demo: disabled"
         balance   = self._get_balance()
-        positions = self.get_open_positions()
-        if not positions:
-            return f"OKX Demo | Balance: ${balance:.2f} | No open positions"
-        lines = [f"OKX Demo | Balance: ${balance:.2f}"]
-        for p in positions:
-            sym  = p.get("symbol", "?")
-            side = p.get("side", "?")
-            pnl  = float(p.get("unrealizedPnl", 0) or 0)
-            lines.append(f"  {sym} {side} | uPnL: {pnl:+.2f}")
-        return "\n".join(lines)
+        risk_usdt = round(balance * self.risk_pct, 2)
+        # qty in base currency: how many coins to buy/sell so SL = risk_usdt
+        qty       = round(risk_usdt / sl_dist, 6)
+
+        logger.info(
+            f"[BYBIT] Balance={balance:.2f} | Risk={self.risk_pct*100:.0f}%={risk_usdt:.2f} USDT | "
+            f"qty={qty} {symbol}"
+        )
+
+        if not self._set_leverage(symbol):
+            logger.error(f"[BYBIT] Aborting {symbol} — could not set leverage")
+            return {}
+
+        try:
+            resp = self.session.place_order(
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Market",
+                qty=str(qty),
+                stopLoss=self._fmt(sl),
+                takeProfit=self._fmt(tp3),
+                tpslMode="Full",        # apply TP/SL to full position
+                slOrderType="Market",   # SL triggers as market order
+                tpOrderType="Limit",    # TP as limit order
+            )
+            order_id = resp["result"]["orderId"]
+            logger.info(
+                f"[BYBIT] ENTRY {side.upper()} {symbol} qty={qty} | "
+                f"SL={self._fmt(sl)} | TP3={self._fmt(tp3)} | id={order_id}"
+            )
+            return {"order_id": order_id}
+
+        except Exception as e:
+            detail = getattr(e, "message", str(e))
+            logger.error(f"[BYBIT] place_order({symbol}): {detail}\n{traceback.format_exc()}")
+            return {}
+
+    # ------------------------------------------------------------------
+    # Move SL to break-even (called when TP2 hit)
+    # ------------------------------------------------------------------
+
+    def move_sl_to_breakeven(self, symbol: str, direction: str, entry_price: float) -> bool:
+        """Move SL to entry price (break-even) using set_trading_stop."""
+        if not self.enabled:
+            return False
+
+        bybit_symbol = self._to_symbol(symbol)
+        try:
+            self.session.set_trading_stop(
+                category="linear",
+                symbol=bybit_symbol,
+                stopLoss=self._fmt(entry_price),
+                positionIdx=0,      # one-way mode
+                tpslMode="Full",
+            )
+            logger.info(f"[BYBIT] BE SL moved to {self._fmt(entry_price)} for {bybit_symbol}")
+            return True
+        except Exception as e:
+            logger.error(f"[BYBIT] move_sl_to_breakeven({bybit_symbol}): {e}")
+            return False

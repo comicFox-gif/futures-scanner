@@ -23,7 +23,7 @@ LIVE_HOST    = "https://api.gateio.ws/api/v4"
 
 class GateExecutor:
     def __init__(self, api_key: str = "", api_secret: str = "",
-                 testnet: bool = True, leverage: int = 10, risk_pct: float = 0.03):
+                 testnet: bool = True, leverage: int = 10, risk_pct: float = 0.01):
         self.leverage = leverage
         self.risk_pct = risk_pct   # e.g. 0.03 = 3% of account per trade
         self.enabled  = bool(api_key and api_secret)

@@ -74,7 +74,13 @@ class Bot:
         self.rm_strategy = RSIMACDReversalStrategy(cfg)
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
-        self.bybit       = BybitExecutor()
+        self.bybit       = BybitExecutor(
+            api_key  = env.get("BYBIT_KEY", ""),
+            api_secret = env.get("BYBIT_SECRET", ""),
+            testnet  = env.get("BYBIT_TESTNET", "true").lower() != "false",
+            leverage = int(env.get("BYBIT_LEVERAGE", "10")),
+            risk_pct = self.risk_pct,
+        )
         self.gate        = GateExecutor(
             api_key    = env.get("GATE_API_KEY", ""),
             api_secret = env.get("GATE_API_SECRET", ""),
@@ -360,7 +366,10 @@ class Bot:
                 be_note   = " → Break-Even" if new_sl == pos.entry_price else f" → {new_sl:.4f}"
                 logger.info(f"[PAPER] SL moved{be_note} for {symbol}")
                 self.notifier.paper_tp_hit(pos, 2, pos.tp2, 0, self.paper_balance)
-                # Move SL to break-even on Gate.io testnet
+                # Move SL to break-even on Bybit
+                if self.bybit.enabled:
+                    self.bybit.move_sl_to_breakeven(symbol, pos.direction, pos.entry_price)
+                # Move SL to break-even on Gate.io
                 if self.gate.enabled and pos.gate_sl_order_id:
                     new_gate_sl_id = self.gate.move_sl_to_breakeven(
                         symbol=symbol, direction=pos.direction,
