@@ -37,9 +37,11 @@ LIVE_HOST    = "https://api.bybit.com"
 class BybitExecutor:
     def __init__(self, api_key: str = "", api_secret: str = "",
                  demo: bool = True, testnet: bool = False,
-                 leverage: int = 10, risk_pct: float = 0.01):
-        self.leverage = leverage
-        self.risk_pct = risk_pct
+                 leverage: int = 10, risk_pct: float = 0.01,
+                 max_positions: int = 50):
+        self.leverage      = leverage
+        self.risk_pct      = risk_pct
+        self.max_positions = max_positions
         self.enabled  = bool(api_key and api_secret)
         self._instrument_cache: dict[str, dict] = {}
 
@@ -202,14 +204,16 @@ class BybitExecutor:
         # --- qty = coins such that loss at SL == risk_usdt ---
         qty = risk_usdt / sl_dist
 
-        # --- Hard cap: single position notional ≤ 20% of balance * leverage ---
-        # Prevents absurd sizes on tight SLs or large demo balances.
-        max_notional      = balance * self.leverage * 0.20
+        # --- Margin cap: each slot gets balance/max_positions margin ---
+        # With 50 open positions, each one can use at most 1/50th of balance as margin.
+        # notional = margin * leverage → cap = (balance / max_positions) * leverage
+        slot_margin       = balance / self.max_positions
+        max_notional      = slot_margin * self.leverage
         max_qty_by_margin = max_notional / entry
         if qty > max_qty_by_margin:
             logger.info(
-                f"[BYBIT] qty capped by margin: {qty:.4f} → {max_qty_by_margin:.4f} "
-                f"(notional cap={max_notional:.0f} USDT)"
+                f"[BYBIT] qty capped to slot margin: {qty:.4f} → {max_qty_by_margin:.4f} "
+                f"(slot={slot_margin:.0f} USDT margin | notional cap={max_notional:.0f} USDT)"
             )
             qty = max_qty_by_margin
 

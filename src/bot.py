@@ -74,12 +74,13 @@ class Bot:
         self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
         self.exchange    = self._init_exchange(cfg, env)
         self.bybit       = BybitExecutor(
-            api_key    = env.get("BYBIT_KEY", ""),
-            api_secret = env.get("BYBIT_SECRET", ""),
-            demo       = env.get("BYBIT_DEMO", "true").lower() != "false",
-            testnet    = env.get("BYBIT_TESTNET", "false").lower() == "true",
-            leverage   = int(env.get("BYBIT_LEVERAGE", "10")),
-            risk_pct   = self.risk_pct,
+            api_key       = env.get("BYBIT_KEY", ""),
+            api_secret    = env.get("BYBIT_SECRET", ""),
+            demo          = env.get("BYBIT_DEMO", "true").lower() != "false",
+            testnet       = env.get("BYBIT_TESTNET", "false").lower() == "true",
+            leverage      = int(env.get("BYBIT_LEVERAGE", "10")),
+            risk_pct      = self.risk_pct,
+            max_positions = 50,
         )
         self.pair_selector = PairSelector(self.exchange, cfg)
 
