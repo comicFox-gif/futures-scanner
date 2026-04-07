@@ -245,7 +245,8 @@ class Bot:
         tp2 = sig_tp2 + offset
         tp3 = sig_tp3 + offset
 
-        risk_amount = round(self.paper_balance * self.risk_pct, 2)
+        # Hard cap: max $5 SL exposure per paper trade
+        risk_amount = round(min(self.paper_balance * self.risk_pct, 5.0), 2)
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -296,15 +297,11 @@ class Bot:
             act = action["action"]
 
             if act == "close_all":
-                # Use SL price as exit on SL hit — no slippage in paper trading
-                reason = action.get("reason", "")
+                # Use live Bybit price as exit — simulates real fill price.
+                # current_price is already the live ticker fetched each scan.
+                reason   = action.get("reason", "")
                 tp_level = action.get("tp_level", 0)
-                if reason == "SL hit":
-                    exit_price = pos.stop_loss
-                elif tp_level == 3:
-                    exit_price = pos.tp3
-                else:
-                    exit_price = current_price
+                exit_price = current_price
                 pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
                 pos.closed_pnl += pnl
                 self.paper_balance += pos.margin_locked + pnl
@@ -435,7 +432,7 @@ class Bot:
         tp2 = sig_tp2 + offset
         tp3 = sig_tp3 + offset
 
-        risk_amount = round(self.forex_paper_balance * self.risk_pct, 2)
+        risk_amount = round(min(self.forex_paper_balance * self.risk_pct, 5.0), 2)
         size        = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return

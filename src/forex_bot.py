@@ -182,8 +182,8 @@ class ForexBot:
         if sl_dist == 0:
             return
 
-        # Fixed $20 risk per trade regardless of balance
-        risk_amount = round(self.paper_balance * self.risk_pct, 2)  # 3% of current balance
+        # Hard cap: max $5 SL exposure per paper trade
+        risk_amount = round(min(self.paper_balance * self.risk_pct, 5.0), 2)
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -225,15 +225,10 @@ class ForexBot:
         for action in actions:
             act = action["action"]
             if act == "close_all":
-                tp_level = action.get("tp_level", 0)
+                tp_level     = action.get("tp_level", 0)
                 close_reason = action.get("reason", "")
-                # Use exact level price as exit — no slippage in paper trading
-                if close_reason == "SL hit":
-                    exit_price = pos.stop_loss
-                elif tp_level == 3:
-                    exit_price = pos.tp3
-                else:
-                    exit_price = price
+                # Use live market price as exit — simulates real fill
+                exit_price = price
                 pnl = self._pnl(pos, exit_price, pos.size_remaining)
                 pos.closed_pnl += pnl
                 self.paper_balance += pos.margin_locked + pnl
