@@ -95,13 +95,24 @@ class Notifier:
     # Helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _tp_pct(price: float, tp: float, direction: str) -> float:
+        """Actual TP distance from entry as a percentage."""
+        if direction == "long":
+            return (tp - price) / price * 100
+        return (price - tp) / price * 100
+
     def _forex_signal_msg(self, no: int, strategy_name: str, direction: str,
                           symbol: str, price: float, sl: float,
                           tp1: float, tp2: float, tp3: float,
                           sl_pct: float, reason: str) -> str:
         """Clean signal format for the public forex channel."""
         dir_tag = self._dir_tag(direction)
-        ts = datetime.utcnow().strftime("%H:%M UTC")
+        ts      = datetime.utcnow().strftime("%H:%M UTC")
+        tp1_pct = self._tp_pct(price, tp1, direction)
+        tp2_pct = self._tp_pct(price, tp2, direction)
+        tp3_pct = self._tp_pct(price, tp3, direction)
+        rr      = round(tp3_pct / sl_pct, 1) if sl_pct else 0
         return (
             f"🚨 <b>#{no:03d} {dir_tag}</b>\n"
             f"{LINE}\n"
@@ -109,9 +120,9 @@ class Notifier:
             f"{DLINE}\n"
             f"📌 Entry:  <code>{price:.5f}</code>\n"
             f"🛑 SL:     <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1:    <code>{tp1:.5f}</code>  (+{sl_pct:.2f}%)\n"
-            f"🎯 TP2:    <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%)\n"
-            f"🏆 TP3:    <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%)\n"
+            f"🎯 TP1:    <code>{tp1:.5f}</code>  (+{tp1_pct:.2f}%)\n"
+            f"🎯 TP2:    <code>{tp2:.5f}</code>  (+{tp2_pct:.2f}%)\n"
+            f"🏆 TP3:    <code>{tp3:.5f}</code>  (+{tp3_pct:.2f}%)\n"
             f"{DLINE}\n"
             f"<i>{reason}</i>\n"
             f"<i>{ts}</i>"
@@ -214,6 +225,10 @@ class Notifier:
         sl_pct  = abs(price - sl) / price * 100
         dir_tag = self._dir_tag(direction)
 
+        tp1_pct = self._tp_pct(price, tp1, direction)
+        tp2_pct = self._tp_pct(price, tp2, direction)
+        tp3_pct = self._tp_pct(price, tp3, direction)
+        rr      = round(tp3_pct / sl_pct, 1) if sl_pct else 0
         forex_msg = self._forex_signal_msg(no, strategy_name, direction, symbol,
                                             price, sl, tp1, tp2, tp3, sl_pct, reason)
         self.send_signal(
@@ -224,10 +239,10 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry:  <code>{price:.4f}</code>\n"
             f"🛑 SL:  <code>{sl:.4f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{sl_pct:.2f}%)\n"
-            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{sl_pct*2:.2f}%)\n"
-            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{sl_pct*3:.2f}%)\n"
-            f"R:R = 1 : 3\n"
+            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{tp1_pct:.2f}%)\n"
+            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{tp2_pct:.2f}%)\n"
+            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{tp3_pct:.2f}%)\n"
+            f"R:R = 1 : {rr}\n"
             f"{DLINE}\n"
             f"📊 RSI: <code>{rsi:.1f}</code>  Vol: <code>{vol:.1f}x avg</code>\n"
             f"<i>{reason}</i>\n"
@@ -258,6 +273,10 @@ class Notifier:
         dir_tag  = self._dir_tag(direction)
         lv_type  = "Support" if direction == "long" else "Resistance"
 
+        tp1_pct = self._tp_pct(price, tp1, direction)
+        tp2_pct = self._tp_pct(price, tp2, direction)
+        tp3_pct = self._tp_pct(price, tp3, direction)
+        rr      = round(tp3_pct / sl_pct, 1) if sl_pct else 0
         forex_msg = self._forex_signal_msg(no, "S/R Bounce", direction, symbol,
                                             price, sl, tp1, tp2, tp3, sl_pct, reason)
         self.send_signal(
@@ -268,10 +287,10 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry:  <code>{price:.4f}</code>\n"
             f"🛑 SL:  <code>{sl:.4f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{sl_pct:.2f}%)\n"
-            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{sl_pct*2:.2f}%)\n"
-            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{sl_pct*3:.2f}%)\n"
-            f"R:R = 1 : 3\n"
+            f"🎯 TP1: <code>{tp1:.4f}</code>  (+{tp1_pct:.2f}%)\n"
+            f"🎯 TP2: <code>{tp2:.4f}</code>  (+{tp2_pct:.2f}%)\n"
+            f"🏆 TP3: <code>{tp3:.4f}</code>  (+{tp3_pct:.2f}%)\n"
+            f"R:R = 1 : {rr}\n"
             f"{DLINE}\n"
             f"📐 {lv_type}: <code>{lv_price:.4f}</code>  ({lv_touch} touches)\n"
             f"📊 RSI: <code>{rsi:.1f}</code>  Vol: <code>{vol:.1f}x avg</code>\n"
@@ -302,6 +321,10 @@ class Notifier:
         sl_pct    = abs(price - sl) / price * 100
         dir_tag   = self._dir_tag(direction)
 
+        tp1_pct = self._tp_pct(price, tp1, direction)
+        tp2_pct = self._tp_pct(price, tp2, direction)
+        tp3_pct = self._tp_pct(price, tp3, direction)
+        rr      = round(tp3_pct / sl_pct, 1) if sl_pct else 0
         forex_msg = self._forex_signal_msg(no, strategy_name, direction, symbol,
                                             price, sl, tp1, tp2, tp3, sl_pct, reason)
         self.send_signal(
@@ -312,10 +335,10 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry:  <code>{price:.5f}</code>\n"
             f"🛑 SL:  <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1: <code>{tp1:.5f}</code>  (+{sl_pct:.2f}%)\n"
-            f"🎯 TP2: <code>{tp2:.5f}</code>  (+{sl_pct*2:.2f}%)\n"
-            f"🏆 TP3: <code>{tp3:.5f}</code>  (+{sl_pct*3:.2f}%)\n"
-            f"R:R = 1 : 3\n"
+            f"🎯 TP1: <code>{tp1:.5f}</code>  (+{tp1_pct:.2f}%)\n"
+            f"🎯 TP2: <code>{tp2:.5f}</code>  (+{tp2_pct:.2f}%)\n"
+            f"🏆 TP3: <code>{tp3:.5f}</code>  (+{tp3_pct:.2f}%)\n"
+            f"R:R = 1 : {rr}\n"
             f"{DLINE}\n"
             f"📊 RSI: <code>{rsi:.1f}</code>\n"
             f"<i>{reason}</i>\n"
