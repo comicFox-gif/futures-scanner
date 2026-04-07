@@ -45,17 +45,30 @@ def compute_volume_sma(df: pd.DataFrame, period: int) -> pd.DataFrame:
 def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """Add ADX column (trend strength). adx >= 25 = trending."""
     adx = ta.adx(df["high"], df["low"], df["close"], length=period)
-    df["adx"] = adx[f"ADX_{period}"]
+    if adx is None:
+        df["adx"] = float("nan")
+        return df
+    # pandas_ta column name varies: ADX_14 — pick first column starting with ADX
+    adx_col = next((c for c in adx.columns if c.startswith("ADX")), None)
+    df["adx"] = adx[adx_col] if adx_col else float("nan")
     return df
 
 
 def compute_bbands(df: pd.DataFrame, period: int = 20, std: float = 2.0) -> pd.DataFrame:
     """Add Bollinger Band columns: bb_upper, bb_lower, bb_mid, bb_width."""
     bb = ta.bbands(df["close"], length=period, std=std)
-    df["bb_upper"] = bb[f"BBU_{period}_{std}"]
-    df["bb_lower"] = bb[f"BBL_{period}_{std}"]
-    df["bb_mid"]   = bb[f"BBM_{period}_{std}"]
-    df["bb_width"]  = bb[f"BBB_{period}_{std}"]  # bandwidth = (upper-lower)/mid * 100
+    if bb is None:
+        for col in ("bb_upper", "bb_lower", "bb_mid", "bb_width"):
+            df[col] = float("nan")
+        return df
+    # pandas_ta may output BBU_20_2.0 or BBU_20_2 depending on version — find dynamically
+    def _find(prefix):
+        return next((c for c in bb.columns if c.startswith(prefix)), None)
+    u = _find("BBU_"); l = _find("BBL_"); m = _find("BBM_"); w = _find("BBB_")
+    df["bb_upper"] = bb[u] if u else float("nan")
+    df["bb_lower"] = bb[l] if l else float("nan")
+    df["bb_mid"]   = bb[m] if m else float("nan")
+    df["bb_width"]  = bb[w] if w else float("nan")
     return df
 
 
