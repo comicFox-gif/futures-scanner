@@ -71,7 +71,10 @@ class Bot:
         self.tl_strategy = TrendlineBreakStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
         self.rm_strategy = RSIMACDReversalStrategy(cfg)
-        self.notifier    = Notifier(channel_name=cfg.get("channel_name", ""))
+        self.notifier    = Notifier(
+            channel_name=cfg.get("channel_name", ""),
+            forex_symbols=set(cfg.get("forex_symbols", [])),
+        )
         self.exchange    = self._init_exchange(cfg, env)
         self.bybit       = BybitExecutor(
             api_key       = env.get("BYBIT_KEY", ""),

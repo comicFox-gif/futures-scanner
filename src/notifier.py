@@ -22,7 +22,7 @@ DLINE = "─" * 28
 
 
 class Notifier:
-    def __init__(self, channel_name: str = ""):
+    def __init__(self, channel_name: str = "", forex_symbols: set = None):
         # Main bot — private channel (all alerts: signals, errors, paper PnL)
         self.token    = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id  = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -33,8 +33,9 @@ class Notifier:
         self.forex_chat_id = os.getenv("FOREX_CHAT_ID", "")
         self.forex_enabled = bool(self.forex_token and self.forex_chat_id)
 
-        self.channel      = channel_name
-        self._signal_no   = 0
+        self.channel       = channel_name
+        self._signal_no    = 0
+        self._forex_symbols: set = forex_symbols or set()
 
         if self.enabled:
             logger.info("Telegram main bot enabled")
@@ -72,17 +73,16 @@ class Notifier:
             return
         self._post(self.token, self.chat_id, message)
 
-    @staticmethod
-    def _is_forex_symbol(symbol: str) -> bool:
-        """True for forex pairs like EUR/USD, GBP/JPY — not crypto futures."""
-        return ":" not in symbol and "USDT" not in symbol and "USDC" not in symbol and "BTC" not in symbol
+    def _is_forex_symbol(self, symbol: str) -> bool:
+        """True if symbol is in the configured forex_symbols list."""
+        return symbol in self._forex_symbols
 
     def send_signal(self, message: str, forex_message: str = "", is_forex: bool = False):
         """
-        Route confirmed signal based on symbol type:
-          Crypto (BTC/USDT:USDT etc.) → main channel only (full detail format)
-          Forex  (EUR/USD etc.)        → forex channel only (clean subscriber format)
-        Paper trade updates use send() and never touch the forex channel.
+        Strict channel separation:
+          Crypto pairs → main channel only
+          Forex pairs  → forex channel only
+        Paper trade updates always use send() — never touch the forex channel.
         """
         if is_forex:
             if self.forex_enabled and forex_message:

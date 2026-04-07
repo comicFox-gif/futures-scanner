@@ -18,6 +18,11 @@
     "BNB/USDT:USDT",
     "XRP/USDT:USDT"
   ],
+
+  "forex_symbols": [
+    "XAU/USDT:USDT",
+    "XAG/USDT:USDT"
+  ],
   "timeframe_trend": "30m",
   "timeframe_entry": "15m",
 
