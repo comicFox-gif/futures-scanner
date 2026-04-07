@@ -145,7 +145,7 @@ class OrderBlockStrategy:
                 pattern = self._bullish_pattern(entry_df)
                 if rsi_ok and pattern:
                     quality = self._quality(ob["formed_idx"], len(htf_df), body, rsi, vol_ratio)
-                    sl_dist = max(atr * self.atr_sl_mult, price - ob_low + atr * 0.3)
+                    sl_dist = atr * self.atr_sl_mult
                     return {
                         "stage": 2, "direction": "long", "symbol": symbol,
                         "entry": price,
@@ -188,7 +188,7 @@ class OrderBlockStrategy:
                 pattern = self._bearish_pattern(entry_df)
                 if rsi_ok and pattern:
                     quality = self._quality(ob["formed_idx"], len(htf_df), body, rsi, vol_ratio)
-                    sl_dist = max(atr * self.atr_sl_mult, ob_high - price + atr * 0.3)
+                    sl_dist = atr * self.atr_sl_mult
                     return {
                         "stage": 2, "direction": "short", "symbol": symbol,
                         "entry": price,
