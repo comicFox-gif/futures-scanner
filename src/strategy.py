@@ -504,22 +504,18 @@ class Strategy:
         return len(passed), rsi, vol_ratio, passed, failed
 
     def _long_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
-        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or more of 5 conditions pass (high-probability only)."""
+        """Returns (fires, rsi, vol_ratio, reason). All 5 conditions required."""
         score, rsi, vol_ratio, passed, failed = self._score_long(htf_df, entry_df)
-        if score >= 4:
-            score_tag = f"✅ {score}/5 conditions"
-            missing   = f" | Missing: {', '.join(failed)}" if failed else ""
-            reason    = f"1H bull trend | {score_tag}{missing}"
+        if score >= 5:
+            reason = f"1H bull trend | ✅ 5/5 conditions confirmed"
             return True, rsi, vol_ratio, reason
         return False, rsi, vol_ratio, ""
 
     def _short_continuation(self, htf_df: pd.DataFrame, entry_df: pd.DataFrame) -> tuple[bool, float, float, str]:
-        """Returns (fires, rsi, vol_ratio, reason). Fires if 4 or more of 5 conditions pass (high-probability only)."""
+        """Returns (fires, rsi, vol_ratio, reason). All 5 conditions required."""
         score, rsi, vol_ratio, passed, failed = self._score_short(htf_df, entry_df)
-        if score >= 4:
-            score_tag = f"✅ {score}/5 conditions"
-            missing   = f" | Missing: {', '.join(failed)}" if failed else ""
-            reason    = f"1H bear trend | {score_tag}{missing}"
+        if score >= 5:
+            reason = f"1H bear trend | ✅ 5/5 conditions confirmed"
             return True, rsi, vol_ratio, reason
         return False, rsi, vol_ratio, ""
 

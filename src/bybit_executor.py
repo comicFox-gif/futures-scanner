@@ -38,10 +38,11 @@ class BybitExecutor:
     def __init__(self, api_key: str = "", api_secret: str = "",
                  demo: bool = True, testnet: bool = False,
                  leverage: int = 10, risk_pct: float = 0.01,
-                 max_positions: int = 50):
+                 max_positions: int = 50, max_risk_usdt: float = 10.0):
         self.leverage      = leverage
         self.risk_pct      = risk_pct
         self.max_positions = max_positions
+        self.max_risk_usdt = max_risk_usdt
         self.enabled  = bool(api_key and api_secret)
         self._instrument_cache: dict[str, dict] = {}
 
@@ -70,7 +71,7 @@ class BybitExecutor:
             masked_key = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "???"
             logger.info(
                 f"[BYBIT] Executor ready | {env_label} ({host}) | key={masked_key} | "
-                f"leverage={leverage}x | risk={risk_pct*100:.1f}% per trade"
+                f"leverage={leverage}x | risk={risk_pct*100:.1f}% per trade | max_risk=${max_risk_usdt:.0f}"
             )
             self._set_position_mode()
         except ImportError:
@@ -229,7 +230,7 @@ class BybitExecutor:
             return {}
 
         balance   = self._get_balance()
-        risk_usdt = balance * self.risk_pct
+        risk_usdt = min(balance * self.risk_pct, self.max_risk_usdt)
 
         # Reference price for sizing: use the highest of entry/sl to guard against
         # stale or wrong entry prices in signals (e.g. entry=0.08 when market=0.80).

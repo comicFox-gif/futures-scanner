@@ -81,6 +81,7 @@ class Bot:
             leverage      = int(env.get("BYBIT_LEVERAGE", "10")),
             risk_pct      = self.risk_pct,
             max_positions = 50,
+            max_risk_usdt = float(env.get("BYBIT_MAX_RISK", "10")),
         )
         self.pair_selector = PairSelector(self.exchange, cfg)
 
@@ -412,8 +413,7 @@ class Bot:
             strategy_name=strategy_name,
         )
         self._forex_positions[symbol] = pos
-        logger.info(f"[FOREX PAPER] OPENED {direction.upper()} {symbol} @ {entry:.5f}")
-        self.notifier.forex_paper_opened(pos, self.forex_paper_balance, len(self._forex_positions))
+        logger.info(f"[FOREX PAPER] OPENED {direction.upper()} {symbol} @ {entry:.5f} | Risk=${risk_amount:.2f}")
 
     def _forex_paper_tick(self, symbol: str, current_price: float):
         """Check forex paper position and send updates to forex channel."""
@@ -440,14 +440,14 @@ class Bot:
                 if pos.closed_pnl > 0:   self._forex_stats["wins"] += 1
 
                 del self._forex_positions[symbol]
-                logger.info(f"[FOREX PAPER] CLOSED {symbol} | {reason} @ {exit_price:.5f} | PnL={pnl:+.2f}")
-                self.notifier.forex_paper_closed(pos, reason, exit_price, pos.closed_pnl,
-                                                 self.forex_paper_balance, tp_level, self._forex_stats)
+                logger.info(
+                    f"[FOREX PAPER] CLOSED {symbol} | {reason} @ {exit_price:.5f} "
+                    f"| PnL={pnl:+.2f} | Balance={self.forex_paper_balance:.2f} "
+                    f"| W:{self._forex_stats['wins']} TP3:{self._forex_stats['tp3']} SL:{self._forex_stats['sl']}"
+                )
                 return
 
-            elif act in ("notify_tp1", "notify_tp2"):
-                tp_level = 1 if act == "notify_tp1" else 2
-                self.notifier.forex_paper_tp_alert(pos, current_price, tp_level)
+            # TP hits — tracked silently, no forex channel notification
 
     def _bybit_order(self, sig, symbol: str = ""):
         """Place order on Bybit. Accepts Signal dataclass or dict."""

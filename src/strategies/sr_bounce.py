@@ -105,24 +105,13 @@ class SRBounceStrategy:
 
     def _quality_score(self, level_strength: int, vol_ratio: float,
                        wick_ratio: float, rsi: float) -> int:
-        score = 1  # base — passed all filters
-        if level_strength >= 4:
-            score += 1
-        elif level_strength >= 2:
-            score += 0.5
-        if vol_ratio >= 2.0:
-            score += 1
-        elif vol_ratio >= 1.5:
-            score += 0.5
-        if wick_ratio >= 0.6:
-            score += 1
-        elif wick_ratio >= 0.4:
-            score += 0.5
-        if 40 <= rsi <= 60:
-            score += 1
-        elif 35 <= rsi <= 65:
-            score += 0.5
-        return min(5, round(score))
+        # 5 binary conditions — need all 5 for a confirmed signal
+        score = 1  # C1: base — price at S/R level + candle pattern confirmed
+        if level_strength >= 3:     score += 1  # C2: well-tested level (3+ touches)
+        if vol_ratio >= 1.5:        score += 1  # C3: volume surge on the bounce
+        if wick_ratio >= 0.40:      score += 1  # C4: clear rejection wick present
+        if 35 <= rsi <= 65:         score += 1  # C5: RSI in valid reversal zone
+        return score
 
     # ------------------------------------------------------------------
     # Bounce pattern check

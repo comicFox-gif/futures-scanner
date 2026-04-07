@@ -87,23 +87,15 @@ class OrderBlockStrategy:
             self.rsi_period, self.atr_period, self.volume_sma_period,
         )
 
-    def _quality(self, formed_idx: int, total_len: int, body: float, rsi: float) -> int:
-        score = 1
-        # Recency: formed in last 30% of lookback = fresher zone
+    def _quality(self, formed_idx: int, total_len: int, body: float, rsi: float, vol_ratio: float = 0.0) -> int:
+        # 5 binary conditions — need all 5 for a confirmed signal
+        score = 1  # C1: base — price in OB zone + candle pattern confirmed
         recency = (total_len - formed_idx) / total_len
-        if recency < 0.30:
-            score += 1
-        elif recency < 0.60:
-            score += 0.5
-        if body >= 0.60:
-            score += 1
-        elif body >= 0.40:
-            score += 0.5
-        if 40 <= rsi <= 60:
-            score += 1
-        elif 35 <= rsi <= 65:
-            score += 0.5
-        return min(5, round(score))
+        if recency < 0.50:          score += 1  # C2: fresh OB (formed in last 50% of lookback)
+        if body >= 0.45:            score += 1  # C3: strong entry candle body
+        if 35 <= rsi <= 65:         score += 1  # C4: RSI in valid range
+        if vol_ratio >= 1.3:        score += 1  # C5: volume confirms institutional interest
+        return score
 
     def _bullish_pattern(self, entry_df: pd.DataFrame) -> bool:
         row = entry_df.iloc[-2]
@@ -119,10 +111,11 @@ class OrderBlockStrategy:
         htf_df: pd.DataFrame,   # 4H — OB detection
         entry_df: pd.DataFrame, # 15m — entry confirmation
     ) -> dict | None:
-        row   = entry_df.iloc[-2]
-        price = float(row["close"])
-        atr   = float(row["atr"])
-        rsi   = float(row["rsi"])
+        row       = entry_df.iloc[-2]
+        price     = float(row["close"])
+        atr       = float(row["atr"])
+        rsi       = float(row["rsi"])
+        vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
         if pd.isna(atr) or atr == 0 or pd.isna(rsi):
             return None
 
@@ -151,7 +144,7 @@ class OrderBlockStrategy:
                 rsi_ok  = self.rsi_long_min <= rsi <= self.rsi_long_max
                 pattern = self._bullish_pattern(entry_df)
                 if rsi_ok and pattern:
-                    quality = self._quality(ob["formed_idx"], len(htf_df), body, rsi)
+                    quality = self._quality(ob["formed_idx"], len(htf_df), body, rsi, vol_ratio)
                     sl_dist = max(atr * self.atr_sl_mult, price - ob_low + atr * 0.3)
                     return {
                         "stage": 2, "direction": "long", "symbol": symbol,
@@ -160,7 +153,7 @@ class OrderBlockStrategy:
                         "tp1":   price + sl_dist * self.tp1_rr,
                         "tp2":   price + sl_dist * self.tp2_rr,
                         "tp3":   price + sl_dist * self.tp3_rr,
-                        "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+                        "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                         "reason": (
                             f"Bullish OB {ob_low:.4f}–{ob_high:.4f} | "
                             f"{'Hammer' if is_hammer(row) else 'Engulfing'} | "
@@ -194,7 +187,7 @@ class OrderBlockStrategy:
                 rsi_ok  = self.rsi_short_min <= rsi <= self.rsi_short_max
                 pattern = self._bearish_pattern(entry_df)
                 if rsi_ok and pattern:
-                    quality = self._quality(ob["formed_idx"], len(htf_df), body, rsi)
+                    quality = self._quality(ob["formed_idx"], len(htf_df), body, rsi, vol_ratio)
                     sl_dist = max(atr * self.atr_sl_mult, ob_high - price + atr * 0.3)
                     return {
                         "stage": 2, "direction": "short", "symbol": symbol,
@@ -203,7 +196,7 @@ class OrderBlockStrategy:
                         "tp1":   price - sl_dist * self.tp1_rr,
                         "tp2":   price - sl_dist * self.tp2_rr,
                         "tp3":   price - sl_dist * self.tp3_rr,
-                        "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+                        "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                         "reason": (
                             f"Bearish OB {ob_low:.4f}–{ob_high:.4f} | "
                             f"{'Shooting Star' if is_shooting_star(row) else 'Engulfing'} | "

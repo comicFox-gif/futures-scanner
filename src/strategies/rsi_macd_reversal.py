@@ -76,27 +76,26 @@ class RSIMACDReversalStrategy:
             self.rsi_period, self.atr_period, self.volume_sma_period,
         )
 
-    def _quality_score(self, rsi: float, direction: str, macd_hist: float, atr: float) -> int:
-        score = 2  # base — RSI extreme + MACD cross is already strong
-        # More extreme RSI = stronger reversal signal
-        if direction == "long":
-            if rsi < 20:
-                score += 2
-            elif rsi < 25:
-                score += 1
-        else:
-            if rsi > 80:
-                score += 2
-            elif rsi > 75:
-                score += 1
-        # MACD histogram strength
+    def _quality_score(self, rsi: float, direction: str, macd_hist: float, atr: float, vol_ratio: float = 0.0) -> int:
+        # 5 binary conditions — need all 5 for a confirmed signal
+        score = 1  # C1: base — RSI at extreme (≤30/≥70) + MACD cross confirmed
+        # C2: RSI in stronger extreme zone (more conviction)
+        if direction == "long" and rsi < 25:    score += 1
+        elif direction == "short" and rsi > 75: score += 1
+        # C3: MACD histogram has meaningful strength (not just a noise tick)
         hist_str = abs(macd_hist) / atr if atr > 0 else 0
-        if hist_str >= 0.1:
-            score += 1
-        return min(5, score)
+        if hist_str >= 0.05:                    score += 1
+        # C4: volume confirms the reversal move
+        if vol_ratio >= 1.3:                    score += 1
+        # C5: RSI is not still moving deeper (turning up/down already)
+        # Proxy: RSI < 28 for longs means it's at a meaningful low
+        if direction == "long" and rsi < 28:    score += 1
+        elif direction == "short" and rsi > 72: score += 1
+        return score
 
     def _build(self, stage: int, direction: str, symbol: str,
-               price: float, atr: float, rsi: float, reason: str, quality: int = 3) -> dict:
+               price: float, atr: float, rsi: float, reason: str, quality: int = 3,
+               vol_ratio: float = 0.0) -> dict:
         sl_dist = atr * self.atr_sl_mult
         if direction == "long":
             return {
@@ -106,7 +105,7 @@ class RSIMACDReversalStrategy:
                 "tp1":   price + sl_dist * self.tp1_rr,
                 "tp2":   price + sl_dist * self.tp2_rr,
                 "tp3":   price + sl_dist * self.tp3_rr,
-                "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+                "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                 "reason": reason,
             }
         return {
@@ -116,7 +115,7 @@ class RSIMACDReversalStrategy:
             "tp1":   price - sl_dist * self.tp1_rr,
             "tp2":   price - sl_dist * self.tp2_rr,
             "tp3":   price - sl_dist * self.tp3_rr,
-            "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+            "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
             "reason": reason,
         }
 
@@ -125,10 +124,11 @@ class RSIMACDReversalStrategy:
         Only needs the entry timeframe (15m).
         No trend filter — fires in any market condition.
         """
-        row   = entry_df.iloc[-2]
-        price = float(row["close"])
-        atr   = float(row["atr"])
-        rsi   = float(row["rsi"])
+        row       = entry_df.iloc[-2]
+        price     = float(row["close"])
+        atr       = float(row["atr"])
+        rsi       = float(row["rsi"])
+        vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
 
         if pd.isna(atr) or atr == 0 or pd.isna(rsi):
             return None
@@ -137,11 +137,11 @@ class RSIMACDReversalStrategy:
 
         # ── LONG: RSI oversold + MACD bullish cross ─────────────────────
         if rsi <= self.rsi_oversold and is_macd_bullish_cross(entry_df):
-            quality = self._quality_score(rsi, "long", macd_hist, atr)
+            quality = self._quality_score(rsi, "long", macd_hist, atr, vol_ratio)
             return self._build(
                 2, "long", symbol, price, atr, rsi,
                 f"RSI {rsi:.1f} oversold + MACD bullish cross | Reversal entry",
-                quality,
+                quality, vol_ratio,
             )
 
         # LONG WARNING: RSI approaching oversold + MACD turning up
@@ -154,11 +154,11 @@ class RSIMACDReversalStrategy:
 
         # ── SHORT: RSI overbought + MACD bearish cross ──────────────────
         if rsi >= self.rsi_overbought and is_macd_bearish_cross(entry_df):
-            quality = self._quality_score(rsi, "short", macd_hist, atr)
+            quality = self._quality_score(rsi, "short", macd_hist, atr, vol_ratio)
             return self._build(
                 2, "short", symbol, price, atr, rsi,
                 f"RSI {rsi:.1f} overbought + MACD bearish cross | Reversal entry",
-                quality,
+                quality, vol_ratio,
             )
 
         # SHORT WARNING: RSI approaching overbought + MACD turning down

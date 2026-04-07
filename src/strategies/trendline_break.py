@@ -133,21 +133,14 @@ class TrendlineBreakStrategy:
             self.rsi_period, self.atr_period, self.volume_sma_period,
         )
 
-    def _quality(self, touches: int, body: float, rsi: float) -> int:
-        score = 1
-        if touches >= 4:
-            score += 1
-        elif touches >= 3:
-            score += 0.5
-        if body >= 0.60:
-            score += 1
-        elif body >= 0.40:
-            score += 0.5
-        if 40 <= rsi <= 60:
-            score += 1
-        elif 35 <= rsi <= 65:
-            score += 0.5
-        return min(5, round(score))
+    def _quality(self, touches: int, body: float, rsi: float, vol_ratio: float = 0.0) -> int:
+        # 5 binary conditions — need all 5 for a confirmed signal
+        score = 1  # C1: base — trendline found + candle pattern confirmed
+        if touches >= 3:    score += 1  # C2: well-tested line (3+ touches = institutional respect)
+        if body >= 0.45:    score += 1  # C3: strong entry candle body
+        if 35 <= rsi <= 65: score += 1  # C4: RSI not overbought/oversold against trade
+        if vol_ratio >= 1.3: score += 1 # C5: volume confirms the break/bounce
+        return score
 
     def generate_signal(
         self,
@@ -162,6 +155,7 @@ class TrendlineBreakStrategy:
         if pd.isna(atr) or atr == 0 or pd.isna(rsi):
             return None
 
+        vol_ratio   = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
         current_idx = len(itf_df) - 2   # index of last confirmed candle
         body        = candle_body_ratio(entry_df)
 
@@ -188,7 +182,7 @@ class TrendlineBreakStrategy:
                             rsi_ok  = self.rsi_long_min <= rsi <= self.rsi_long_max
                             pattern = is_hammer(row) or is_bullish_engulfing(entry_df, -2)
                             if rsi_ok and pattern:
-                                quality = self._quality(touches, body, rsi)
+                                quality = self._quality(touches, body, rsi, vol_ratio)
                                 sl      = lv_now - atr * 0.5
                                 sl_dist = price - sl
                                 return {
@@ -198,7 +192,7 @@ class TrendlineBreakStrategy:
                                     "tp1":   price + sl_dist * self.tp1_rr,
                                     "tp2":   price + sl_dist * self.tp2_rr,
                                     "tp3":   price + sl_dist * self.tp3_rr,
-                                    "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+                                    "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                                     "reason": (
                                         f"Uptrend bounce @ {lv_now:.4f} | "
                                         f"{touches} touches | RSI {rsi:.1f}"
@@ -243,7 +237,7 @@ class TrendlineBreakStrategy:
                         if price > lv_now + atr * self.break_mult:
                             rsi_ok = self.rsi_long_min <= rsi <= self.rsi_long_max
                             if rsi_ok and body >= 0.35:
-                                quality = self._quality(touches, body, rsi)
+                                quality = self._quality(touches, body, rsi, vol_ratio)
                                 sl      = lv_now - atr * 0.3
                                 sl_dist = price - sl
                                 return {
@@ -253,7 +247,7 @@ class TrendlineBreakStrategy:
                                     "tp1":   price + sl_dist * self.tp1_rr,
                                     "tp2":   price + sl_dist * self.tp2_rr,
                                     "tp3":   price + sl_dist * self.tp3_rr,
-                                    "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+                                    "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                                     "reason": (
                                         f"Downtrend break @ {lv_now:.4f} | "
                                         f"{touches} touches | RSI {rsi:.1f}"
@@ -282,7 +276,7 @@ class TrendlineBreakStrategy:
                             rsi_ok  = self.rsi_short_min <= rsi <= self.rsi_short_max
                             pattern = is_shooting_star(row) or is_bearish_engulfing(entry_df, -2)
                             if rsi_ok and pattern:
-                                quality = self._quality(touches, body, rsi)
+                                quality = self._quality(touches, body, rsi, vol_ratio)
                                 sl      = lv_now + atr * 0.5
                                 sl_dist = sl - price
                                 return {
@@ -292,7 +286,7 @@ class TrendlineBreakStrategy:
                                     "tp1":   price - sl_dist * self.tp1_rr,
                                     "tp2":   price - sl_dist * self.tp2_rr,
                                     "tp3":   price - sl_dist * self.tp3_rr,
-                                    "rsi": rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
+                                    "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                                     "reason": (
                                         f"Downtrend bounce @ {lv_now:.4f} | "
                                         f"{touches} touches | RSI {rsi:.1f}"

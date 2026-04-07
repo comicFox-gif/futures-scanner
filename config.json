@@ -31,13 +31,13 @@
     "macd_signal": 9,
     "rsi_period": 14,
     "rsi_long_min": 40,
-    "rsi_long_max": 70,
-    "rsi_short_min": 30,
+    "rsi_long_max": 65,
+    "rsi_short_min": 35,
     "rsi_short_max": 60,
     "atr_period": 14,
     "atr_sl_multiplier": 1.5,
     "volume_sma_period": 20,
-    "volume_filter_multiplier": 1.2,
+    "volume_filter_multiplier": 1.5,
     "lookback_candles": 600
   },
 
@@ -54,11 +54,11 @@
   },
 
   "filters": {
-    "min_body_ratio": 0.35,
-    "max_wick_against_trade": 0.50,
-    "consecutive_closes": 1,
-    "macd_hist_atr_multiplier": 0.03,
-    "volume_building_candles": 1
+    "min_body_ratio": 0.45,
+    "max_wick_against_trade": 0.40,
+    "consecutive_closes": 2,
+    "macd_hist_atr_multiplier": 0.05,
+    "volume_building_candles": 2
   },
 
   "sr_bounce": {
@@ -66,7 +66,7 @@
     "swing_lookback_right": 2,
     "cluster_pct": 0.003,
     "max_levels": 6,
-    "min_touches": 1,
+    "min_touches": 2,
     "touch_atr_multiplier": 0.5,
     "approach_atr_multiplier": 1.5
   },
@@ -90,9 +90,9 @@
 
   "rsi_divergence": {
     "lookback_candles": 50,
-    "min_rsi_difference": 3.0,
-    "bull_div_rsi_max": 55,
-    "bear_div_rsi_min": 45
+    "min_rsi_difference": 5.0,
+    "bull_div_rsi_max": 50,
+    "bear_div_rsi_min": 50
   },
 
   "scalp_signal": {
@@ -104,11 +104,11 @@
   },
 
   "scalp_filters": {
-    "min_body_ratio": 0.25,
-    "max_wick_against_trade": 0.60,
-    "consecutive_closes": 1,
-    "macd_hist_atr_multiplier": 0.008,
-    "volume_building_candles": 1
+    "min_body_ratio": 0.40,
+    "max_wick_against_trade": 0.45,
+    "consecutive_closes": 2,
+    "macd_hist_atr_multiplier": 0.03,
+    "volume_building_candles": 2
   },
 
   "rsi_macd_reversal": {
@@ -120,9 +120,9 @@
 
   "signal": {
     "tp1_rr": 1.0,
-    "tp2_rr": 2.0,
-    "tp3_rr": 3.0,
-    "atr_sl_multiplier": 1.5,
+    "tp2_rr": 1.5,
+    "tp3_rr": 2.0,
+    "atr_sl_multiplier": 1.0,
     "signal_cooldown_minutes": 120
   },
 

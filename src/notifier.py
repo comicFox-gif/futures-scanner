@@ -72,13 +72,20 @@ class Notifier:
             return
         self._post(self.token, self.chat_id, message)
 
-    def send_signal(self, message: str, forex_message: str = ""):
+    @staticmethod
+    def _is_forex_symbol(symbol: str) -> bool:
+        """True for forex pairs like EUR/USD, GBP/JPY — not crypto futures."""
+        return ":" not in symbol and "USDT" not in symbol and "USDC" not in symbol and "BTC" not in symbol
+
+    def send_signal(self, message: str, forex_message: str = "", is_forex: bool = False):
         """
-        Send confirmed signal to main channel only.
-        Forex channel gets its own paper-trading notifications via send_forex().
-        forex_message param kept for signature compatibility but unused.
+        Send confirmed signal.
+        Crypto symbols → main channel only.
+        Forex symbols  → forex channel only (separate subscriber base).
         """
-        if self.enabled:
+        if is_forex and self.forex_enabled and forex_message:
+            self._post(self.forex_token, self.forex_chat_id, forex_message)
+        elif self.enabled:
             self._post(self.token, self.chat_id, message)
 
     # ------------------------------------------------------------------
@@ -198,11 +205,13 @@ class Notifier:
         sl_pct  = abs(price - sl) / price * 100
         dir_tag = self._dir_tag(direction)
 
+        forex_msg = self._forex_signal_msg(no, strategy_name, direction, symbol,
+                                            price, sl, tp1, tp2, tp3, sl_pct, reason)
         self.send_signal(
             f"🚨 <b>SIGNAL #{no:03d}</b>  [{strategy_name}]\n"
             f"{LINE}\n"
             f"{dir_tag}  •  <b>{symbol}</b>\n"
-            f"Quality: {self._stars(quality)}\n"
+            f"✅ 5/5 conditions confirmed\n"
             f"{DLINE}\n"
             f"Entry:  <code>{price:.4f}</code>\n"
             f"🛑 SL:  <code>{sl:.4f}</code>  (-{sl_pct:.2f}%)\n"
@@ -214,10 +223,8 @@ class Notifier:
             f"📊 RSI: <code>{rsi:.1f}</code>  Vol: <code>{vol:.1f}x avg</code>\n"
             f"<i>{reason}</i>\n"
             f"{self._footer()}",
-            forex_message=self._forex_signal_msg(
-                no, strategy_name, direction, symbol,
-                price, sl, tp1, tp2, tp3, sl_pct, reason
-            ),
+            forex_message=forex_msg,
+            is_forex=self._is_forex_symbol(symbol),
         )
 
     # ------------------------------------------------------------------
@@ -242,11 +249,13 @@ class Notifier:
         dir_tag  = self._dir_tag(direction)
         lv_type  = "Support" if direction == "long" else "Resistance"
 
+        forex_msg = self._forex_signal_msg(no, "S/R Bounce", direction, symbol,
+                                            price, sl, tp1, tp2, tp3, sl_pct, reason)
         self.send_signal(
             f"🚨 <b>SIGNAL #{no:03d}</b>  [S/R Bounce]\n"
             f"{LINE}\n"
             f"{dir_tag}  •  <b>{symbol}</b>\n"
-            f"Quality: {self._stars(quality)}\n"
+            f"✅ 5/5 conditions confirmed\n"
             f"{DLINE}\n"
             f"Entry:  <code>{price:.4f}</code>\n"
             f"🛑 SL:  <code>{sl:.4f}</code>  (-{sl_pct:.2f}%)\n"
@@ -259,10 +268,8 @@ class Notifier:
             f"📊 RSI: <code>{rsi:.1f}</code>  Vol: <code>{vol:.1f}x avg</code>\n"
             f"<i>{reason}</i>\n"
             f"{self._footer()}",
-            forex_message=self._forex_signal_msg(
-                no, "S/R Bounce", direction, symbol,
-                price, sl, tp1, tp2, tp3, sl_pct, reason
-            ),
+            forex_message=forex_msg,
+            is_forex=self._is_forex_symbol(symbol),
         )
 
     def sr_warning_signal(self, sig: dict):
@@ -286,11 +293,13 @@ class Notifier:
         sl_pct    = abs(price - sl) / price * 100
         dir_tag   = self._dir_tag(direction)
 
+        forex_msg = self._forex_signal_msg(no, strategy_name, direction, symbol,
+                                            price, sl, tp1, tp2, tp3, sl_pct, reason)
         self.send_signal(
             f"🚨 <b>SIGNAL #{no:03d}</b>  [{strategy_name}]\n"
             f"{LINE}\n"
             f"{dir_tag}  •  <b>{symbol}</b>\n"
-            f"Quality: {self._stars(quality)}\n"
+            f"✅ 5/5 conditions confirmed\n"
             f"{DLINE}\n"
             f"Entry:  <code>{price:.5f}</code>\n"
             f"🛑 SL:  <code>{sl:.5f}</code>  (-{sl_pct:.2f}%)\n"
@@ -302,10 +311,8 @@ class Notifier:
             f"📊 RSI: <code>{rsi:.1f}</code>\n"
             f"<i>{reason}</i>\n"
             f"{self._footer()}",
-            forex_message=self._forex_signal_msg(
-                no, strategy_name, direction, symbol,
-                price, sl, tp1, tp2, tp3, sl_pct, reason
-            ),
+            forex_message=forex_msg,
+            is_forex=self._is_forex_symbol(symbol),
         )
 
     def fx_warning_signal(self, sig: dict, strategy_name: str = "FX EMA Trend"):

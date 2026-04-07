@@ -89,25 +89,17 @@ class RSIDivergenceStrategy:
             self.rsi_period, self.atr_period, self.volume_sma_period,
         )
 
-    def _quality(self, curr_rsi: float, prior_rsi: float, body: float, direction: str) -> int:
-        score = 1
+    def _quality(self, curr_rsi: float, prior_rsi: float, body: float, direction: str, vol_ratio: float = 0.0) -> int:
+        # 5 binary conditions — need all 5 for a confirmed signal
+        score = 1  # C1: base — divergence confirmed on HTF
         rsi_gap = abs(curr_rsi - prior_rsi)
-        if rsi_gap >= 10:
-            score += 1
-        elif rsi_gap >= 6:
-            score += 0.5
-        if body >= 0.55:
-            score += 1
-        elif body >= 0.40:
-            score += 0.5
-        # Reward RSI being in the sweet spot for reversal
-        if direction == "long" and curr_rsi < 40:
-            score += 1
-        elif direction == "short" and curr_rsi > 60:
-            score += 1
-        elif (direction == "long" and curr_rsi < 50) or (direction == "short" and curr_rsi > 50):
-            score += 0.5
-        return min(5, round(score))
+        if rsi_gap >= 8:            score += 1  # C2: clear RSI divergence (8+ point gap)
+        if body >= 0.45:            score += 1  # C3: strong reversal candle body
+        # C4: RSI at extreme (ideal reversal zone)
+        if direction == "long" and curr_rsi < 45:   score += 1
+        elif direction == "short" and curr_rsi > 55: score += 1
+        if vol_ratio >= 1.3:        score += 1  # C5: volume spike on reversal candle
+        return score
 
     def generate_signal(
         self,
@@ -122,6 +114,7 @@ class RSIDivergenceStrategy:
         if pd.isna(atr) or atr == 0 or pd.isna(rsi):
             return None
 
+        vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
         body = candle_body_ratio(entry_df)
         sl_dist = atr * self.atr_sl_mult
 
@@ -130,12 +123,12 @@ class RSIDivergenceStrategy:
             itf_df, self.div_lookback, self.min_rsi_diff
         )
         if bull_div and curr_rsi <= self.bull_rsi_max:
-            # Stage 2: MACD confirms OR reversal pattern on 15m
+            # Stage 2: MACD confirms AND reversal pattern on 15m (both required)
             macd_turn   = macd_histogram_turning_positive(entry_df)
             rev_pattern = is_hammer(row) or is_bullish_engulfing(entry_df, -2)
 
-            if macd_turn or rev_pattern:
-                quality = self._quality(curr_rsi, prior_rsi, body, "long")
+            if macd_turn and rev_pattern:
+                quality = self._quality(curr_rsi, prior_rsi, body, "long", vol_ratio)
                 return {
                     "stage": 2, "direction": "long", "symbol": symbol,
                     "entry": price,
@@ -143,11 +136,8 @@ class RSIDivergenceStrategy:
                     "tp1":   price + sl_dist * self.tp1_rr,
                     "tp2":   price + sl_dist * self.tp2_rr,
                     "tp3":   price + sl_dist * self.tp3_rr,
-                    "rsi": curr_rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
-                    "reason": (
-                        f"{div_reason} | "
-                        f"{'MACD confirm' if macd_turn else 'Reversal pattern'}"
-                    ),
+                    "rsi": curr_rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
+                    "reason": f"{div_reason} | MACD + reversal candle confirmed",
                 }
 
             # Stage 1: divergence only, no confirmation yet
@@ -170,8 +160,8 @@ class RSIDivergenceStrategy:
             macd_turn   = macd_histogram_turning_negative(entry_df)
             rev_pattern = is_shooting_star(row) or is_bearish_engulfing(entry_df, -2)
 
-            if macd_turn or rev_pattern:
-                quality = self._quality(curr_rsi, prior_rsi, body, "short")
+            if macd_turn and rev_pattern:
+                quality = self._quality(curr_rsi, prior_rsi, body, "short", vol_ratio)
                 return {
                     "stage": 2, "direction": "short", "symbol": symbol,
                     "entry": price,
@@ -179,11 +169,8 @@ class RSIDivergenceStrategy:
                     "tp1":   price - sl_dist * self.tp1_rr,
                     "tp2":   price - sl_dist * self.tp2_rr,
                     "tp3":   price - sl_dist * self.tp3_rr,
-                    "rsi": curr_rsi, "vol_ratio": 0, "quality": quality, "atr": atr,
-                    "reason": (
-                        f"{div_reason} | "
-                        f"{'MACD confirm' if macd_turn else 'Reversal pattern'}"
-                    ),
+                    "rsi": curr_rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
+                    "reason": f"{div_reason} | MACD + reversal candle confirmed",
                 }
 
             return {

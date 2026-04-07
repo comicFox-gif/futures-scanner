@@ -141,6 +141,7 @@ def main():
         "BYBIT_DEMO":         os.getenv("BYBIT_DEMO", "true"),   # demo trading (api-demo.bybit.com)
         "BYBIT_TESTNET":      os.getenv("BYBIT_TESTNET", "false"),
         "BYBIT_LEVERAGE":     os.getenv("BYBIT_LEVERAGE", "10"),
+        "BYBIT_MAX_RISK":     os.getenv("BYBIT_MAX_RISK", "10"),    # max USDT risk per trade
         # Gate.io
         "GATE_API_KEY":       os.getenv("GATE_API_KEY", ""),
         "GATE_API_SECRET":    os.getenv("GATE_API_SECRET", ""),
