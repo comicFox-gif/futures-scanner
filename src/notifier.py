@@ -79,14 +79,17 @@ class Notifier:
 
     def send_signal(self, message: str, forex_message: str = "", is_forex: bool = False):
         """
-        Send confirmed signal.
-        Crypto symbols → main channel only.
-        Forex symbols  → forex channel only (separate subscriber base).
+        Route confirmed signal based on symbol type:
+          Crypto (BTC/USDT:USDT etc.) → main channel only (full detail format)
+          Forex  (EUR/USD etc.)        → forex channel only (clean subscriber format)
+        Paper trade updates use send() and never touch the forex channel.
         """
-        if is_forex and self.forex_enabled and forex_message:
-            self._post(self.forex_token, self.forex_chat_id, forex_message)
-        elif self.enabled:
-            self._post(self.token, self.chat_id, message)
+        if is_forex:
+            if self.forex_enabled and forex_message:
+                self._post(self.forex_token, self.forex_chat_id, forex_message)
+        else:
+            if self.enabled:
+                self._post(self.token, self.chat_id, message)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -132,27 +135,33 @@ class Notifier:
 
     def scanner_started(self, symbols: list, tf_trend: str, tf_entry: str,
                         cooldown_min: int, paper_enabled: bool = False, paper_balance: float = 0,
-                        strategies=None, label: str = "Signal Scanner"):
-        paper_line = (
-            f"\n📄 Paper: <b>ON</b>  balance: <code>{paper_balance:.0f} USDT</code>"
-            if paper_enabled else "\n📄 Paper: OFF"
-        )
+                        strategies=None, label: str = "Signal Scanner", mode: str = "swing"):
+        mode_label = "SCALP" if mode == "scalp" else "SWING"
         strats = strategies or [
             "EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence"
         ]
-        strat_lines = "\n".join(f"  • {s}" for s in strats)
+        strat_compact = " • ".join(
+            s.replace("EMA Trend", "EMA").replace("S/R Bounce", "S/R")
+             .replace("Order Block", "OB").replace("RSI Divergence", "RSI Div")
+             .replace("RSI+MACD Reversal", "RSI+MACD")
+            for s in strats
+        )
+        paper_line = (
+            f"\n📄 Paper trading: <b>ON</b>  balance: <code>{paper_balance:.0f} USDT</code>"
+            if paper_enabled else "\n📄 Paper trading: OFF"
+        )
         self.send(
             f"🟢 <b>{label} Online</b>\n"
             f"{LINE}\n"
             f"Scanning <b>{len(symbols)} pairs</b>\n"
-            f"Strategies ({len(strats)}):\n{strat_lines}\n"
+            f"Mode: <code>{mode_label} ({tf_trend}/{tf_entry})</code>\n"
             f"Trend TF: <code>{tf_trend}</code>  Entry TF: <code>{tf_entry}</code>\n"
-            f"Cooldown: <code>{cooldown_min}min</code>"
+            f"Strategies: {strat_compact}\n"
+            f"Quality filter: <b>5/5 conditions required</b>\n"
+            f"{DLINE}"
             f"{paper_line}\n"
             f"{LINE}\n"
-            f"<code>{' | '.join(s.split('/')[0] for s in symbols)}</code>\n"
-            f"{DLINE}\n"
-            f"<i>{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</i>"
+            f"<i>Signals will appear here when all 5 conditions align.</i>"
         )
 
     # ------------------------------------------------------------------

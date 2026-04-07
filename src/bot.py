@@ -799,6 +799,7 @@ class Bot:
             self.cooldown_min, self.paper_enabled, self.paper_balance,
             strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
             label=f"Crypto Futures Scanner{bybit_note}",
+            mode=self.mode,
         )
         # Forex channel startup alert
         forex_cfg  = self.cfg.get("forex_paper", {})
