@@ -42,6 +42,40 @@ def compute_volume_sma(df: pd.DataFrame, period: int) -> pd.DataFrame:
     return df
 
 
+def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """Add ADX column (trend strength). adx >= 25 = trending."""
+    adx = ta.adx(df["high"], df["low"], df["close"], length=period)
+    df["adx"] = adx[f"ADX_{period}"]
+    return df
+
+
+def compute_bbands(df: pd.DataFrame, period: int = 20, std: float = 2.0) -> pd.DataFrame:
+    """Add Bollinger Band columns: bb_upper, bb_lower, bb_mid, bb_width."""
+    bb = ta.bbands(df["close"], length=period, std=std)
+    df["bb_upper"] = bb[f"BBU_{period}_{std}"]
+    df["bb_lower"] = bb[f"BBL_{period}_{std}"]
+    df["bb_mid"]   = bb[f"BBM_{period}_{std}"]
+    df["bb_width"]  = bb[f"BBB_{period}_{std}"]  # bandwidth = (upper-lower)/mid * 100
+    return df
+
+
+def compute_vwap(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add daily-anchored VWAP column.
+    Requires DataFrame with a DatetimeIndex (set in ohlcv_to_df).
+    Anchors reset at midnight UTC each day.
+    """
+    df = df.copy()
+    df["_date"] = df.index.date
+    df["_tp"]   = (df["high"] + df["low"] + df["close"]) / 3
+    df["_tpvol"] = df["_tp"] * df["volume"]
+    df["_cum_tpvol"] = df.groupby("_date")["_tpvol"].cumsum()
+    df["_cum_vol"]   = df.groupby("_date")["volume"].cumsum()
+    df["vwap"] = df["_cum_tpvol"] / df["_cum_vol"]
+    df.drop(columns=["_date", "_tp", "_tpvol", "_cum_tpvol", "_cum_vol"], inplace=True)
+    return df
+
+
 def compute_all_indicators(
     df: pd.DataFrame,
     ema_fast: int,
@@ -61,6 +95,9 @@ def compute_all_indicators(
     df = compute_rsi(df, rsi_period)
     df = compute_atr(df, atr_period)
     df = compute_volume_sma(df, volume_sma_period)
+    df = compute_adx(df)
+    df = compute_bbands(df)
+    df = compute_vwap(df)
     df.dropna(inplace=True)
     return df
 

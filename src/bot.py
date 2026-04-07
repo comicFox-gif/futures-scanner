@@ -20,10 +20,9 @@ import pandas as pd
 
 from src.strategy import Strategy, Signal, Position
 from src.strategies.sr_bounce import SRBounceStrategy
-from src.strategies.order_block import OrderBlockStrategy
-from src.strategies.trendline_break import TrendlineBreakStrategy
+from src.strategies.bollinger_breakout import BollingerBreakoutStrategy
+from src.strategies.vwap_pullback import VWAPPullbackStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
-from src.strategies.rsi_macd_reversal import RSIMACDReversalStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 from src.bybit_executor import BybitExecutor
@@ -67,10 +66,9 @@ class Bot:
 
         self.strategy    = Strategy(cfg)
         self.sr_strategy = SRBounceStrategy(cfg)
-        self.ob_strategy = OrderBlockStrategy(cfg)
-        self.tl_strategy = TrendlineBreakStrategy(cfg)
+        self.bb_strategy = BollingerBreakoutStrategy(cfg)
+        self.vp_strategy = VWAPPullbackStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
-        self.rm_strategy = RSIMACDReversalStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
             forex_symbols=set(cfg.get("forex_symbols", [])),
@@ -162,6 +160,16 @@ class Bot:
             logger.error(f"fetch_ohlcv({symbol}, {timeframe}): {e}")
             return None
 
+    def _fetch_live_price(self, symbol: str) -> float | None:
+        """Fetch the current live mark/last price from Bybit via ccxt."""
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            price  = ticker.get("last") or ticker.get("close")
+            return float(price) if price else None
+        except Exception as e:
+            logger.warning(f"fetch_live_price({symbol}): {e}")
+            return None
+
     # ------------------------------------------------------------------
     # Cooldown
     # ------------------------------------------------------------------
@@ -198,54 +206,74 @@ class Bot:
             )
             logger.info("[PAPER] Session reset — new 50-trade cycle started")
 
-    def _paper_open(self, signal: Signal, strategy_name: str = ""):
-        """Open a simulated position from a confirmed signal."""
+    def _paper_open(self, signal, strategy_name: str = "", live_price: float = None):
+        """
+        Open a simulated position from a confirmed signal.
+        live_price: live Bybit ticker price — used as the actual entry price.
+                    Falls back to signal.entry_price if not provided.
+        """
         self._check_session_resume()
 
         if self._session_paused:
             return
 
-        if signal.symbol in self._paper_positions:
-            logger.debug(f"[PAPER] Already in position for {signal.symbol}, skipping")
+        symbol = signal.symbol if hasattr(signal, "symbol") else signal["symbol"]
+        if symbol in self._paper_positions:
+            logger.debug(f"[PAPER] Already in position for {symbol}, skipping")
             return
 
         if self._session_count >= 50:
-            return  # safety guard, pause already triggered
+            return
 
-        sl_dist = abs(signal.entry_price - signal.stop_loss)
+        sig_entry = signal.entry_price if hasattr(signal, "entry_price") else signal["entry"]
+        sig_sl    = signal.stop_loss   if hasattr(signal, "stop_loss")   else signal["sl"]
+        sig_tp1   = signal.tp1         if hasattr(signal, "tp1")         else signal["tp1"]
+        sig_tp2   = signal.tp2         if hasattr(signal, "tp2")         else signal["tp2"]
+        sig_tp3   = signal.tp3         if hasattr(signal, "tp3")         else signal["tp3"]
+        direction = signal.direction   if hasattr(signal, "direction")   else signal["direction"]
+
+        # Use live Bybit price as entry; recalculate SL/TP offsets from it
+        entry   = live_price if live_price else sig_entry
+        sl_dist = abs(sig_entry - sig_sl)   # original distance from signal
         if sl_dist == 0:
             return
 
-        # Fixed $20 risk per trade regardless of balance
-        risk_amount = round(self.paper_balance * self.risk_pct, 2)  # 3% of current balance
+        # Shift SL and TPs by the difference between live entry and signal entry
+        offset = entry - sig_entry
+        sl  = sig_sl  + offset
+        tp1 = sig_tp1 + offset
+        tp2 = sig_tp2 + offset
+        tp3 = sig_tp3 + offset
+
+        risk_amount = round(self.paper_balance * self.risk_pct, 2)
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
 
-        self.paper_balance -= risk_amount   # lock margin immediately
+        self.paper_balance -= risk_amount
 
         pos = Position(
-            symbol=signal.symbol,
-            direction=signal.direction,
-            entry_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
-            tp1=signal.tp1,
-            tp2=signal.tp2,
-            tp3=signal.tp3,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry,
+            stop_loss=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
             size=size,
             size_remaining=size,
             margin_locked=risk_amount,
             strategy_name=strategy_name,
         )
-        self._paper_positions[signal.symbol] = pos
+        self._paper_positions[symbol] = pos
         self._session_count += 1
 
-        sl_pct = sl_dist / signal.entry_price * 100
+        sl_pct     = sl_dist / entry * 100
         open_count = len(self._paper_positions)
         logger.info(
-            f"[PAPER] OPENED {signal.direction.upper()} {signal.symbol} "
-            f"@ {signal.entry_price:.4f} | Risk=${risk_amount:.2f} | Size={size:.4f} | "
-            f"SL={signal.stop_loss:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f} | "
+            f"[PAPER] OPENED {direction.upper()} {symbol} "
+            f"@ {entry:.4f} (live) | Risk=${risk_amount:.2f} | Size={size:.4f} | "
+            f"SL={sl:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f} | "
             f"Session: {self._session_count}/50"
         )
         self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
@@ -381,24 +409,31 @@ class Bot:
     # Forex paper trading (parallel tracker → forex channel)
     # ------------------------------------------------------------------
 
-    def _forex_paper_open(self, signal, strategy_name: str = ""):
-        """Open a forex paper position mirroring the confirmed signal."""
+    def _forex_paper_open(self, signal, strategy_name: str = "", live_price: float = None):
+        """Open a forex paper position mirroring the confirmed signal using live Bybit price."""
         if not self.notifier.forex_enabled:
             return
         symbol = signal.symbol if hasattr(signal, "symbol") else signal.get("symbol", "")
         if not symbol or symbol in self._forex_positions:
             return
 
-        entry = signal.entry_price if hasattr(signal, "entry_price") else signal["entry"]
-        sl    = signal.stop_loss   if hasattr(signal, "stop_loss")   else signal["sl"]
-        tp1   = signal.tp1         if hasattr(signal, "tp1")         else signal["tp1"]
-        tp2   = signal.tp2         if hasattr(signal, "tp2")         else signal["tp2"]
-        tp3   = signal.tp3         if hasattr(signal, "tp3")         else signal["tp3"]
-        direction = signal.direction if hasattr(signal, "direction") else signal["direction"]
+        sig_entry = signal.entry_price if hasattr(signal, "entry_price") else signal["entry"]
+        sig_sl    = signal.stop_loss   if hasattr(signal, "stop_loss")   else signal["sl"]
+        sig_tp1   = signal.tp1         if hasattr(signal, "tp1")         else signal["tp1"]
+        sig_tp2   = signal.tp2         if hasattr(signal, "tp2")         else signal["tp2"]
+        sig_tp3   = signal.tp3         if hasattr(signal, "tp3")         else signal["tp3"]
+        direction = signal.direction   if hasattr(signal, "direction")   else signal["direction"]
 
-        sl_dist = abs(entry - sl)
+        entry   = live_price if live_price else sig_entry
+        sl_dist = abs(sig_entry - sig_sl)
         if sl_dist == 0:
             return
+
+        offset = entry - sig_entry
+        sl  = sig_sl  + offset
+        tp1 = sig_tp1 + offset
+        tp2 = sig_tp2 + offset
+        tp3 = sig_tp3 + offset
 
         risk_amount = round(self.forex_paper_balance * self.risk_pct, 2)
         size        = round(risk_amount / sl_dist, 6)
@@ -416,7 +451,7 @@ class Bot:
             strategy_name=strategy_name,
         )
         self._forex_positions[symbol] = pos
-        logger.info(f"[FOREX PAPER] OPENED {direction.upper()} {symbol} @ {entry:.5f} | Risk=${risk_amount:.2f}")
+        logger.info(f"[FOREX PAPER] OPENED {direction.upper()} {symbol} @ {entry:.5f} (live) | Risk=${risk_amount:.2f}")
 
     def _forex_paper_tick(self, symbol: str, current_price: float):
         """Check forex paper position and send updates to forex channel."""
@@ -557,7 +592,10 @@ class Bot:
                     logger.debug(f"Skipping {symbol}: insufficient candle history ({len(htf_df)} htf, {len(entry_df)} entry)")
                     continue
 
-                current_price = float(entry_df.iloc[-2]["close"])
+                # Use live Bybit price for paper trade monitoring and entry.
+                # Falls back to last closed candle only if ticker fetch fails.
+                live_price    = self._fetch_live_price(symbol)
+                current_price = live_price if live_price else float(entry_df.iloc[-2]["close"])
 
                 # Paper position management (always runs if position is open)
                 if self.paper_enabled and symbol in self._paper_positions:
@@ -580,8 +618,8 @@ class Bot:
                         if not self._session_paused and quality >= 5:
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
-                                self._paper_open(signal, "EMA Momentum")
-                            self._forex_paper_open(signal, "EMA Momentum")
+                                self._paper_open(signal, "EMA Momentum", live_price=current_price)
+                            self._forex_paper_open(signal, "EMA Momentum", live_price=current_price)
                             self._bybit_order(signal)
                         else:
                             logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 5")
@@ -604,7 +642,7 @@ class Bot:
                             self.notifier.sr_confirmed_signal(sr_sig)
                             self._bybit_order(sr_sig, symbol)
                             if symbol not in self._forex_positions:
-                                self._forex_paper_open(sr_sig, "S/R Bounce")
+                                self._forex_paper_open(sr_sig, "S/R Bounce", live_price=current_price)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(
@@ -615,7 +653,7 @@ class Bot:
                                     volume_ratio=sr_sig.get("vol_ratio", 0),
                                     reason=sr_sig.get("reason", ""),
                                 )
-                                self._paper_open(dummy, "S/R Bounce")
+                                self._paper_open(dummy, "S/R Bounce", live_price=current_price)
                         else:
                             logger.info(f"[SR] Skipped {symbol} — quality {q} < 5")
 
@@ -623,60 +661,58 @@ class Bot:
                         self._daily_alerts.append({"stage": sr_sig["stage"], "direction": sr_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
-                # ── Strategy 3: Order Block ───────────────────────────────
-                if sr_df is not None and not in_paper:
-                    ob_sig = self.ob_strategy.generate_signal(symbol, sr_df, entry_df)
-                    if ob_sig and ob_sig["stage"] == 2 and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
-                        q = ob_sig.get("quality", 3)
+                # ── Strategy 3: BB Squeeze Breakout ───────────────────────
+                if not in_paper:
+                    bb_sig = self.bb_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if bb_sig and bb_sig["stage"] == 2 and not self._is_on_cooldown(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"]):
+                        q = bb_sig.get("quality", 3)
                         logger.info(
-                            f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} "
-                            f"@ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}"
+                            f"[BB CONFIRMED] {bb_sig['direction'].upper()} {symbol} "
+                            f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5:
-                            self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
-                            self._bybit_order(ob_sig, symbol)
-                            if symbol not in self._forex_positions:
-                                self._forex_paper_open(ob_sig, "Order Block")
+                            self.notifier.confirmed_signal(bb_sig, "BB Breakout", q)
+                            self._bybit_order(bb_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=ob_sig["direction"], symbol=symbol,
-                                            entry_price=ob_sig["entry"], stop_loss=ob_sig["sl"],
-                                            tp1=ob_sig["tp1"], tp2=ob_sig["tp2"], tp3=ob_sig["tp3"],
-                                            atr=ob_sig["atr"], rsi=ob_sig["rsi"], volume_ratio=0,
-                                            reason=ob_sig.get("reason", ""))
-                                self._paper_open(dummy, "Order Block")
+                                dummy = Sig(stage=2, direction=bb_sig["direction"], symbol=symbol,
+                                            entry_price=bb_sig["entry"], stop_loss=bb_sig["sl"],
+                                            tp1=bb_sig["tp1"], tp2=bb_sig["tp2"], tp3=bb_sig["tp3"],
+                                            atr=bb_sig["atr"], rsi=bb_sig["rsi"],
+                                            volume_ratio=bb_sig.get("vol_ratio", 0),
+                                            reason=bb_sig.get("reason", ""))
+                                self._paper_open(dummy, "BB Breakout", live_price=current_price)
                         else:
-                            logger.info(f"[OB] Skipped {symbol} — quality {q} < 5")
-                        self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
-                        self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": symbol})
+                            logger.info(f"[BB] Skipped {symbol} — quality {q} < 5")
+                        self._mark_sent(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"])
+                        self._daily_alerts.append({"stage": bb_sig["stage"], "direction": bb_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
-                # ── Strategy 4: Trendline ─────────────────────────────────
+                # ── Strategy 4: VWAP Pullback ─────────────────────────────
                 if not in_paper:
-                    tl_sig = self.tl_strategy.generate_signal(symbol, htf_df, entry_df)
-                    if tl_sig and tl_sig["stage"] == 2 and not self._is_on_cooldown(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"]):
-                        q = tl_sig.get("quality", 3)
+                    vp_sig = self.vp_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if vp_sig and vp_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"]):
+                        q = vp_sig.get("quality", 3)
                         logger.info(
-                            f"[TL CONFIRMED] {tl_sig['direction'].upper()} {symbol} "
-                            f"@ {tl_sig['entry']:.4f} | Q={q} | {tl_sig['reason']}"
+                            f"[VWAP CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
+                            f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5:
-                            self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
-                            self._bybit_order(tl_sig, symbol)
-                            if symbol not in self._forex_positions:
-                                self._forex_paper_open(tl_sig, "Trendline")
+                            self.notifier.confirmed_signal(vp_sig, "VWAP Pullback", q)
+                            self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=tl_sig["direction"], symbol=symbol,
-                                            entry_price=tl_sig["entry"], stop_loss=tl_sig["sl"],
-                                            tp1=tl_sig["tp1"], tp2=tl_sig["tp2"], tp3=tl_sig["tp3"],
-                                            atr=tl_sig["atr"], rsi=tl_sig["rsi"], volume_ratio=0,
-                                            reason=tl_sig.get("reason", ""))
-                                self._paper_open(dummy, "Trendline")
+                                dummy = Sig(stage=2, direction=vp_sig["direction"], symbol=symbol,
+                                            entry_price=vp_sig["entry"], stop_loss=vp_sig["sl"],
+                                            tp1=vp_sig["tp1"], tp2=vp_sig["tp2"], tp3=vp_sig["tp3"],
+                                            atr=vp_sig["atr"], rsi=vp_sig["rsi"],
+                                            volume_ratio=vp_sig.get("vol_ratio", 0),
+                                            reason=vp_sig.get("reason", ""))
+                                self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
                         else:
-                            logger.info(f"[TL] Skipped {symbol} — quality {q} < 5")
-                        self._mark_sent(symbol, tl_sig["direction"] + "_tl", tl_sig["stage"])
-                        self._daily_alerts.append({"stage": tl_sig["stage"], "direction": tl_sig["direction"], "symbol": symbol})
+                            logger.info(f"[VWAP] Skipped {symbol} — quality {q} < 5")
+                        self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
+                        self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
                 # ── Strategy 5: RSI Divergence ────────────────────────────
@@ -689,50 +725,21 @@ class Bot:
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5:
-                            self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
+                            self.notifier.confirmed_signal(rd_sig, "RSI Divergence", q)
                             self._bybit_order(rd_sig, symbol)
-                            if symbol not in self._forex_positions:
-                                self._forex_paper_open(rd_sig, "RSI Divergence")
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
                                 dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
                                             entry_price=rd_sig["entry"], stop_loss=rd_sig["sl"],
                                             tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
-                                            atr=rd_sig["atr"], rsi=rd_sig["rsi"], volume_ratio=0,
+                                            atr=rd_sig["atr"], rsi=rd_sig["rsi"],
+                                            volume_ratio=rd_sig.get("vol_ratio", 0),
                                             reason=rd_sig.get("reason", ""))
-                                self._paper_open(dummy, "RSI Divergence")
+                                self._paper_open(dummy, "RSI Divergence", live_price=current_price)
                         else:
                             logger.info(f"[DIV] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 6: RSI+MACD Reversal ────────────────────────
-                if not in_paper:
-                    rm_sig = self.rm_strategy.generate_signal(symbol, entry_df)
-                    if rm_sig and rm_sig["stage"] == 2 and not self._is_on_cooldown(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"]):
-                        q = rm_sig.get("quality", 3)
-                        logger.info(
-                            f"[RM CONFIRMED] {rm_sig['direction'].upper()} {symbol} "
-                            f"@ {rm_sig['entry']:.4f} | RSI={rm_sig['rsi']:.1f} | Q={q} | {rm_sig['reason']}"
-                        )
-                        if not self._session_paused and q >= 5:
-                            self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
-                            self._bybit_order(rm_sig, symbol)
-                            if symbol not in self._forex_positions:
-                                self._forex_paper_open(rm_sig, "RSI+MACD Reversal")
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=rm_sig["direction"], symbol=symbol,
-                                            entry_price=rm_sig["entry"], stop_loss=rm_sig["sl"],
-                                            tp1=rm_sig["tp1"], tp2=rm_sig["tp2"], tp3=rm_sig["tp3"],
-                                            atr=rm_sig["atr"], rsi=rm_sig["rsi"], volume_ratio=0,
-                                            reason=rm_sig.get("reason", ""))
-                                self._paper_open(dummy, "RSI+MACD Reversal")
-                        else:
-                            logger.info(f"[RM] Skipped {symbol} — quality {q} < 5")
-                        self._mark_sent(symbol, rm_sig["direction"] + "_rm", rm_sig["stage"])
-                        self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
             except Exception as e:
@@ -800,7 +807,7 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["EMA Trend", "S/R Bounce", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
+            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "VWAP Pullback", "RSI Divergence"],
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
         )

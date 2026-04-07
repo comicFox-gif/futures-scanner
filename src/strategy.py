@@ -411,6 +411,7 @@ class Strategy:
         Score 5 conditions for a long signal.
         Returns (score, rsi, vol_ratio, passed_conditions, failed_conditions).
         Requires HTF trend aligned as a hard gate (score=0 if not).
+        ADX gate: skip ranging markets (ADX < 20) to avoid whipsaws.
         """
         if not self._htf_long_aligned(htf_df):
             return 0, 0.0, 0.0, [], ["HTF trend not aligned"]
@@ -418,6 +419,11 @@ class Strategy:
         row       = entry_df.iloc[-2]
         rsi       = float(row["rsi"])
         vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
+
+        # ADX gate — skip ranging markets before scoring
+        adx = float(row.get("adx", 25))
+        if not pd.isna(adx) and adx < 20:
+            return 0, rsi, vol_ratio, [], [f"ADX {adx:.0f} too low (ranging)"]
 
         passed, failed = [], []
 
@@ -467,6 +473,11 @@ class Strategy:
         row       = entry_df.iloc[-2]
         rsi       = float(row["rsi"])
         vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
+
+        # ADX gate — skip ranging markets before scoring
+        adx = float(row.get("adx", 25))
+        if not pd.isna(adx) and adx < 20:
+            return 0, rsi, vol_ratio, [], [f"ADX {adx:.0f} too low (ranging)"]
 
         passed, failed = [], []
 

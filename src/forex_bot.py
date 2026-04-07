@@ -23,10 +23,9 @@ from src.forex_data import fetch_ohlcv
 from src.forex_pair_selector import ForexPairSelector
 from src.strategies.forex_ema_trend import ForexEmaTrendStrategy
 from src.strategies.london_breakout import LondonBreakoutStrategy
-from src.strategies.order_block import OrderBlockStrategy
-from src.strategies.trendline_break import TrendlineBreakStrategy
-from src.strategies.rsi_divergence import RSIDivergenceStrategy
-from src.strategies.rsi_macd_reversal import RSIMACDReversalStrategy
+from src.strategies.fibonacci_pullback import FibonacciPullbackStrategy
+from src.strategies.daily_level_break import DailyLevelBreakStrategy
+from src.strategies.bb_mean_reversion import BBMeanReversionStrategy
 from src.notifier import Notifier
 from src.strategy import Position   # reuse Position dataclass
 
@@ -106,15 +105,20 @@ class ForexBot:
         self.paper_start_bal   = self.paper_balance
 
         self.alerts_enabled = cfg.get("alerts_enabled", True)
-        self.ema_strategy = ForexEmaTrendStrategy(cfg)
-        self.lb_strategy  = LondonBreakoutStrategy(cfg)
-        self.ob_strategy  = OrderBlockStrategy(cfg)
-        self.tl_strategy  = TrendlineBreakStrategy(cfg)
-        self.rd_strategy  = RSIDivergenceStrategy(cfg)
-        self.rm_strategy  = RSIMACDReversalStrategy(cfg)
-        self.notifier     = Notifier(channel_name=cfg.get("channel_name", ""))
+        self.ema_strategy  = ForexEmaTrendStrategy(cfg)
+        self.lb_strategy   = LondonBreakoutStrategy(cfg)
+        self.fib_strategy  = FibonacciPullbackStrategy(cfg)
+        self.dl_strategy   = DailyLevelBreakStrategy(cfg)
+        self.bbmr_strategy = BBMeanReversionStrategy(cfg)
+        self.notifier      = Notifier(channel_name=cfg.get("channel_name", ""))
+        # Forex bot always sends to the forex channel.
+        # Swap main token → forex token so send() and send_signal() both hit the forex channel.
+        if self.notifier.forex_enabled:
+            self.notifier.token   = self.notifier.forex_token
+            self.notifier.chat_id = self.notifier.forex_chat_id
+            self.notifier.enabled = True
         if not self.alerts_enabled:
-            self.notifier.enabled = False   # suppress all Telegram output
+            self.notifier.enabled = False
 
         self._last_alert: dict[tuple, datetime] = {}
         self._paper_positions: dict[str, Position] = {}
@@ -415,7 +419,7 @@ class ForexBot:
                         stage_label = "CONFIRMED" if sig["stage"] == 2 else "WARNING"
                         logger.info(f"[EMA {stage_label}] {sig['direction'].upper()} {pair} @ {sig['entry']:.5f} | Q={q}")
                         if sig["stage"] == 2 and not self._session_paused and q >= 4:
-                            self.notifier.fx_confirmed_signal(sig, "FX EMA Trend")
+                            self.notifier.fx_confirmed_signal(sig, "FX EMA Trend", force_forex_channel=True)
                             if self.paper_enabled:
                                 self._paper_open(sig, "FX EMA Trend")
                         elif sig["stage"] == 2:
@@ -434,7 +438,7 @@ class ForexBot:
                         stage_label = "CONFIRMED" if lb_sig["stage"] == 2 else "WARNING"
                         logger.info(f"[LB {stage_label}] {lb_sig['direction'].upper()} {pair} @ {lb_sig['entry']:.5f} | Q={q}")
                         if lb_sig["stage"] == 2 and not self._session_paused and q >= 4:
-                            self.notifier.lb_confirmed_signal(lb_sig)
+                            self.notifier.lb_confirmed_signal(lb_sig, force_forex_channel=True)
                             if self.paper_enabled and pair not in self._paper_positions:
                                 self._paper_open(lb_sig, "London Breakout")
                         elif lb_sig["stage"] == 2:
@@ -445,80 +449,52 @@ class ForexBot:
                         self._daily_alerts.append({"stage": lb_sig["stage"], "direction": lb_sig["direction"], "symbol": pair})
                         signals_found += 1
 
-                # ── Strategy 3: Order Block ───────────────────────────────
+                # ── Strategy 3: Fibonacci Pullback ───────────────────────
                 if not in_paper:
-                    ob_sig = self.ob_strategy.generate_signal(pair, htf_df, entry_df)
-                    if ob_sig and not self._is_on_cooldown(pair, ob_sig["direction"] + "_ob", ob_sig["stage"]):
-                        q = ob_sig.get("quality", 3)
-                        stage_label = "CONFIRMED" if ob_sig["stage"] == 2 else "WARNING"
-                        logger.info(f"[OB {stage_label}] {ob_sig['direction'].upper()} {pair} @ {ob_sig['entry']:.5f} | Q={q}")
-                        if ob_sig["stage"] == 2 and not self._session_paused and q >= 4:
-                            self.notifier.fx_confirmed_signal(ob_sig, "Order Block")
+                    fib_sig = self.fib_strategy.generate_signal(pair, htf_df, entry_df)
+                    if fib_sig and not self._is_on_cooldown(pair, fib_sig["direction"] + "_fib", fib_sig["stage"]):
+                        q = fib_sig.get("quality", 3)
+                        logger.info(f"[FIB CONFIRMED] {fib_sig['direction'].upper()} {pair} @ {fib_sig['entry']:.5f} | Q={q}")
+                        if fib_sig["stage"] == 2 and not self._session_paused and q >= 5:
+                            self.notifier.fx_confirmed_signal(fib_sig, "Fib Pullback", force_forex_channel=True)
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(ob_sig, "Order Block")
-                        elif ob_sig["stage"] == 2:
-                            logger.info(f"[OB] Skipped {pair} — quality {q} < 4")
-                        elif self.send_warnings:
-                            self.notifier.fx_warning_signal(ob_sig, "Order Block")
-                        self._mark_sent(pair, ob_sig["direction"] + "_ob", ob_sig["stage"])
-                        self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": pair})
+                                self._paper_open(fib_sig, "Fib Pullback")
+                        else:
+                            logger.info(f"[FIB] Skipped {pair} — quality {q} < 5")
+                        self._mark_sent(pair, fib_sig["direction"] + "_fib", fib_sig["stage"])
+                        self._daily_alerts.append({"stage": fib_sig["stage"], "direction": fib_sig["direction"], "symbol": pair})
                         signals_found += 1
 
-                # ── Strategy 4: Trendline ─────────────────────────────────
+                # ── Strategy 4: Daily Level Break + Retest ───────────────
                 if not in_paper:
-                    tl_sig = self.tl_strategy.generate_signal(pair, itf_df, entry_df)
-                    if tl_sig and not self._is_on_cooldown(pair, tl_sig["direction"] + "_tl", tl_sig["stage"]):
-                        q = tl_sig.get("quality", 3)
-                        stage_label = "CONFIRMED" if tl_sig["stage"] == 2 else "WARNING"
-                        logger.info(f"[TL {stage_label}] {tl_sig['direction'].upper()} {pair} @ {tl_sig['entry']:.5f} | Q={q}")
-                        if tl_sig["stage"] == 2 and not self._session_paused and q >= 4:
-                            self.notifier.fx_confirmed_signal(tl_sig, "Trendline")
+                    dl_sig = self.dl_strategy.generate_signal(pair, htf_df, entry_df)
+                    if dl_sig and not self._is_on_cooldown(pair, dl_sig["direction"] + "_dl", dl_sig["stage"]):
+                        q = dl_sig.get("quality", 3)
+                        logger.info(f"[DL CONFIRMED] {dl_sig['direction'].upper()} {pair} @ {dl_sig['entry']:.5f} | Q={q}")
+                        if dl_sig["stage"] == 2 and not self._session_paused and q >= 5:
+                            self.notifier.fx_confirmed_signal(dl_sig, "Daily Level Break", force_forex_channel=True)
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(tl_sig, "Trendline")
-                        elif tl_sig["stage"] == 2:
-                            logger.info(f"[TL] Skipped {pair} — quality {q} < 4")
-                        elif self.send_warnings:
-                            self.notifier.fx_warning_signal(tl_sig, "Trendline")
-                        self._mark_sent(pair, tl_sig["direction"] + "_tl", tl_sig["stage"])
-                        self._daily_alerts.append({"stage": tl_sig["stage"], "direction": tl_sig["direction"], "symbol": pair})
+                                self._paper_open(dl_sig, "Daily Level Break")
+                        else:
+                            logger.info(f"[DL] Skipped {pair} — quality {q} < 5")
+                        self._mark_sent(pair, dl_sig["direction"] + "_dl", dl_sig["stage"])
+                        self._daily_alerts.append({"stage": dl_sig["stage"], "direction": dl_sig["direction"], "symbol": pair})
                         signals_found += 1
 
-                # ── Strategy 5: RSI Divergence ────────────────────────────
+                # ── Strategy 5: BB Mean Reversion ────────────────────────
                 if not in_paper:
-                    rd_sig = self.rd_strategy.generate_signal(pair, itf_df, entry_df)
-                    if rd_sig and not self._is_on_cooldown(pair, rd_sig["direction"] + "_rd", rd_sig["stage"]):
-                        q = rd_sig.get("quality", 3)
-                        stage_label = "CONFIRMED" if rd_sig["stage"] == 2 else "WARNING"
-                        logger.info(f"[DIV {stage_label}] {rd_sig['direction'].upper()} {pair} @ {rd_sig['entry']:.5f} | Q={q}")
-                        if rd_sig["stage"] == 2 and not self._session_paused and q >= 4:
-                            self.notifier.fx_confirmed_signal(rd_sig, "RSI Divergence")
+                    bbmr_sig = self.bbmr_strategy.generate_signal(pair, htf_df, entry_df)
+                    if bbmr_sig and not self._is_on_cooldown(pair, bbmr_sig["direction"] + "_bbmr", bbmr_sig["stage"]):
+                        q = bbmr_sig.get("quality", 3)
+                        logger.info(f"[BBMR CONFIRMED] {bbmr_sig['direction'].upper()} {pair} @ {bbmr_sig['entry']:.5f} | Q={q}")
+                        if bbmr_sig["stage"] == 2 and not self._session_paused and q >= 5:
+                            self.notifier.fx_confirmed_signal(bbmr_sig, "BB Mean Reversion", force_forex_channel=True)
                             if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(rd_sig, "RSI Divergence")
-                        elif rd_sig["stage"] == 2:
-                            logger.info(f"[DIV] Skipped {pair} — quality {q} < 4")
-                        elif self.send_warnings:
-                            self.notifier.fx_warning_signal(rd_sig, "RSI Divergence")
-                        self._mark_sent(pair, rd_sig["direction"] + "_rd", rd_sig["stage"])
-                        self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": pair})
-                        signals_found += 1
-
-                # ── Strategy 6: RSI+MACD Reversal ────────────────────────
-                if not in_paper:
-                    rm_sig = self.rm_strategy.generate_signal(pair, entry_df)
-                    if rm_sig and not self._is_on_cooldown(pair, rm_sig["direction"] + "_rm", rm_sig["stage"]):
-                        q = rm_sig.get("quality", 3)
-                        stage_label = "CONFIRMED" if rm_sig["stage"] == 2 else "WARNING"
-                        logger.info(f"[RM {stage_label}] {rm_sig['direction'].upper()} {pair} @ {rm_sig['entry']:.5f} | Q={q}")
-                        if rm_sig["stage"] == 2 and not self._session_paused and q >= 4:
-                            self.notifier.fx_confirmed_signal(rm_sig, "RSI+MACD Reversal")
-                            if self.paper_enabled and pair not in self._paper_positions:
-                                self._paper_open(rm_sig, "RSI+MACD Reversal")
-                        elif rm_sig["stage"] == 2:
-                            logger.info(f"[RM] Skipped {pair} — quality {q} < 4")
-                        elif self.send_warnings:
-                            self.notifier.fx_warning_signal(rm_sig, "RSI+MACD Reversal")
-                        self._mark_sent(pair, rm_sig["direction"] + "_rm", rm_sig["stage"])
-                        self._daily_alerts.append({"stage": rm_sig["stage"], "direction": rm_sig["direction"], "symbol": pair})
+                                self._paper_open(bbmr_sig, "BB Mean Reversion")
+                        else:
+                            logger.info(f"[BBMR] Skipped {pair} — quality {q} < 5")
+                        self._mark_sent(pair, bbmr_sig["direction"] + "_bbmr", bbmr_sig["stage"])
+                        self._daily_alerts.append({"stage": bbmr_sig["stage"], "direction": bbmr_sig["direction"], "symbol": pair})
                         signals_found += 1
 
             except Exception as e:
@@ -565,7 +541,7 @@ class ForexBot:
         pairs = self.pair_selector.get_pairs()
         logger.info(
             f"Forex Scanner started | {len(pairs)} pairs | "
-            f"EMA Trend + London Breakout + Order Block + Trendline + RSI Divergence"
+            f"FX EMA Trend + London Breakout + Fib Pullback + Daily Level Break + BB Mean Reversion"
         )
         self.notifier.scanner_started(
             self.pair_selector.get_pairs(),
@@ -574,7 +550,7 @@ class ForexBot:
             cooldown_min=self.cooldown_min,
             paper_enabled=self.paper_enabled,
             paper_balance=self.paper_balance,
-            strategies=["FX EMA Trend", "London Breakout", "Order Block", "Trendline", "RSI Divergence", "RSI+MACD Reversal"],
+            strategies=["FX EMA Trend", "London Breakout", "Fib Pullback", "Daily Level Break", "BB Mean Reversion"],
             label="Forex Scanner",
         )
         while self._running:

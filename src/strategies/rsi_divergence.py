@@ -114,15 +114,27 @@ class RSIDivergenceStrategy:
         if pd.isna(atr) or atr == 0 or pd.isna(rsi):
             return None
 
+        # ADX gate: divergence in ranging markets is unreliable noise
+        adx = float(row.get("adx", 25))
+        if not pd.isna(adx) and adx < 18:
+            return None
+
         vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
         body = candle_body_ratio(entry_df)
         sl_dist = atr * self.atr_sl_mult
+
+        # HTF trend alignment from itf_df (used as trend frame)
+        htf_row   = itf_df.iloc[-2]
+        ema50_htf = float(htf_row.get(f"ema_{self.ema_slow}", float("nan")))
+        htf_price = float(htf_row["close"])
+        htf_bull  = not pd.isna(ema50_htf) and htf_price > ema50_htf
+        htf_bear  = not pd.isna(ema50_htf) and htf_price < ema50_htf
 
         # ── Bullish divergence → LONG ─────────────────────────────────────
         bull_div, curr_rsi, prior_rsi, div_reason = rsi_bullish_divergence(
             itf_df, self.div_lookback, self.min_rsi_diff
         )
-        if bull_div and curr_rsi <= self.bull_rsi_max:
+        if bull_div and curr_rsi <= self.bull_rsi_max and htf_bull:
             # Stage 2: MACD confirms AND reversal pattern on 15m (both required)
             macd_turn   = macd_histogram_turning_positive(entry_df)
             rev_pattern = is_hammer(row) or is_bullish_engulfing(entry_df, -2)
@@ -156,7 +168,7 @@ class RSIDivergenceStrategy:
         bear_div, curr_rsi, prior_rsi, div_reason = rsi_bearish_divergence(
             itf_df, self.div_lookback, self.min_rsi_diff
         )
-        if bear_div and curr_rsi >= self.bear_rsi_min:
+        if bear_div and curr_rsi >= self.bear_rsi_min and htf_bear:
             macd_turn   = macd_histogram_turning_negative(entry_df)
             rev_pattern = is_shooting_star(row) or is_bearish_engulfing(entry_df, -2)
 
