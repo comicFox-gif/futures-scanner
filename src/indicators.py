@@ -488,6 +488,80 @@ def volume_building(df: pd.DataFrame, lookback: int = 2) -> bool:
 
 
 # ===========================================================================
+# Stop Hunt / Liquidity Sweep Detection
+# ===========================================================================
+
+def detect_liquidity_sweep(
+    df: pd.DataFrame,
+    structure_lookback: int = 20,
+    sweep_lookback: int = 5,
+    wick_atr_min: float = 0.25,
+) -> str | None:
+    """
+    Detect a recent stop hunt / liquidity sweep.
+
+    Whales push price above a swing high to grab short stops (buy-side sweep),
+    or below a swing low to grab long stops (sell-side sweep), then reverse.
+
+    The wick must pierce the structure level by at least `wick_atr_min * ATR`
+    and the candle must CLOSE BACK on the opposite side — confirming the sweep
+    was a fake-out, not a real breakout.
+
+    Returns:
+      "buy_side"  — recent wick above structure high, closed below it
+                    (whales hunted long/short stops above — bearish danger for longs)
+      "sell_side" — recent wick below structure low, closed above it
+                    (whales hunted long stops below — bullish danger for shorts)
+      None        — no sweep in recent candles
+    """
+    min_len = structure_lookback + sweep_lookback + 3
+    if len(df) < min_len:
+        return None
+
+    atr = float(df.iloc[-2].get("atr", float("nan")))
+    if pd.isna(atr) or atr == 0:
+        return None
+
+    # Structure: the prior high/low pool where stops are resting
+    struct_window = df.iloc[-(structure_lookback + sweep_lookback) : -sweep_lookback]
+    struct_high   = float(struct_window["high"].max())
+    struct_low    = float(struct_window["low"].min())
+    min_pierce    = atr * wick_atr_min
+
+    # Scan recent candles (confirmed closes only, exclude live candle)
+    recent = df.iloc[-sweep_lookback - 1 : -1]
+    for _, row in recent.iterrows():
+        # Buy-side sweep: wick pierced above structure high but closed back below
+        if row["high"] > struct_high + min_pierce and row["close"] < struct_high:
+            return "buy_side"
+        # Sell-side sweep: wick pierced below structure low but closed back above
+        if row["low"] < struct_low - min_pierce and row["close"] > struct_low:
+            return "sell_side"
+
+    return None
+
+
+def bounce_candle_clean(row: pd.Series, direction: str, max_wick_ratio: float = 0.38) -> bool:
+    """
+    Check that the bounce candle isn't a wick-heavy fake pump/dump.
+
+    For longs  : upper wick must be <= max_wick_ratio of total range.
+                 A big upper wick = price pumped and got rejected = stop hunt candle.
+    For shorts : lower wick must be <= max_wick_ratio of total range.
+                 A big lower wick = price dumped and got bought back = fake dump.
+    """
+    candle_range = row["high"] - row["low"]
+    if candle_range == 0:
+        return False
+    if direction == "long":
+        upper_wick = row["high"] - max(row["open"], row["close"])
+        return (upper_wick / candle_range) <= max_wick_ratio
+    else:
+        lower_wick = min(row["open"], row["close"]) - row["low"]
+        return (lower_wick / candle_range) <= max_wick_ratio
+
+
+# ===========================================================================
 # Order Block Detection (ICT)
 # ===========================================================================
 

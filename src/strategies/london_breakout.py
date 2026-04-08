@@ -139,22 +139,13 @@ class LondonBreakoutStrategy:
         return float(session["high"].max()), float(session["low"].min())
 
     def _quality_score(self, body: float, range_pips: float, rsi: float) -> int:
-        score = 1
-        if body >= 0.65:
-            score += 1
-        elif body >= 0.50:
-            score += 0.5
-        # Ideal range: compact but meaningful
-        if 20 <= range_pips <= 50:
-            score += 1
-        elif 15 <= range_pips <= 65:
-            score += 0.5
-        # RSI in neutral zone = not exhausted
-        if 40 <= rsi <= 60:
-            score += 1
-        elif 35 <= rsi <= 65:
-            score += 0.5
-        return min(5, round(score))
+        score = 0
+        if body >= 0.50:        score += 1  # C1: momentum candle
+        if 20 <= range_pips <= 50: score += 1  # C2: ideal range size
+        if 40 <= rsi <= 60:     score += 1  # C3: RSI neutral zone
+        score += 1                          # C4: base — valid Asian range + session gate passed
+        score += 1                          # C5: base — breakout confirmed with buffer
+        return min(5, score)
 
     # ------------------------------------------------------------------
     # Main signal generator

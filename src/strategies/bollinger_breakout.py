@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import pandas as pd
 
-from src.indicators import compute_all_indicators
+from src.indicators import compute_all_indicators, detect_liquidity_sweep, bounce_candle_clean
 
 logger = logging.getLogger("futures_bot.bollinger_breakout")
 
@@ -123,8 +123,17 @@ class BollingerBreakoutStrategy:
 
         sl_dist = atr * self.atr_sl_mult
 
+        sweep = detect_liquidity_sweep(entry_df)
+
         # LONG: price closes above upper band in bull trend
         if bull_trend and price > bb_upper:
+            # A buy-side sweep right before a long breakout = fake pump — whales about to dump
+            if sweep == "buy_side":
+                logger.debug(f"[BB] {symbol} LONG blocked — buy-side liquidity sweep detected")
+                return None
+            if not bounce_candle_clean(row, "long"):
+                logger.debug(f"[BB] {symbol} LONG blocked — upper wick rejection on breakout candle")
+                return None
             quality = self._quality(squeezed, True, vol_ratio, adx, rsi, "long")
             if quality < 5:
                 return None
@@ -144,6 +153,13 @@ class BollingerBreakoutStrategy:
 
         # SHORT: price closes below lower band in bear trend
         if bear_trend and price < bb_lower:
+            # A sell-side sweep before a short breakout = fake dump — whales about to pump
+            if sweep == "sell_side":
+                logger.debug(f"[BB] {symbol} SHORT blocked — sell-side liquidity sweep detected")
+                return None
+            if not bounce_candle_clean(row, "short"):
+                logger.debug(f"[BB] {symbol} SHORT blocked — lower wick rejection on breakout candle")
+                return None
             quality = self._quality(squeezed, True, vol_ratio, adx, rsi, "short")
             if quality < 5:
                 return None

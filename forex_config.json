@@ -1,6 +1,6 @@
 {
   "channel_name": "",
-  "alerts_enabled": false,
+  "alerts_enabled": true,
   "mode": "scalp",
 
   "dynamic_pairs": {

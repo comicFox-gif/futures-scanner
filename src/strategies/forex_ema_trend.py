@@ -153,21 +153,14 @@ class ForexEmaTrendStrategy:
     # ------------------------------------------------------------------
 
     def _quality_score(self, body: float, rsi: float, macd_hist: float, atr: float) -> int:
-        score = 1
-        if body >= 0.65:
-            score += 1
-        elif body >= 0.50:
-            score += 0.5
-        if 45 <= rsi <= 65:
-            score += 1
-        elif 40 <= rsi <= 70:
-            score += 0.5
+        score = 0
+        if body >= 0.45:              score += 1  # C1: decisive candle body
+        if 40 <= rsi <= 65:           score += 1  # C2: RSI in trend zone
         hist_str = abs(macd_hist) / atr if atr > 0 else 0
-        if hist_str >= 0.15:
-            score += 1
-        elif hist_str >= 0.08:
-            score += 0.5
-        return min(5, round(score))
+        if hist_str >= 0.05:          score += 1  # C3: MACD histogram has strength
+        score += 1                                # C4: base — both HTF+ITF aligned (gate passed)
+        score += 1                                # C5: MACD cross confirmed (gate passed)
+        return min(5, score)
 
     # ------------------------------------------------------------------
     # Entry filters (fake breakout prevention)

@@ -44,7 +44,7 @@
   },
 
   "paper_trading": {
-    "enabled": true,
+    "enabled": false,
     "balance": 1000.0,
     "risk_pct": 0.01
   },

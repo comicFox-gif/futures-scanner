@@ -21,11 +21,12 @@ import pandas as pd
 from src.strategy import Strategy, Signal, Position
 from src.strategies.sr_bounce import SRBounceStrategy
 from src.strategies.bollinger_breakout import BollingerBreakoutStrategy
-from src.strategies.vwap_pullback import VWAPPullbackStrategy
+from src.strategies.ema_ribbon_pullback import EMARibbonPullbackStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 from src.bybit_executor import BybitExecutor
+from src.state_manager import save_state, load_state
 
 logger = logging.getLogger("futures_bot")
 
@@ -67,7 +68,7 @@ class Bot:
         self.strategy    = Strategy(cfg)
         self.sr_strategy = SRBounceStrategy(cfg)
         self.bb_strategy = BollingerBreakoutStrategy(cfg)
-        self.vp_strategy = VWAPPullbackStrategy(cfg)
+        self.vp_strategy = EMARibbonPullbackStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
@@ -116,6 +117,9 @@ class Bot:
         self._last_summary_date         = None
         self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
+
+        # Restore paper state from previous session (survives redeploy)
+        load_state(self)
 
     # ------------------------------------------------------------------
     # Exchange init
@@ -278,6 +282,7 @@ class Bot:
             f"Session: {self._session_count}/50"
         )
         self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
+        save_state(self)
 
         # Stop opening new trades once 50 have been opened
         if self._session_count >= 50:
@@ -351,6 +356,7 @@ class Bot:
                 )
                 self.notifier.paper_closed(pos, reason, exit_price, pos.closed_pnl,
                                            self.paper_balance, tp_level, self._trade_stats)
+                save_state(self)
                 self._paper_trades.append({
                     "symbol": symbol, "direction": pos.direction,
                     "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
@@ -391,6 +397,7 @@ class Bot:
                     f"PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
                 )
                 self.notifier.paper_tp_hit(pos, tp_level, partial_price, pnl, self.paper_balance)
+                save_state(self)
 
             elif act == "move_sl":
                 new_sl    = action["new_sl"]
@@ -685,17 +692,17 @@ class Bot:
                         self._daily_alerts.append({"stage": bb_sig["stage"], "direction": bb_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
-                # ── Strategy 4: VWAP Pullback ─────────────────────────────
+                # ── Strategy 4: EMA Ribbon Pullback ───────────────────────
                 if not in_paper:
                     vp_sig = self.vp_strategy.generate_signal(symbol, htf_df, entry_df)
                     if vp_sig and vp_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"]):
                         q = vp_sig.get("quality", 3)
                         logger.info(
-                            f"[VWAP CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
+                            f"[EMA RIBBON CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5:
-                            self.notifier.confirmed_signal(vp_sig, "VWAP Pullback", q)
+                        if not self._session_paused and q >= 4:
+                            self.notifier.confirmed_signal(vp_sig, "EMA Ribbon Pullback", q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -705,9 +712,9 @@ class Bot:
                                             atr=vp_sig["atr"], rsi=vp_sig["rsi"],
                                             volume_ratio=vp_sig.get("vol_ratio", 0),
                                             reason=vp_sig.get("reason", ""))
-                                self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
+                                self._paper_open(dummy, "EMA Ribbon Pullback", live_price=current_price)
                         else:
-                            logger.info(f"[VWAP] Skipped {symbol} — quality {q} < 5")
+                            logger.info(f"[EMA RIBBON] Skipped {symbol} — quality {q} < 4")
                         self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
                         self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
                         signals_found += 1

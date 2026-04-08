@@ -46,6 +46,7 @@ from src.indicators import (
     is_bullish_engulfing,
     is_bearish_engulfing,
     candle_body_ratio,
+    detect_liquidity_sweep,
 )
 
 logger = logging.getLogger("futures_bot.rsi_divergence")
@@ -130,6 +131,8 @@ class RSIDivergenceStrategy:
         htf_bull  = not pd.isna(ema50_htf) and htf_price > ema50_htf
         htf_bear  = not pd.isna(ema50_htf) and htf_price < ema50_htf
 
+        sweep = detect_liquidity_sweep(entry_df)
+
         # ── Bullish divergence → LONG ─────────────────────────────────────
         bull_div, curr_rsi, prior_rsi, div_reason = rsi_bullish_divergence(
             itf_df, self.div_lookback, self.min_rsi_diff
@@ -140,6 +143,9 @@ class RSIDivergenceStrategy:
             rev_pattern = is_hammer(row) or is_bullish_engulfing(entry_df, -2)
 
             if macd_turn and rev_pattern:
+                if sweep == "buy_side":
+                    logger.debug(f"[RSI DIV] {symbol} LONG blocked — buy-side liquidity sweep")
+                    return None
                 quality = self._quality(curr_rsi, prior_rsi, body, "long", vol_ratio)
                 return {
                     "stage": 2, "direction": "long", "symbol": symbol,
@@ -173,6 +179,9 @@ class RSIDivergenceStrategy:
             rev_pattern = is_shooting_star(row) or is_bearish_engulfing(entry_df, -2)
 
             if macd_turn and rev_pattern:
+                if sweep == "sell_side":
+                    logger.debug(f"[RSI DIV] {symbol} SHORT blocked — sell-side liquidity sweep")
+                    return None
                 quality = self._quality(curr_rsi, prior_rsi, body, "short", vol_ratio)
                 return {
                     "stage": 2, "direction": "short", "symbol": symbol,

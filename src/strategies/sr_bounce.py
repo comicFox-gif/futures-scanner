@@ -38,6 +38,7 @@ from src.indicators import (
     is_bearish_engulfing,
     candle_body_ratio,
     volume_building,
+    detect_liquidity_sweep,
 )
 
 logger = logging.getLogger("futures_bot.sr_bounce")
@@ -193,6 +194,8 @@ class SRBounceStrategy:
         nearest_sup  = max(supports,    key=lambda x: x["price"]) if supports    else None
         nearest_res  = min(resistances, key=lambda x: x["price"]) if resistances else None
 
+        sweep = detect_liquidity_sweep(entry_df)
+
         # ---- LONG: bounce from support ----
         if nearest_sup:
             lv_price   = nearest_sup["price"]
@@ -216,6 +219,10 @@ class SRBounceStrategy:
                 score   = len(passed)
 
                 if score >= 3:   # 3/4 sub-conditions = 4/5 overall (level is the 5th)
+                    # Block if whales just swept above a high — dump risk on long
+                    if sweep == "buy_side":
+                        logger.debug(f"[SR] {symbol} LONG blocked — buy-side liquidity sweep")
+                        return None
                     quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
                     sl_dist  = atr * self.atr_sl_mult
                     score_tag = f"✅ {score+1}/5 conditions"
@@ -281,6 +288,10 @@ class SRBounceStrategy:
                 score   = len(passed)
 
                 if score >= 3:
+                    # Block if whales just swept below a low — pump risk on short
+                    if sweep == "sell_side":
+                        logger.debug(f"[SR] {symbol} SHORT blocked — sell-side liquidity sweep")
+                        return None
                     quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
                     sl_dist  = atr * self.atr_sl_mult
                     score_tag = f"✅ {score+1}/5 conditions"
