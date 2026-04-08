@@ -184,7 +184,7 @@ class EMARibbonPullbackStrategy:
                 logger.debug(f"[EMA RIBBON] {symbol} LONG blocked — bounce candle upper wick too large")
                 return None
             quality = self._quality(True, True, True, True, vol_ratio, adx, rsi, "long")
-            if quality < 4:
+            if quality < 5:
                 return None
             return {
                 "stage": 2, "direction": "long", "symbol": symbol,
@@ -215,7 +215,7 @@ class EMARibbonPullbackStrategy:
                 logger.debug(f"[EMA RIBBON] {symbol} SHORT blocked — bounce candle lower wick too large")
                 return None
             quality = self._quality(True, True, True, True, vol_ratio, adx, rsi, "short")
-            if quality < 4:
+            if quality < 5:
                 return None
             return {
                 "stage": 2, "direction": "short", "symbol": symbol,

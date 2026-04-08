@@ -701,7 +701,7 @@ class Bot:
                             f"[EMA RIBBON CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 4:
+                        if not self._session_paused and q >= 5:
                             self.notifier.confirmed_signal(vp_sig, "EMA Ribbon Pullback", q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -714,7 +714,7 @@ class Bot:
                                             reason=vp_sig.get("reason", ""))
                                 self._paper_open(dummy, "EMA Ribbon Pullback", live_price=current_price)
                         else:
-                            logger.info(f"[EMA RIBBON] Skipped {symbol} — quality {q} < 4")
+                            logger.info(f"[EMA RIBBON] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
                         self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
                         signals_found += 1
