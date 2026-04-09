@@ -21,7 +21,7 @@ import pandas as pd
 from src.strategy import Strategy, Signal, Position
 from src.strategies.sr_bounce import SRBounceStrategy
 from src.strategies.bollinger_breakout import BollingerBreakoutStrategy
-from src.strategies.ema_ribbon_pullback import EMARibbonPullbackStrategy
+from src.strategies.structure_break import StructureBreakStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
@@ -68,7 +68,7 @@ class Bot:
         self.strategy    = Strategy(cfg)
         self.sr_strategy = SRBounceStrategy(cfg)
         self.bb_strategy = BollingerBreakoutStrategy(cfg)
-        self.vp_strategy = EMARibbonPullbackStrategy(cfg)
+        self.vp_strategy = StructureBreakStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
@@ -692,17 +692,17 @@ class Bot:
                         self._daily_alerts.append({"stage": bb_sig["stage"], "direction": bb_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
-                # ── Strategy 4: EMA Ribbon Pullback ───────────────────────
+                # ── Strategy 4: Break of Structure ────────────────────────
                 if not in_paper:
                     vp_sig = self.vp_strategy.generate_signal(symbol, htf_df, entry_df)
                     if vp_sig and vp_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"]):
                         q = vp_sig.get("quality", 3)
                         logger.info(
-                            f"[EMA RIBBON CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
+                            f"[BOS CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5:
-                            self.notifier.confirmed_signal(vp_sig, "EMA Ribbon Pullback", q)
+                            self.notifier.confirmed_signal(vp_sig, "Break of Structure", q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -712,9 +712,9 @@ class Bot:
                                             atr=vp_sig["atr"], rsi=vp_sig["rsi"],
                                             volume_ratio=vp_sig.get("vol_ratio", 0),
                                             reason=vp_sig.get("reason", ""))
-                                self._paper_open(dummy, "EMA Ribbon Pullback", live_price=current_price)
+                                self._paper_open(dummy, "Break of Structure", live_price=current_price)
                         else:
-                            logger.info(f"[EMA RIBBON] Skipped {symbol} — quality {q} < 5")
+                            logger.info(f"[BOS] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
                         self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
                         signals_found += 1
