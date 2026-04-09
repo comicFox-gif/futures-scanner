@@ -566,6 +566,52 @@ class Bot:
     # Main tick
     # ------------------------------------------------------------------
 
+    def _bias_blocks(self, direction: str, bias: str) -> bool:
+        """
+        Returns True if the market bias is strongly against this trade direction.
+        Bearish market → block longs. Bullish market → block shorts.
+        Neutral → allow both.
+        """
+        if bias == "bearish" and direction == "long":
+            return True
+        if bias == "bullish" and direction == "short":
+            return True
+        return False
+
+    def _market_bias(self) -> str:
+        """
+        Determine overall crypto market direction using BTC as the benchmark.
+        Returns 'bearish', 'bullish', or 'neutral'.
+
+        Logic (3 votes — majority wins):
+          Vote 1: BTC price vs EMA50 on HTF
+          Vote 2: BTC price vs EMA200 on HTF
+          Vote 3: BTC MACD line vs zero
+        """
+        try:
+            btc_raw = self._fetch_ohlcv("BTC/USDT:USDT", self.tf_trend)
+            if btc_raw is None or len(btc_raw) < 60:
+                return "neutral"
+            btc_df  = self.strategy.enrich(btc_raw.copy())
+            if len(btc_df) < 5:
+                return "neutral"
+            row      = btc_df.iloc[-2]
+            price    = float(row["close"])
+            ema50    = float(row.get(f"ema_{self.cfg['strategy']['ema_slow']}", float("nan")))
+            ema200   = float(row.get(f"ema_{self.cfg['strategy']['ema_trend']}", float("nan")))
+            macd     = float(row.get("macd", float("nan")))
+            if any(pd.isna(v) for v in [ema50, ema200, macd]):
+                return "neutral"
+            bull_votes = sum([price > ema50, price > ema200, macd > 0])
+            bear_votes = sum([price < ema50, price < ema200, macd < 0])
+            if bull_votes >= 2:
+                return "bullish"
+            if bear_votes >= 2:
+                return "bearish"
+            return "neutral"
+        except Exception:
+            return "neutral"
+
     def _tick(self):
         self._check_session_resume()
         symbols   = self.pair_selector.get_symbols()
@@ -573,7 +619,11 @@ class Bot:
         open_pos  = len(self._paper_positions)
         paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
         paper_info = f" | Paper: {paper_bal} | Positions: {open_pos}" if self.paper_enabled else ""
-        logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info}")
+
+        # Market regime — checked once per tick using BTC as benchmark
+        market_bias = self._market_bias()
+        bias_icon   = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(market_bias, "⚪")
+        logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info} | Market: {bias_icon} {market_bias.upper()}")
 
         signals_found = 0
         for symbol in symbols:
@@ -621,14 +671,14 @@ class Bot:
                             f"[EMA CONFIRMED] {signal.direction.upper()} {symbol} "
                             f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | Q={quality} | {signal.reason}"
                         )
-                        if not self._session_paused and quality >= 5:
+                        if not self._session_paused and quality >= 5 and not self._bias_blocks(signal.direction, market_bias):
                             self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
                             if self.paper_enabled:
                                 self._paper_open(signal, "EMA Momentum", live_price=current_price)
                             self._forex_paper_open(signal, "EMA Momentum", live_price=current_price)
                             self._bybit_order(signal)
                         else:
-                            logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 5")
+                            logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 5 or bias blocked ({market_bias})")
 
                         self._mark_sent(symbol, signal.direction + "_ema", signal.stage)
                         self._daily_alerts.append({"stage": signal.stage, "direction": signal.direction, "symbol": symbol})
@@ -644,7 +694,7 @@ class Bot:
                             f"[SR CONFIRMED] {sr_sig['direction'].upper()} {symbol} "
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5:
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(sr_sig["direction"], market_bias):
                             self.notifier.sr_confirmed_signal(sr_sig)
                             self._bybit_order(sr_sig, symbol)
                             if symbol not in self._forex_positions:
@@ -676,7 +726,7 @@ class Bot:
                             f"[BB CONFIRMED] {bb_sig['direction'].upper()} {symbol} "
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5:
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias):
                             self.notifier.confirmed_signal(bb_sig, "BB Breakout", q)
                             self._bybit_order(bb_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -703,7 +753,7 @@ class Bot:
                             f"[BOS CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5:
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias):
                             self.notifier.confirmed_signal(vp_sig, "Break of Structure", q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -730,7 +780,7 @@ class Bot:
                             f"[DIV CONFIRMED] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5:
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(rd_sig["direction"], market_bias):
                             self.notifier.confirmed_signal(rd_sig, "RSI Divergence", q)
                             self._bybit_order(rd_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -757,7 +807,7 @@ class Bot:
                             f"[MACD0 CONFIRMED] {mz_sig['direction'].upper()} {symbol} "
                             f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5:
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(mz_sig["direction"], market_bias):
                             self.notifier.confirmed_signal(mz_sig, "MACD Zero Cross", q)
                             self._bybit_order(mz_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
