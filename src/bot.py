@@ -22,6 +22,7 @@ from src.strategy import Strategy, Signal, Position
 from src.strategies.sr_bounce import SRBounceStrategy
 from src.strategies.bollinger_breakout import BollingerBreakoutStrategy
 from src.strategies.structure_break import StructureBreakStrategy
+from src.strategies.macd_zero_cross import MACDZeroCrossStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
@@ -68,7 +69,8 @@ class Bot:
         self.strategy    = Strategy(cfg)
         self.sr_strategy = SRBounceStrategy(cfg)
         self.bb_strategy = BollingerBreakoutStrategy(cfg)
-        self.vp_strategy = StructureBreakStrategy(cfg)
+        self.vp_strategy  = StructureBreakStrategy(cfg)
+        self.mz_strategy  = MACDZeroCrossStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
@@ -746,6 +748,33 @@ class Bot:
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
+                # ── Strategy 6: MACD Zero Cross ───────────────────────────
+                if not in_paper:
+                    mz_sig = self.mz_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if mz_sig and mz_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"]):
+                        q = mz_sig.get("quality", 3)
+                        logger.info(
+                            f"[MACD0 CONFIRMED] {mz_sig['direction'].upper()} {symbol} "
+                            f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
+                        )
+                        if not self._session_paused and q >= 5:
+                            self.notifier.confirmed_signal(mz_sig, "MACD Zero Cross", q)
+                            self._bybit_order(mz_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=mz_sig["direction"], symbol=symbol,
+                                            entry_price=mz_sig["entry"], stop_loss=mz_sig["sl"],
+                                            tp1=mz_sig["tp1"], tp2=mz_sig["tp2"], tp3=mz_sig["tp3"],
+                                            atr=mz_sig["atr"], rsi=mz_sig["rsi"],
+                                            volume_ratio=mz_sig.get("vol_ratio", 0),
+                                            reason=mz_sig.get("reason", ""))
+                                self._paper_open(dummy, "MACD Zero Cross", live_price=current_price)
+                        else:
+                            logger.info(f"[MACD0] Skipped {symbol} — quality {q} < 5")
+                        self._mark_sent(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"])
+                        self._daily_alerts.append({"stage": mz_sig["stage"], "direction": mz_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
                 self.notifier.error_alert(f"Scanning {symbol}", str(e)[:200])
@@ -811,7 +840,7 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "VWAP Pullback", "RSI Divergence"],
+            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross"],
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
         )
