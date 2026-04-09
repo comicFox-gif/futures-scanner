@@ -815,13 +815,7 @@ class Bot:
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
         )
-        # Forex channel startup alert
-        forex_cfg  = self.cfg.get("forex_paper", {})
-        forex_mode = forex_cfg.get("mode", self.mode)
-        self.notifier.forex_scanner_started(
-            symbols, self.tf_trend, self.tf_entry,
-            self.forex_paper_balance, forex_mode,
-        )
+        # Forex startup alert intentionally removed — forex bot runs as a separate service
 
         while self._running:
             try:
