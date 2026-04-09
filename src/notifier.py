@@ -99,6 +99,24 @@ class Notifier:
         return f"{price:.5f}"
 
     @staticmethod
+    def _qty_for_risk(entry: float, sl: float, risk_usd: float = 5.0) -> float:
+        """Units of base currency needed so that SL hit = exactly risk_usd loss."""
+        sl_dist = abs(entry - sl)
+        return risk_usd / sl_dist if sl_dist > 0 else 0.0
+
+    @staticmethod
+    def _fmt_qty(qty: float) -> str:
+        if qty >= 100:  return f"{qty:.1f}"
+        if qty >= 10:   return f"{qty:.2f}"
+        if qty >= 1:    return f"{qty:.3f}"
+        return f"{qty:.4f}"
+
+    @staticmethod
+    def _base_currency(symbol: str) -> str:
+        """Extract base from 'BTC/USDT:USDT' → 'BTC', 'EUR/USD' → 'EUR'."""
+        return symbol.split("/")[0]
+
+    @staticmethod
     def _pct(entry: float, level: float, direction: str) -> float:
         if direction == "long":
             return (level - entry) / entry * 100
@@ -139,6 +157,8 @@ class Notifier:
         rr      = round(abs(tp3_pct) / sl_abs, 1) if sl_abs else 0
         stars   = self._stars(quality)
         dir_tag = self._dir_tag(d)
+        qty     = self._qty_for_risk(price, sl)
+        base    = self._base_currency(symbol)
         extra_line = f"\n{extra}" if extra else ""
         return (
             f"{dir_tag}  •  <b>{symbol}</b>  #{no:03d}\n"
@@ -152,7 +172,7 @@ class Notifier:
             f"🎯 TP2   <code>{f(tp2)}</code>   +{tp2_pct:.2f}%\n"
             f"🏆 TP3   <code>{f(tp3)}</code>   +{tp3_pct:.2f}%\n"
             f"{DLINE}\n"
-            f"R:R  1 : {rr}{extra_line}\n"
+            f"R:R  1 : {rr}   📦 Qty  <code>{self._fmt_qty(qty)} {base}</code>  <i>(= $5 risk)</i>{extra_line}\n"
             f"<i>{reason}</i>\n"
             f"{self._footer()}"
         )
