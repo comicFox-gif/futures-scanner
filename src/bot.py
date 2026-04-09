@@ -49,6 +49,12 @@ class Bot:
                 cfg = {**cfg, "signal": cfg["scalp_signal"]}
             if "scalp_filters" in cfg:
                 cfg = {**cfg, "filters": cfg["scalp_filters"]}
+            if "scalp_structure_break" in cfg:
+                cfg = {**cfg, "structure_break": cfg["scalp_structure_break"]}
+            if "scalp_macd_zero_cross" in cfg:
+                cfg = {**cfg, "macd_zero_cross": cfg["scalp_macd_zero_cross"]}
+            if "scalp_ema_ribbon_pullback" in cfg:
+                cfg = {**cfg, "ema_ribbon_pullback": cfg["scalp_ema_ribbon_pullback"]}
         self.cfg = cfg
         self.tf_trend: str = cfg["timeframe_trend"]
         self.tf_entry: str = cfg["timeframe_entry"]
