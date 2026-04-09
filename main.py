@@ -121,6 +121,17 @@ def main():
         cfg["timeframe_entry"] = os.getenv("ENTRY_TF")
     logger.info(f"Timeframes: trend={cfg['timeframe_trend']} entry={cfg['timeframe_entry']}")
 
+    # PAPER_MODE — enables paper trading without touching config.json
+    # PAPER_MODE=true  → paper trading on (simulated fills, no real orders)
+    # PAPER_MODE=false → paper trading off (live signals only)
+    paper_mode = os.getenv("PAPER_MODE", "false").lower() == "true"
+    if paper_mode:
+        cfg["paper_trading"]["enabled"] = True
+        logger.info("Paper trading: ON (PAPER_MODE=true)")
+    else:
+        cfg["paper_trading"]["enabled"] = False
+        logger.info("Paper trading: OFF")
+
     # FOREX_SCALP_MODE — independent switch for forex paper trading mode label
     # Does not change scanning timeframes (same bot), only the forex startup message
     forex_scalp = os.getenv("FOREX_SCALP_MODE", "false").lower() == "true"
