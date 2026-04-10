@@ -302,6 +302,60 @@ class Bot:
         if self._session_count >= 50:
             self._session_paused = True  # no new entries — wait for all to close
 
+    def _paper_close(self, symbol: str, exit_price: float, reason: str, tp_level: int = 0):
+        """Close a paper position and send the closed alert. Used by tick and distribution exit."""
+        pos = self._paper_positions.get(symbol)
+        if not pos:
+            return
+
+        pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
+        pos.closed_pnl += pnl
+        self.paper_balance += pos.margin_locked + pnl
+
+        if reason == "SL hit" and pos.be_activated:
+            result = "be_sl";  self._trade_stats["be_sl"] += 1
+        elif reason == "SL hit":
+            result = "sl";     self._trade_stats["sl"]    += 1
+        elif tp_level >= 2:
+            result = "tp2";    self._trade_stats.setdefault("tp2", 0); self._trade_stats["tp2"] += 1
+        else:
+            result = "other"
+        self._trade_stats["total"] += 1
+        if pos.closed_pnl > 0:
+            self._trade_stats["wins"] += 1
+
+        sn = pos.strategy_name or "Unknown"
+        if sn not in self._strategy_stats:
+            self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+        ss = self._strategy_stats[sn]
+        ss["total"] += 1
+        if result == "tp2":    ss["tp2"]   += 1
+        elif result == "be_sl": ss["be_sl"] += 1
+        elif result == "sl":    ss["sl"]    += 1
+        if pos.closed_pnl > 0: ss["wins"]  += 1
+
+        self._session_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
+        del self._paper_positions[symbol]
+        open_count = len(self._paper_positions)
+
+        if self._session_count >= 50 and open_count == 0:
+            self._send_session_summary()
+            self._resume_at = datetime.utcnow() + timedelta(hours=5)
+            logger.info("[PAPER] Session complete — 5h pause started")
+
+        logger.info(
+            f"[PAPER] CLOSED {symbol} | {reason} "
+            f"@ {exit_price:.4f} | PnL={pos.closed_pnl:+.2f} | "
+            f"Balance=${self.paper_balance:.2f} | Open: {open_count}"
+        )
+        self.notifier.paper_closed(pos, reason, exit_price, pos.closed_pnl,
+                                   self.paper_balance, tp_level, self._trade_stats)
+        self._paper_trades.append({
+            "symbol": symbol, "direction": pos.direction,
+            "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
+        })
+        save_state(self)
+
     def _check_distribution(self, symbol: str, entry_df: pd.DataFrame, current_price: float):
         """
         After the whale entry, watch for exit signs.
@@ -338,15 +392,16 @@ class Bot:
                 f"PnL={pnl_pct:+.1f}% | {signal['reason_str']}"
             )
             self.notifier.send(
-                f"⚠️ <b>Whale Exit Signal — {symbol}</b>\n"
+                f"⚠️ <b>Whale Exit — {symbol}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{direction_icon} Institutions appear to be <b>{exit_label}</b>\n"
-                f"💰 Current PnL: <b>{pnl_pct:+.1f}%</b>\n"
+                f"💰 Closing at: <b>{pnl_pct:+.1f}%</b>\n"
                 f"──────────────────────────────\n"
-                f"<i>{signal['reason_str']}</i>\n"
-                f"──────────────────────────────\n"
-                f"Consider taking profits or tightening SL"
+                f"<i>{signal['reason_str']}</i>"
             )
+            # Auto-close the paper position at current price
+            if self.paper_enabled and symbol in self._paper_positions:
+                self._paper_close(symbol, current_price, "Whale exit")
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""
@@ -362,65 +417,9 @@ class Bot:
             act = action["action"]
 
             if act == "close_all":
-                # Use live Bybit price as exit — simulates real fill price.
-                # current_price is already the live ticker fetched each scan.
                 reason   = action.get("reason", "")
                 tp_level = action.get("tp_level", 0)
-                exit_price = current_price
-                pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
-                pos.closed_pnl += pnl
-                self.paper_balance += pos.margin_locked + pnl
-
-                # Classify result
-                if tp_level == 3:
-                    self._trade_stats["tp3"] += 1
-                    result = "tp3"
-                elif reason == "SL hit" and pos.be_activated:
-                    self._trade_stats["be_sl"] += 1
-                    result = "be_sl"
-                elif reason == "SL hit":
-                    self._trade_stats["sl"] += 1
-                    result = "sl"
-                else:
-                    result = "other"
-                self._trade_stats["total"] += 1
-                if pos.closed_pnl > 0:
-                    self._trade_stats["wins"] += 1
-
-                # Per-strategy stats
-                sn = pos.strategy_name or "Unknown"
-                if sn not in self._strategy_stats:
-                    self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
-                ss = self._strategy_stats[sn]
-                ss["total"] += 1
-                if result == "tp3":       ss["tp3"]   += 1
-                elif result == "be_sl":   ss["be_sl"] += 1
-                elif result == "sl":      ss["sl"]    += 1
-                if pos.closed_pnl > 0:    ss["wins"]  += 1
-
-                self._session_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
-
-                del self._paper_positions[symbol]
-                open_count = len(self._paper_positions)
-
-                # All 50 trades opened AND all positions now closed → send summary + 5h pause
-                if self._session_count >= 50 and open_count == 0:
-                    self._send_session_summary()
-                    self._resume_at = datetime.utcnow() + timedelta(hours=5)
-                    logger.info("[PAPER] Session complete — 5h pause started")
-
-                logger.info(
-                    f"[PAPER] CLOSED {symbol} | {reason} "
-                    f"@ {exit_price:.4f} | PnL={pos.closed_pnl:+.2f} | "
-                    f"Balance=${self.paper_balance:.2f} | Open: {open_count}"
-                )
-                self.notifier.paper_closed(pos, reason, exit_price, pos.closed_pnl,
-                                           self.paper_balance, tp_level, self._trade_stats)
-                save_state(self)
-                self._paper_trades.append({
-                    "symbol": symbol, "direction": pos.direction,
-                    "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
-                })
+                self._paper_close(symbol, current_price, reason, tp_level)
                 return
 
             elif act == "notify_tp1":
