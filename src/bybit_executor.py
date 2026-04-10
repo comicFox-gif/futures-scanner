@@ -230,9 +230,8 @@ class BybitExecutor:
             return {}
 
         balance   = self._get_balance()
-        # risk_usdt = SL exposure in USDT (qty × sl_dist = risk_usdt at SL).
-        # Hard-capped at max_risk_usdt ($5 by default for live testing).
-        risk_usdt = min(balance * self.risk_pct, self.max_risk_usdt)
+        # Always risk exactly max_risk_usdt ($5) per trade regardless of balance size.
+        risk_usdt = self.max_risk_usdt
 
         # Reference price for sizing: use the highest of entry/sl to guard against
         # stale or wrong entry prices in signals (e.g. entry=0.08 when market=0.80).
