@@ -110,8 +110,8 @@
     "body_min": 0.55,
     "delta_mult": 1.8,
     "lookback": 3,
-    "rsi_max": 68,
-    "rsi_min": 32
+    "rsi_max": 62,
+    "rsi_min": 38
   },
 
   "structure_break": {
@@ -171,8 +171,8 @@
     "body_min": 0.50,
     "delta_mult": 1.5,
     "lookback": 3,
-    "rsi_max": 68,
-    "rsi_min": 32
+    "rsi_max": 62,
+    "rsi_min": 38
   },
 
   "scalp_structure_break": {
