@@ -92,7 +92,7 @@ class Bot:
         self.bybit       = BybitExecutor(
             api_key       = env.get("BYBIT_KEY", ""),
             api_secret    = env.get("BYBIT_SECRET", ""),
-            demo          = env.get("BYBIT_DEMO", "true").lower() != "false",
+            demo          = env.get("BYBIT_DEMO", "false").lower() == "true",
             testnet       = env.get("BYBIT_TESTNET", "false").lower() == "true",
             leverage      = int(env.get("BYBIT_LEVERAGE", "10")),
             risk_pct      = self.risk_pct,
