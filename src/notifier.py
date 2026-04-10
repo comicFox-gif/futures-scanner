@@ -152,9 +152,8 @@ class Notifier:
         sl_pct  = self._pct(price, sl,  d)
         tp1_pct = self._pct(price, tp1, d)
         tp2_pct = self._pct(price, tp2, d)
-        tp3_pct = self._pct(price, tp3, d)
         sl_abs  = abs(sl_pct)
-        rr      = round(abs(tp3_pct) / sl_abs, 1) if sl_abs else 0
+        rr      = round(abs(tp2_pct) / sl_abs, 1) if sl_abs else 0
         stars   = self._stars(quality)
         dir_tag = self._dir_tag(d)
         qty     = self._qty_for_risk(price, sl)
@@ -168,9 +167,8 @@ class Notifier:
             f"📌 Entry  <code>{f(price)}</code>\n"
             f"🛑 SL     <code>{f(sl)}</code>   -{sl_abs:.2f}%\n"
             f"{DLINE}\n"
-            f"🎯 TP1   <code>{f(tp1)}</code>   +{tp1_pct:.2f}%\n"
-            f"🎯 TP2   <code>{f(tp2)}</code>   +{tp2_pct:.2f}%\n"
-            f"🏆 TP3   <code>{f(tp3)}</code>   +{tp3_pct:.2f}%\n"
+            f"🎯 TP1   <code>{f(tp1)}</code>   +{tp1_pct:.2f}%   <i>(→ move SL to BE)</i>\n"
+            f"🏆 TP2   <code>{f(tp2)}</code>   +{tp2_pct:.2f}%   <i>(close all)</i>\n"
             f"{DLINE}\n"
             f"R:R  1 : {rr}   📦 Qty  <code>{self._fmt_qty(qty)} {base}</code>  <i>(= $5 risk)</i>{extra_line}\n"
             f"<i>{reason}</i>\n"
