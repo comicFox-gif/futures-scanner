@@ -25,6 +25,7 @@ from src.strategies.structure_break import StructureBreakStrategy
 from src.strategies.macd_zero_cross import MACDZeroCrossStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
 from src.strategies.whale_momentum import WhaleMomentumStrategy
+from src.strategies.vwap_pullback import VWAPPullbackStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 from src.bybit_executor import BybitExecutor
@@ -81,7 +82,8 @@ class Bot:
         self.vp_strategy  = StructureBreakStrategy(cfg)
         self.mz_strategy  = MACDZeroCrossStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
-        self.wm_strategy = WhaleMomentumStrategy(cfg)
+        self.wm_strategy   = WhaleMomentumStrategy(cfg)
+        self.vwap_strategy = VWAPPullbackStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
             forex_symbols=set(cfg.get("forex_symbols", [])),
@@ -923,6 +925,33 @@ class Bot:
                         self._daily_alerts.append({"stage": wm_sig["stage"], "direction": wm_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
+                # ── Strategy 8: VWAP Pullback ─────────────────────────────
+                if not in_paper:
+                    vwap_sig = self.vwap_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if vwap_sig and vwap_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"]):
+                        q = vwap_sig.get("quality", 3)
+                        logger.info(
+                            f"[VWAP CONFIRMED] {vwap_sig['direction'].upper()} {symbol} "
+                            f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
+                        )
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias):
+                            self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q)
+                            self._bybit_order(vwap_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=vwap_sig["direction"], symbol=symbol,
+                                            entry_price=vwap_sig["entry"], stop_loss=vwap_sig["sl"],
+                                            tp1=vwap_sig["tp1"], tp2=vwap_sig["tp2"], tp3=vwap_sig["tp3"],
+                                            atr=vwap_sig["atr"], rsi=vwap_sig["rsi"],
+                                            volume_ratio=vwap_sig.get("vol_ratio", 0),
+                                            reason=vwap_sig.get("reason", ""))
+                                self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
+                        else:
+                            logger.info(f"[VWAP] Skipped {symbol} — quality {q} < 5")
+                        self._mark_sent(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"])
+                        self._daily_alerts.append({"stage": vwap_sig["stage"], "direction": vwap_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
                 self.notifier.error_alert(f"Scanning {symbol}", str(e)[:200])
@@ -988,7 +1017,7 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "🐋 Whale Momentum"],
+            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "VWAP Pullback", "🐋 Whale Momentum"],
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
         )
