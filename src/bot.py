@@ -633,12 +633,15 @@ class Bot:
             return f"🪤 Bull Trap Fade ({base_name})"
         return base_name
 
-    def _bias_blocks(self, direction: str, bias: str) -> bool:
+    def _bias_blocks(self, direction: str, bias: str, is_bull_trap: bool = False) -> bool:
         """
         Returns True if the market bias is strongly against this trade direction.
         Bearish market → block longs. Bullish market → block shorts.
         Neutral → allow both.
+        Bull trap shorts are never blocked — fading a pump in a bullish market is the point.
         """
+        if is_bull_trap:
+            return False
         if bias == "bearish" and direction == "long":
             return True
         if bias == "bullish" and direction == "short":
@@ -798,7 +801,8 @@ class Bot:
                             f"[BB CONFIRMED] {bb_sig['direction'].upper()} {symbol} "
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias):
+                        bb_trap = "Bull Trap" in bb_sig.get("reason", "")
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap):
                             self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q)
                             self._bybit_order(bb_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -811,7 +815,8 @@ class Bot:
                                             reason=bb_sig.get("reason", ""))
                                 self._paper_open(dummy, "BB Breakout", live_price=current_price)
                         else:
-                            logger.info(f"[BB] Skipped {symbol} — quality {q} < 5")
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(bb_sig["direction"], market_bias) else f"quality {q} < 5")
+                            logger.info(f"[BB] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"])
                         self._daily_alerts.append({"stage": bb_sig["stage"], "direction": bb_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -825,7 +830,8 @@ class Bot:
                             f"[BOS CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias):
+                        vp_trap = "Bull Trap" in vp_sig.get("reason", "")
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap):
                             self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -838,7 +844,8 @@ class Bot:
                                             reason=vp_sig.get("reason", ""))
                                 self._paper_open(dummy, "Break of Structure", live_price=current_price)
                         else:
-                            logger.info(f"[BOS] Skipped {symbol} — quality {q} < 5")
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(vp_sig["direction"], market_bias) else f"quality {q} < 5")
+                            logger.info(f"[BOS] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
                         self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -865,7 +872,8 @@ class Bot:
                                             reason=rd_sig.get("reason", ""))
                                 self._paper_open(dummy, "RSI Divergence", live_price=current_price)
                         else:
-                            logger.info(f"[DIV] Skipped {symbol} — quality {q} < 5")
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(rd_sig["direction"], market_bias) else f"quality {q} < 5")
+                            logger.info(f"[DIV] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -892,7 +900,8 @@ class Bot:
                                             reason=mz_sig.get("reason", ""))
                                 self._paper_open(dummy, "MACD Zero Cross", live_price=current_price)
                         else:
-                            logger.info(f"[MACD0] Skipped {symbol} — quality {q} < 5")
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(mz_sig["direction"], market_bias) else f"quality {q} < 5")
+                            logger.info(f"[MACD0] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"])
                         self._daily_alerts.append({"stage": mz_sig["stage"], "direction": mz_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -919,7 +928,8 @@ class Bot:
                                             reason=wm_sig.get("reason", ""))
                                 self._paper_open(dummy, "Whale Momentum", live_price=current_price)
                         else:
-                            logger.info(f"[WHALE] Skipped {symbol} — quality {q} < 5 or bias blocked")
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(wm_sig["direction"], market_bias) else f"quality {q} < 5")
+                            logger.info(f"[WHALE] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"])
                         self._daily_alerts.append({"stage": wm_sig["stage"], "direction": wm_sig["direction"], "symbol": symbol})
                         signals_found += 1
@@ -933,7 +943,8 @@ class Bot:
                             f"[VWAP CONFIRMED] {vwap_sig['direction'].upper()} {symbol} "
                             f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias):
+                        vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap):
                             self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q)
                             self._bybit_order(vwap_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -946,7 +957,8 @@ class Bot:
                                             reason=vwap_sig.get("reason", ""))
                                 self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
                         else:
-                            logger.info(f"[VWAP] Skipped {symbol} — quality {q} < 5")
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) else f"quality {q} < 5")
+                            logger.info(f"[VWAP] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"])
                         self._daily_alerts.append({"stage": vwap_sig["stage"], "direction": vwap_sig["direction"], "symbol": symbol})
                         signals_found += 1
