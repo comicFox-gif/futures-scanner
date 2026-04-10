@@ -166,7 +166,7 @@ class BybitExecutor:
     def _set_position_mode(self):
         """Switch account to one-way mode (positionIdx=0). Run once on init."""
         try:
-            self.session.switch_position_mode(category="linear", mode=0)
+            self.session.switch_position_mode(category="linear", coin="USDT", mode=0)
             logger.info("[BYBIT] Position mode set to one-way")
         except Exception as e:
             # Error 110025 = already in one-way mode — fine
