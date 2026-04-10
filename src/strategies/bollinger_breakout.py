@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import pandas as pd
 
-from src.indicators import compute_all_indicators, detect_liquidity_sweep, bounce_candle_clean
+from src.indicators import compute_all_indicators, detect_liquidity_sweep, bounce_candle_clean, detect_bull_trap, bull_trap_short_confirmed
 
 logger = logging.getLogger("futures_bot.bollinger_breakout")
 
@@ -130,6 +130,20 @@ class BollingerBreakoutStrategy:
             # A buy-side sweep right before a long breakout = fake pump — whales about to dump
             if sweep == "buy_side":
                 logger.debug(f"[BB] {symbol} LONG blocked — buy-side liquidity sweep detected")
+                return None
+            if detect_bull_trap(entry_df, f"ema_{self.ema_slow}"):
+                if bull_trap_short_confirmed(entry_df):
+                    logger.debug(f"[BB] {symbol} bull trap → fading with SHORT")
+                    return {
+                        "stage": 2, "direction": "short", "symbol": symbol,
+                        "entry": price, "sl": price + sl_dist,
+                        "tp1": price - sl_dist * self.tp1_rr,
+                        "tp2": price - sl_dist * self.tp2_rr,
+                        "tp3": price - sl_dist * self.tp3_rr,
+                        "rsi": rsi, "vol_ratio": vol_ratio, "quality": 5, "atr": atr,
+                        "reason": f"Bull Trap ↓ Fade | BB pump overextended | RSI={rsi:.0f}",
+                    }
+                logger.debug(f"[BB] {symbol} LONG blocked — bull trap (no wick confirmation)")
                 return None
             if not bounce_candle_clean(row, "long"):
                 logger.debug(f"[BB] {symbol} LONG blocked — upper wick rejection on breakout candle")

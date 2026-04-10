@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import pandas as pd
 
-from src.indicators import compute_all_indicators
+from src.indicators import compute_all_indicators, detect_liquidity_sweep, detect_bull_trap, bull_trap_short_confirmed
 
 logger = logging.getLogger("futures_bot.vwap_pullback")
 
@@ -110,6 +110,7 @@ class VWAPPullbackStrategy:
 
         sl_dist    = atr * self.atr_sl_mult
         touch_zone = atr * self.touch_atr_mult
+        sweep      = detect_liquidity_sweep(entry_df)
 
         # LONG: previous candle touched/dipped below VWAP, current closes back above
         prev_close = float(prev["close"])
@@ -117,6 +118,23 @@ class VWAPPullbackStrategy:
         reclaim_long     = price > vwap and prev_close <= vwap
 
         if bull_trend and near_vwap_long and reclaim_long:
+            if sweep == "buy_side":
+                logger.debug(f"[VWAP] {symbol} LONG blocked — buy-side liquidity sweep")
+                return None
+            if detect_bull_trap(entry_df, f"ema_{self.ema_slow}"):
+                if bull_trap_short_confirmed(entry_df):
+                    logger.debug(f"[VWAP] {symbol} bull trap → fading with SHORT")
+                    return {
+                        "stage": 2, "direction": "short", "symbol": symbol,
+                        "entry": price, "sl": price + sl_dist,
+                        "tp1": price - sl_dist * self.tp1_rr,
+                        "tp2": price - sl_dist * self.tp2_rr,
+                        "tp3": price - sl_dist * self.tp3_rr,
+                        "rsi": rsi, "vol_ratio": vol_ratio, "quality": 5, "atr": atr,
+                        "reason": f"Bull Trap ↓ Fade | VWAP pump overextended | RSI={rsi:.0f}",
+                    }
+                logger.debug(f"[VWAP] {symbol} LONG blocked — bull trap (no wick confirmation)")
+                return None
             quality = self._quality(True, near_vwap_long, reclaim_long, vol_ratio, adx, rsi, "long")
             if quality < 5:
                 return None

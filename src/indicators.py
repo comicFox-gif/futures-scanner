@@ -541,6 +541,87 @@ def detect_liquidity_sweep(
     return None
 
 
+def detect_bull_trap(
+    df: pd.DataFrame,
+    ema_col: str,
+    pump_pct: float = 12.0,
+    ema_dist_pct: float = 15.0,
+    rsi_hot: float = 72.0,
+    vol_decay: float = 0.6,
+    min_votes: int = 2,
+) -> bool:
+    """
+    Detect a bull trap before entering a long.
+
+    Whales pump price hard → late buyers pile in → dump → SL hit.
+    Fires when 2+ of these conditions are true:
+
+      Vote 1 — Explosive pump: price rose 12%+ from the 5-candle low.
+                Real breakouts rarely go 12% without pausing.
+      Vote 2 — Too extended: price > 15% above EMA50.
+                Extreme extension = rubber-band snap risk.
+      Vote 3 — RSI overheated: RSI > 72 on the entry candle.
+                Overbought at entry = no margin left for buyers.
+      Vote 4 — Volume dying: current candle volume < 60% of previous.
+                Pump on shrinking volume = no follow-through.
+
+    Returns True  → likely bull trap, block the long.
+    Returns False → setup looks clean, proceed normally.
+    """
+    if len(df) < 7:
+        return False
+
+    row = df.iloc[-2]
+    votes = 0
+
+    # Vote 1: explosive pump in last 5 candles
+    recent_low = float(df.iloc[-7:-2]["low"].min())
+    current_close = float(row["close"])
+    if recent_low > 0 and (current_close - recent_low) / recent_low * 100 > pump_pct:
+        votes += 1
+
+    # Vote 2: price too far above EMA50
+    ema50 = float(row.get(ema_col, float("nan")))
+    if not pd.isna(ema50) and ema50 > 0:
+        dist = (current_close - ema50) / ema50 * 100
+        if dist > ema_dist_pct:
+            votes += 1
+
+    # Vote 3: RSI overheated
+    rsi = float(row.get("rsi", float("nan")))
+    if not pd.isna(rsi) and rsi > rsi_hot:
+        votes += 1
+
+    # Vote 4: volume dying after the pump
+    if len(df) >= 3:
+        curr_vol = float(df.iloc[-2]["volume"])
+        prev_vol = float(df.iloc[-3]["volume"])
+        if prev_vol > 0 and curr_vol < prev_vol * vol_decay:
+            votes += 1
+
+    return votes >= min_votes
+
+
+def bull_trap_short_confirmed(df: pd.DataFrame, min_wick_ratio: float = 0.20) -> bool:
+    """
+    Extra confirmation before fading a bull trap with a short.
+    Requires the trap candle to show upper wick rejection — price pumped
+    but got sold into, leaving a visible wick at the top.
+    Without this, we might short a genuine breakout.
+
+    True  → upper wick >= min_wick_ratio of range → rejection confirmed, safe to short
+    False → no clear rejection wick → skip the fade
+    """
+    if len(df) < 3:
+        return False
+    row = df.iloc[-2]
+    rng = row["high"] - row["low"]
+    if rng == 0:
+        return False
+    upper_wick = row["high"] - max(row["open"], row["close"])
+    return (upper_wick / rng) >= min_wick_ratio
+
+
 def bounce_candle_clean(row: pd.Series, direction: str, max_wick_ratio: float = 0.38) -> bool:
     """
     Check that the bounce candle isn't a wick-heavy fake pump/dump.
@@ -759,3 +840,261 @@ def rsi_bearish_divergence(
         return True, curr_rsi, prior_rsi, reason
 
     return False, 0.0, 0.0, ""
+
+
+# ===========================================================================
+# Institutional Order Flow Detection
+# ===========================================================================
+
+def approx_volume_delta(row: pd.Series) -> float:
+    """
+    Approximate buy vs sell volume from a single OHLCV candle.
+    Without Level 2 order book data, we estimate using price position within the candle.
+
+    Positive delta → buyers dominated that candle
+    Negative delta → sellers dominated that candle
+    """
+    rng = row["high"] - row["low"]
+    if rng == 0:
+        return 0.0
+    buy_vol  = ((row["close"] - row["low"])  / rng) * row["volume"]
+    sell_vol = ((row["high"]  - row["close"]) / rng) * row["volume"]
+    return buy_vol - sell_vol
+
+
+def detect_whale_entry(
+    df: pd.DataFrame,
+    vol_mult: float = 2.5,
+    body_min: float = 0.55,
+    delta_mult: float = 1.8,
+    lookback: int = 3,
+) -> dict | None:
+    """
+    Detect the FIRST aggressive institutional buy candle — the moment whales enter.
+
+    Whales leave a clear footprint:
+      1. Volume spike: 2.5x+ above the 20-period SMA (big money moving in)
+      2. Decisive body: candle body >= 55% of range (no indecision)
+      3. Bullish candle: close > open
+      4. Positive volume delta: buy pressure >= 1.8x sell pressure
+      5. Fresh: this is the FIRST spike (2+ earlier spikes = already too late)
+
+    We enter on the NEXT candle after the whale candle closes.
+
+    Returns dict with vol_ratio, body_ratio, delta, candle_idx, reason — or None.
+    """
+    min_len = lookback + 5
+    if len(df) < min_len:
+        return None
+
+    vol_sma = float(df.iloc[-2].get("volume_sma", float("nan")))
+    if pd.isna(vol_sma) or vol_sma == 0:
+        return None
+
+    for i in range(2, lookback + 2):
+        if abs(i) > len(df) - 1:
+            break
+        row = df.iloc[-i]
+
+        vol_ratio = row["volume"] / vol_sma
+        rng       = row["high"] - row["low"]
+        body      = abs(row["close"] - row["open"]) / rng if rng > 0 else 0
+        bullish   = row["close"] > row["open"]
+        delta     = approx_volume_delta(row)
+        sell_vol  = ((row["high"] - row["close"]) / rng * row["volume"]) if rng > 0 else 1
+        delta_ratio = delta / sell_vol if sell_vol > 0 else 0
+
+        if vol_ratio >= vol_mult and body >= body_min and bullish and delta_ratio >= delta_mult:
+            # Confirm it's the FIRST spike — not the 3rd or 4th candle of an existing pump
+            earlier_spikes = 0
+            for j in range(i + 1, i + 4):
+                if abs(j) > len(df) - 1:
+                    break
+                prev_row = df.iloc[-j]
+                if prev_row["volume"] / vol_sma >= vol_mult * 0.8 and prev_row["close"] > prev_row["open"]:
+                    earlier_spikes += 1
+            if earlier_spikes >= 2:
+                continue  # already pumping — we'd be entering late
+
+            return {
+                "vol_ratio":  vol_ratio,
+                "body_ratio": body,
+                "delta":      delta,
+                "candle_idx": i,
+                "reason": (
+                    f"Whale Entry {i-1} candle(s) ago | "
+                    f"Vol={vol_ratio:.1f}x | Body={body:.0%} | ΔVol={delta_ratio:.1f}x"
+                ),
+            }
+
+    return None
+
+
+def detect_distribution(
+    df: pd.DataFrame,
+    vol_decay_pct: float = 0.65,
+    lookback: int = 3,
+) -> dict | None:
+    """
+    Detect when institutions are exiting (distribution phase).
+
+    Signs whales are leaving:
+      1. Volume declining vs recent peak (buying exhaustion)
+      2. Negative volume delta on high-volume candle (selling into the crowd)
+      3. Candle closes in lower 40% of its range (hidden selling)
+      4. Three consecutive declining volume candles
+
+    2+ signals = distribution confirmed → time to exit or short.
+    Returns dict with reason_str, or None if momentum still healthy.
+    """
+    if len(df) < lookback + 3:
+        return None
+
+    reasons = []
+    row     = df.iloc[-2]
+    rng     = row["high"] - row["low"]
+    vol_sma = float(row.get("volume_sma", float("nan")))
+
+    # 1. Volume decay vs recent peak
+    recent   = df.iloc[-lookback - 1 : -1]
+    peak_vol = float(recent["volume"].max())
+    last_vol = float(row["volume"])
+    if peak_vol > 0 and last_vol < peak_vol * vol_decay_pct:
+        reasons.append(f"Volume decaying — {last_vol/peak_vol:.0%} of peak")
+
+    # 2. High-volume negative delta
+    delta = approx_volume_delta(row)
+    if delta < 0 and not pd.isna(vol_sma) and vol_sma > 0 and row["volume"] / vol_sma >= 1.5:
+        reasons.append("High-volume sell delta — institutions selling into crowd")
+
+    # 3. Closed in lower half of range
+    if rng > 0 and (row["close"] - row["low"]) / rng < 0.40 and row["close"] > row["open"]:
+        reasons.append("Closed in lower 40% of range — hidden selling pressure")
+
+    # 4. Three consecutive declining volume candles
+    vols = [float(df.iloc[-i]["volume"]) for i in range(2, 5) if len(df) > i]
+    if len(vols) == 3 and vols[0] < vols[1] < vols[2]:
+        reasons.append("3 consecutive candles of declining volume")
+
+    if len(reasons) >= 2:
+        return {"reasons": reasons, "reason_str": " | ".join(reasons)}
+
+    return None
+
+
+def detect_whale_sell(
+    df: pd.DataFrame,
+    vol_mult: float = 2.5,
+    body_min: float = 0.55,
+    delta_mult: float = 1.8,
+    lookback: int = 3,
+) -> dict | None:
+    """
+    Mirror of detect_whale_entry — detects the FIRST aggressive institutional SELL candle.
+
+    Whales selling aggressively leave the same footprint in reverse:
+      1. Volume spike: 2.5x+ above 20-period SMA
+      2. Decisive body: >= 55% of range
+      3. Bearish candle: close < open
+      4. Negative volume delta: sell pressure >= 1.8x buy pressure
+      5. Fresh: first such spike (not the 3rd candle of an existing dump — too late)
+
+    Entry fires on the NEXT candle after the institutional sell candle.
+    """
+    min_len = lookback + 5
+    if len(df) < min_len:
+        return None
+
+    vol_sma = float(df.iloc[-2].get("volume_sma", float("nan")))
+    if pd.isna(vol_sma) or vol_sma == 0:
+        return None
+
+    for i in range(2, lookback + 2):
+        if abs(i) > len(df) - 1:
+            break
+        row = df.iloc[-i]
+
+        vol_ratio = row["volume"] / vol_sma
+        rng       = row["high"] - row["low"]
+        body      = abs(row["close"] - row["open"]) / rng if rng > 0 else 0
+        bearish   = row["close"] < row["open"]
+        delta     = approx_volume_delta(row)   # negative = sell dominated
+        buy_vol   = ((row["close"] - row["low"]) / rng * row["volume"]) if rng > 0 else 1
+        # sell pressure ratio: how much more selling than buying
+        sell_delta_ratio = abs(delta) / buy_vol if buy_vol > 0 else 0
+
+        if vol_ratio >= vol_mult and body >= body_min and bearish and sell_delta_ratio >= delta_mult:
+            # Confirm it's the FIRST sell spike — not already deep in a dump
+            earlier_spikes = 0
+            for j in range(i + 1, i + 4):
+                if abs(j) > len(df) - 1:
+                    break
+                prev_row = df.iloc[-j]
+                if prev_row["volume"] / vol_sma >= vol_mult * 0.8 and prev_row["close"] < prev_row["open"]:
+                    earlier_spikes += 1
+            if earlier_spikes >= 2:
+                continue  # already deep in a dump — we'd be entering late
+
+            return {
+                "vol_ratio":  vol_ratio,
+                "body_ratio": body,
+                "delta":      delta,
+                "candle_idx": i,
+                "reason": (
+                    f"Whale Sell {i-1} candle(s) ago | "
+                    f"Vol={vol_ratio:.1f}x | Body={body:.0%} | ΔVol={sell_delta_ratio:.1f}x"
+                ),
+            }
+
+    return None
+
+
+def detect_short_covering(
+    df: pd.DataFrame,
+    vol_decay_pct: float = 0.65,
+    lookback: int = 3,
+) -> dict | None:
+    """
+    Detect when institutions are covering their shorts (exiting short positions).
+
+    When whales close shorts they buy back — this is the mirror of distribution:
+      1. Volume declining on red candles — selling exhaustion
+      2. Positive volume delta on high-volume candle — buying (covering) into the dump
+      3. Candle closes in upper 60% of range — hidden buying pressure
+      4. Three consecutive declining volume candles
+
+    2+ signals = short covering likely → warn subscribers to take profits on shorts.
+    """
+    if len(df) < lookback + 3:
+        return None
+
+    reasons = []
+    row     = df.iloc[-2]
+    rng     = row["high"] - row["low"]
+    vol_sma = float(row.get("volume_sma", float("nan")))
+
+    # 1. Volume decay vs recent peak
+    recent   = df.iloc[-lookback - 1 : -1]
+    peak_vol = float(recent["volume"].max())
+    last_vol = float(row["volume"])
+    if peak_vol > 0 and last_vol < peak_vol * vol_decay_pct:
+        reasons.append(f"Volume decaying — {last_vol/peak_vol:.0%} of peak")
+
+    # 2. Positive delta on high volume (institutions buying back = covering shorts)
+    delta = approx_volume_delta(row)
+    if delta > 0 and not pd.isna(vol_sma) and vol_sma > 0 and row["volume"] / vol_sma >= 1.5:
+        reasons.append("High-volume buy delta — institutions covering shorts")
+
+    # 3. Closed in upper half of range (hidden buying on a down candle)
+    if rng > 0 and (row["close"] - row["low"]) / rng > 0.60 and row["close"] < row["open"]:
+        reasons.append("Closed in upper 60% of range — hidden buying pressure")
+
+    # 4. Three consecutive declining volume candles
+    vols = [float(df.iloc[-i]["volume"]) for i in range(2, 5) if len(df) > i]
+    if len(vols) == 3 and vols[0] < vols[1] < vols[2]:
+        reasons.append("3 consecutive candles of declining volume")
+
+    if len(reasons) >= 2:
+        return {"reasons": reasons, "reason_str": " | ".join(reasons)}
+
+    return None

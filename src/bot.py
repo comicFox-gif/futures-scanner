@@ -24,6 +24,7 @@ from src.strategies.bollinger_breakout import BollingerBreakoutStrategy
 from src.strategies.structure_break import StructureBreakStrategy
 from src.strategies.macd_zero_cross import MACDZeroCrossStrategy
 from src.strategies.rsi_divergence import RSIDivergenceStrategy
+from src.strategies.whale_momentum import WhaleMomentumStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 from src.bybit_executor import BybitExecutor
@@ -55,6 +56,8 @@ class Bot:
                 cfg = {**cfg, "macd_zero_cross": cfg["scalp_macd_zero_cross"]}
             if "scalp_ema_ribbon_pullback" in cfg:
                 cfg = {**cfg, "ema_ribbon_pullback": cfg["scalp_ema_ribbon_pullback"]}
+            if "scalp_whale_momentum" in cfg:
+                cfg = {**cfg, "whale_momentum": cfg["scalp_whale_momentum"]}
         self.cfg = cfg
         self.tf_trend: str = cfg["timeframe_trend"]
         self.tf_entry: str = cfg["timeframe_entry"]
@@ -78,6 +81,7 @@ class Bot:
         self.vp_strategy  = StructureBreakStrategy(cfg)
         self.mz_strategy  = MACDZeroCrossStrategy(cfg)
         self.rd_strategy = RSIDivergenceStrategy(cfg)
+        self.wm_strategy = WhaleMomentumStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
             forex_symbols=set(cfg.get("forex_symbols", [])),
@@ -295,6 +299,52 @@ class Bot:
         # Stop opening new trades once 50 have been opened
         if self._session_count >= 50:
             self._session_paused = True  # no new entries — wait for all to close
+
+    def _check_distribution(self, symbol: str, entry_df: pd.DataFrame, current_price: float):
+        """
+        After the whale entry, watch for exit signs.
+        Longs: detect_distribution fires when whales are selling into the crowd.
+        Shorts: detect_short_covering fires when whales are buying back (covering shorts).
+        Sends a Telegram warning so subscribers can take profits. Fires once per position.
+        """
+        from src.indicators import detect_distribution, detect_short_covering
+        pos = self._paper_positions.get(symbol)
+        if not pos:
+            return
+        if getattr(pos, "_distribution_warned", False):
+            return
+
+        if pos.direction == "long":
+            if current_price <= pos.entry_price:
+                return
+            signal = detect_distribution(entry_df)
+            pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+            exit_label = "distributing (selling into crowd)"
+            direction_icon = "📉"
+        else:  # short
+            if current_price >= pos.entry_price:
+                return
+            signal = detect_short_covering(entry_df)
+            pnl_pct = (pos.entry_price - current_price) / pos.entry_price * 100
+            exit_label = "covering shorts (buying back)"
+            direction_icon = "📈"
+
+        if signal:
+            pos._distribution_warned = True
+            logger.info(
+                f"[WHALE EXIT] {pos.direction.upper()} exit signal on {symbol} | "
+                f"PnL={pnl_pct:+.1f}% | {signal['reason_str']}"
+            )
+            self.notifier.send(
+                f"⚠️ <b>Whale Exit Signal — {symbol}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{direction_icon} Institutions appear to be <b>{exit_label}</b>\n"
+                f"💰 Current PnL: <b>{pnl_pct:+.1f}%</b>\n"
+                f"──────────────────────────────\n"
+                f"<i>{signal['reason_str']}</i>\n"
+                f"──────────────────────────────\n"
+                f"Consider taking profits or tightening SL"
+            )
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""
@@ -572,6 +622,16 @@ class Bot:
     # Main tick
     # ------------------------------------------------------------------
 
+    def _strategy_label(self, base_name: str, signal) -> str:
+        """
+        If the signal reason contains 'Bull Trap', prefix the label so Telegram
+        subscribers know it's a trap fade, not a normal signal.
+        """
+        reason = signal.get("reason", "") if isinstance(signal, dict) else getattr(signal, "reason", "")
+        if "Bull Trap" in reason:
+            return f"🪤 Bull Trap Fade ({base_name})"
+        return base_name
+
     def _bias_blocks(self, direction: str, bias: str) -> bool:
         """
         Returns True if the market bias is strongly against this trade direction.
@@ -662,6 +722,8 @@ class Bot:
                 # Paper position management (always runs if position is open)
                 if self.paper_enabled and symbol in self._paper_positions:
                     self._paper_tick(symbol, current_price)
+                    # Distribution detection — warn subscribers when whales appear to be exiting
+                    self._check_distribution(symbol, entry_df, current_price)
                 if symbol in self._forex_positions:
                     self._forex_paper_tick(symbol, current_price)
 
@@ -678,7 +740,7 @@ class Bot:
                             f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | Q={quality} | {signal.reason}"
                         )
                         if not self._session_paused and quality >= 5 and not self._bias_blocks(signal.direction, market_bias):
-                            self.notifier.confirmed_signal(signal, "EMA Momentum", quality)
+                            self.notifier.confirmed_signal(signal, self._strategy_label("EMA Momentum", signal), quality)
                             if self.paper_enabled:
                                 self._paper_open(signal, "EMA Momentum", live_price=current_price)
                             self._forex_paper_open(signal, "EMA Momentum", live_price=current_price)
@@ -701,7 +763,10 @@ class Bot:
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5 and not self._bias_blocks(sr_sig["direction"], market_bias):
-                            self.notifier.sr_confirmed_signal(sr_sig)
+                            if "Bull Trap" in sr_sig.get("reason", ""):
+                                self.notifier.confirmed_signal(sr_sig, self._strategy_label("S/R Bounce", sr_sig), q)
+                            else:
+                                self.notifier.sr_confirmed_signal(sr_sig)
                             self._bybit_order(sr_sig, symbol)
                             if symbol not in self._forex_positions:
                                 self._forex_paper_open(sr_sig, "S/R Bounce", live_price=current_price)
@@ -733,7 +798,7 @@ class Bot:
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias):
-                            self.notifier.confirmed_signal(bb_sig, "BB Breakout", q)
+                            self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q)
                             self._bybit_order(bb_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -760,7 +825,7 @@ class Bot:
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias):
-                            self.notifier.confirmed_signal(vp_sig, "Break of Structure", q)
+                            self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -787,7 +852,7 @@ class Bot:
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5 and not self._bias_blocks(rd_sig["direction"], market_bias):
-                            self.notifier.confirmed_signal(rd_sig, "RSI Divergence", q)
+                            self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q)
                             self._bybit_order(rd_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -814,7 +879,7 @@ class Bot:
                             f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
                         )
                         if not self._session_paused and q >= 5 and not self._bias_blocks(mz_sig["direction"], market_bias):
-                            self.notifier.confirmed_signal(mz_sig, "MACD Zero Cross", q)
+                            self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q)
                             self._bybit_order(mz_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 from src.strategy import Signal as Sig
@@ -829,6 +894,33 @@ class Bot:
                             logger.info(f"[MACD0] Skipped {symbol} — quality {q} < 5")
                         self._mark_sent(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"])
                         self._daily_alerts.append({"stage": mz_sig["stage"], "direction": mz_sig["direction"], "symbol": symbol})
+                        signals_found += 1
+
+                # ── Strategy 7: Whale Momentum ────────────────────────────
+                if not in_paper:
+                    wm_sig = self.wm_strategy.generate_signal(symbol, htf_df, entry_df)
+                    if wm_sig and wm_sig["stage"] == 2 and not self._is_on_cooldown(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"]):
+                        q = wm_sig.get("quality", 5)
+                        logger.info(
+                            f"[WHALE CONFIRMED] {wm_sig['direction'].upper()} {symbol} "
+                            f"@ {wm_sig['entry']:.4f} | Q={q} | {wm_sig['reason']}"
+                        )
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(wm_sig["direction"], market_bias):
+                            self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q)
+                            self._bybit_order(wm_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=wm_sig["direction"], symbol=symbol,
+                                            entry_price=wm_sig["entry"], stop_loss=wm_sig["sl"],
+                                            tp1=wm_sig["tp1"], tp2=wm_sig["tp2"], tp3=wm_sig["tp3"],
+                                            atr=wm_sig["atr"], rsi=wm_sig["rsi"],
+                                            volume_ratio=wm_sig.get("vol_ratio", 0),
+                                            reason=wm_sig.get("reason", ""))
+                                self._paper_open(dummy, "Whale Momentum", live_price=current_price)
+                        else:
+                            logger.info(f"[WHALE] Skipped {symbol} — quality {q} < 5 or bias blocked")
+                        self._mark_sent(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"])
+                        self._daily_alerts.append({"stage": wm_sig["stage"], "direction": wm_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
             except Exception as e:
@@ -896,7 +988,7 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross"],
+            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "🐋 Whale Momentum"],
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
         )

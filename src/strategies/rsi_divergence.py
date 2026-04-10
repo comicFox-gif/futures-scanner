@@ -47,6 +47,8 @@ from src.indicators import (
     is_bearish_engulfing,
     candle_body_ratio,
     detect_liquidity_sweep,
+    detect_bull_trap,
+    bull_trap_short_confirmed,
 )
 
 logger = logging.getLogger("futures_bot.rsi_divergence")
@@ -145,6 +147,20 @@ class RSIDivergenceStrategy:
             if macd_turn and rev_pattern:
                 if sweep == "buy_side":
                     logger.debug(f"[RSI DIV] {symbol} LONG blocked — buy-side liquidity sweep")
+                    return None
+                if detect_bull_trap(entry_df, f"ema_{self.ema_slow}"):
+                    if bull_trap_short_confirmed(entry_df):
+                        logger.debug(f"[RSI DIV] {symbol} bull trap → fading with SHORT")
+                        return {
+                            "stage": 2, "direction": "short", "symbol": symbol,
+                            "entry": price, "sl": price + sl_dist,
+                            "tp1": price - sl_dist * self.tp1_rr,
+                            "tp2": price - sl_dist * self.tp2_rr,
+                            "tp3": price - sl_dist * self.tp3_rr,
+                            "rsi": rsi, "vol_ratio": vol_ratio, "quality": 5, "atr": atr,
+                            "reason": f"Bull Trap ↓ Fade | RSI div pump overextended | RSI={rsi:.0f}",
+                        }
+                    logger.debug(f"[RSI DIV] {symbol} LONG blocked — bull trap (no wick confirmation)")
                     return None
                 quality = self._quality(curr_rsi, prior_rsi, body, "long", vol_ratio)
                 return {

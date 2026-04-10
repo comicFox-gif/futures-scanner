@@ -39,6 +39,8 @@ from src.indicators import (
     candle_body_ratio,
     volume_building,
     detect_liquidity_sweep,
+    detect_bull_trap,
+    bull_trap_short_confirmed,
 )
 
 logger = logging.getLogger("futures_bot.sr_bounce")
@@ -222,6 +224,21 @@ class SRBounceStrategy:
                     # Block if whales just swept above a high — dump risk on long
                     if sweep == "buy_side":
                         logger.debug(f"[SR] {symbol} LONG blocked — buy-side liquidity sweep")
+                        return None
+                    if detect_bull_trap(entry_df, f"ema_{self.ema_slow}"):
+                        sl_dist = atr * self.atr_sl_mult
+                        if bull_trap_short_confirmed(entry_df):
+                            logger.debug(f"[SR] {symbol} bull trap → fading with SHORT")
+                            return {
+                                "stage": 2, "direction": "short", "symbol": symbol,
+                                "entry": price, "sl": price + sl_dist,
+                                "tp1": price - sl_dist * self.tp1_rr,
+                                "tp2": price - sl_dist * self.tp2_rr,
+                                "tp3": price - sl_dist * self.tp3_rr,
+                                "rsi": rsi, "vol_ratio": vol_ratio, "quality": 5, "atr": atr,
+                                "reason": f"Bull Trap ↓ Fade | SR pump overextended | RSI={rsi:.0f}",
+                            }
+                        logger.debug(f"[SR] {symbol} LONG blocked — bull trap (no wick confirmation)")
                         return None
                     quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
                     sl_dist  = atr * self.atr_sl_mult

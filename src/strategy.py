@@ -42,6 +42,8 @@ from src.indicators import (
     consecutive_bearish_closes,
     macd_histogram_strong,
     volume_building,
+    detect_bull_trap,
+    bull_trap_short_confirmed,
 )
 
 
@@ -542,18 +544,39 @@ class Strategy:
         rsi   = float(row["rsi"])
 
         # --- LONG ---
+        bull_trap = detect_bull_trap(entry_df, f"ema_{self.ema_slow}")
+        trap_short_ok = bull_trap and bull_trap_short_confirmed(entry_df)
+
         # Path A: fresh EMA cross (trend inception)
         confirmed, c_rsi, c_vol, candles_ago = self._long_confirmed_inception(htf_df, entry_df)
         if confirmed:
-            return self._build_signal(
-                symbol, "long", 2, price, atr, c_rsi, c_vol,
-                f"1H EMA cross {candles_ago}h ago | Pullback+bounce confirmed",
-            )
+            if trap_short_ok:
+                logger.debug(f"[EMA] {symbol} bull trap → fading with SHORT")
+                return self._build_signal(
+                    symbol, "short", 2, price, atr, c_rsi, c_vol,
+                    f"Bull Trap ↓ Fade | EMA pump overextended | RSI={rsi:.0f}",
+                )
+            elif bull_trap:
+                logger.debug(f"[EMA] {symbol} LONG blocked — bull trap (no wick confirmation)")
+            else:
+                return self._build_signal(
+                    symbol, "long", 2, price, atr, c_rsi, c_vol,
+                    f"1H EMA cross {candles_ago}h ago | Pullback+bounce confirmed",
+                )
 
         # Path B: established trend + pullback (continuation, fires on 4/5 conditions)
         cont, c_rsi, c_vol, cont_reason = self._long_continuation(htf_df, entry_df)
         if cont:
-            return self._build_signal(symbol, "long", 2, price, atr, c_rsi, c_vol, cont_reason)
+            if trap_short_ok:
+                logger.debug(f"[EMA] {symbol} bull trap continuation → fading with SHORT")
+                return self._build_signal(
+                    symbol, "short", 2, price, atr, c_rsi, c_vol,
+                    f"Bull Trap ↓ Fade | EMA pump overextended | RSI={rsi:.0f}",
+                )
+            elif bull_trap:
+                logger.debug(f"[EMA] {symbol} LONG continuation blocked — bull trap (no wick confirmation)")
+            else:
+                return self._build_signal(symbol, "long", 2, price, atr, c_rsi, c_vol, cont_reason)
 
         warn, w_rsi, w_vol = self._long_warning(htf_df, entry_df)
         if warn:
