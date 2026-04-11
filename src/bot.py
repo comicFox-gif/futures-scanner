@@ -694,95 +694,6 @@ class Bot:
         except Exception:
             return "neutral"
 
-    def _check_early_whale(self, symbol: str, htf_df: "pd.DataFrame", current_price: float, market_bias: str):
-        """
-        Detect whale momentum on the fast confirmation TF before it shows on the entry TF.
-        Scalp: 5m   |  Swing: 15m
-        Fires an alert + paper/bybit order if institutional footprint detected early.
-        """
-        from src.indicators import detect_whale_entry, detect_whale_sell
-        tf_fast = "5m" if self.mode == "scalp" else "15m"
-        cooldown_key = symbol + "_early_whale"
-
-        if self._is_on_cooldown(symbol, "early_whale", 2):
-            return
-
-        try:
-            fast_raw = self._fetch_ohlcv(symbol, tf_fast)
-            if fast_raw is None or len(fast_raw) < 30:
-                return
-            fast_df = self.strategy.enrich(fast_raw.copy())
-            if len(fast_df) < 20:
-                return
-
-            cfg_wm  = self.cfg.get("whale_momentum", {})
-            vol_mult   = cfg_wm.get("volume_multiplier", 2.5)
-            body_min   = cfg_wm.get("body_min", 0.55)
-            delta_mult = cfg_wm.get("delta_mult", 1.8)
-            rsi_max    = cfg_wm.get("rsi_max", 62)
-            rsi_min    = cfg_wm.get("rsi_min", 38)
-
-            # HTF trend filter
-            htf_row  = htf_df.iloc[-2]
-            ema50    = float(htf_row.get(f"ema_{self.cfg['strategy']['ema_slow']}", float("nan")))
-            ema200   = float(htf_row.get(f"ema_{self.cfg['strategy']['ema_trend']}", float("nan")))
-            htf_bull = not pd.isna(ema50) and float(htf_row["close"]) > ema50
-            htf_bear = not pd.isna(ema50) and float(htf_row["close"]) < ema50
-
-            fast_row = fast_df.iloc[-2]
-            rsi      = float(fast_row.get("rsi", 50))
-            atr      = float(fast_row.get("atr", current_price * 0.005))
-
-            # ── Long: bullish HTF + whale entry on fast TF ───────────────
-            whale_long = detect_whale_entry(fast_df, vol_mult, body_min, delta_mult)
-            if whale_long and htf_bull and rsi <= rsi_max and not self._bias_blocks("long", market_bias):
-                sl  = current_price - atr * self.cfg["signal"].get("atr_sl_multiplier", 1.5)
-                tp1 = current_price + atr * self.cfg["signal"].get("tp1_rr", 1.0) * self.cfg["signal"].get("atr_sl_multiplier", 1.5)
-                tp2 = current_price + atr * self.cfg["signal"].get("tp2_rr", 2.0) * self.cfg["signal"].get("atr_sl_multiplier", 1.5)
-                sig = {"symbol": symbol, "direction": "long", "entry": current_price,
-                       "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp2,
-                       "atr": atr, "rsi": rsi, "vol_ratio": whale_long["vol_ratio"],
-                       "reason": f"⚡ Early Whale Long | {tf_fast} spike | {whale_long['reason']}", "stage": 2}
-                logger.info(f"[EARLY🐋] LONG {symbol} @ {current_price:.4f} | {tf_fast} whale spike | RSI={rsi:.0f}")
-                self.notifier.confirmed_signal(sig, f"⚡ Early 🐋 Whale ({tf_fast})", 5)
-                self._bybit_order(sig, symbol)
-                if self.paper_enabled and symbol not in self._paper_positions:
-                    from src.strategy import Signal as Sig
-                    dummy = Sig(stage=2, direction="long", symbol=symbol,
-                                entry_price=current_price, stop_loss=sl,
-                                tp1=tp1, tp2=tp2, tp3=tp2,
-                                atr=atr, rsi=rsi, volume_ratio=whale_long["vol_ratio"],
-                                reason=sig["reason"])
-                    self._paper_open(dummy, "Early Whale", live_price=current_price)
-                self._mark_sent(symbol, "early_whale", 2)
-                return
-
-            # ── Short: bearish HTF + whale sell on fast TF ───────────────
-            whale_short = detect_whale_sell(fast_df, vol_mult, body_min, delta_mult)
-            if whale_short and htf_bear and rsi >= rsi_min and not self._bias_blocks("short", market_bias):
-                sl  = current_price + atr * self.cfg["signal"].get("atr_sl_multiplier", 1.5)
-                tp1 = current_price - atr * self.cfg["signal"].get("tp1_rr", 1.0) * self.cfg["signal"].get("atr_sl_multiplier", 1.5)
-                tp2 = current_price - atr * self.cfg["signal"].get("tp2_rr", 2.0) * self.cfg["signal"].get("atr_sl_multiplier", 1.5)
-                sig = {"symbol": symbol, "direction": "short", "entry": current_price,
-                       "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp2,
-                       "atr": atr, "rsi": rsi, "vol_ratio": whale_short["vol_ratio"],
-                       "reason": f"⚡ Early Whale Short | {tf_fast} spike | {whale_short['reason']}", "stage": 2}
-                logger.info(f"[EARLY🐋] SHORT {symbol} @ {current_price:.4f} | {tf_fast} whale spike | RSI={rsi:.0f}")
-                self.notifier.confirmed_signal(sig, f"⚡ Early 🐋 Whale ({tf_fast})", 5)
-                self._bybit_order(sig, symbol)
-                if self.paper_enabled and symbol not in self._paper_positions:
-                    from src.strategy import Signal as Sig
-                    dummy = Sig(stage=2, direction="short", symbol=symbol,
-                                entry_price=current_price, stop_loss=sl,
-                                tp1=tp1, tp2=tp2, tp3=tp2,
-                                atr=atr, rsi=rsi, volume_ratio=whale_short["vol_ratio"],
-                                reason=sig["reason"])
-                    self._paper_open(dummy, "Early Whale", live_price=current_price)
-                self._mark_sent(symbol, "early_whale", 2)
-
-        except Exception as e:
-            logger.warning(f"[EARLY🐋] {symbol} error: {e}")
-
     def _mtf_confirm(self, symbol: str, direction: str) -> bool:
         """
         3rd timeframe confirmation before entering a signal.
@@ -1101,10 +1012,6 @@ class Bot:
                         self._mark_sent(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"])
                         self._daily_alerts.append({"stage": vwap_sig["stage"], "direction": vwap_sig["direction"], "symbol": symbol})
                         signals_found += 1
-
-                # ── Early Whale Detection (fast TF) ──────────────────────
-                if not in_paper:
-                    self._check_early_whale(symbol, htf_df, current_price, market_bias)
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
