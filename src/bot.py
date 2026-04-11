@@ -699,11 +699,13 @@ class Bot:
         except Exception:
             return "neutral"
 
-    def _mtf_confirm(self, symbol: str, direction: str) -> bool:
+    def _mtf_confirm(self, symbol: str, direction: str, is_bull_trap: bool = False) -> bool:
         """
         3rd timeframe confirmation before entering a signal.
         Scalp: confirm on 5m  — trend (EMA50) + rejection candle.
         Swing: confirm on 15m — trend (EMA50) + rejection candle.
+        Bull trap shorts bypass the trend check — they fade a pump ABOVE EMA50,
+        so requiring price < EMA50 would always block them. Only the rejection candle is checked.
         Returns True if confirmed, False to skip.
         """
         tf_confirm = "5m" if self.mode == "scalp" else "15m"
@@ -723,13 +725,19 @@ class Bot:
                 return True
 
             if direction == "short":
-                trend_ok      = close < ema50          # price below EMA50 = downtrend
-                rejection_ok  = close < open_          # bearish candle = rejection confirmed
+                rejection_ok = close < open_           # bearish candle = rejection confirmed
+                if is_bull_trap:
+                    # Fading a pump — price is intentionally above EMA50, skip trend check
+                    trend_ok  = True
+                    confirmed = rejection_ok
+                else:
+                    trend_ok  = close < ema50          # price below EMA50 = downtrend
+                    confirmed = trend_ok and rejection_ok
             else:
                 trend_ok      = close > ema50          # price above EMA50 = uptrend
                 rejection_ok  = close > open_          # bullish candle = continuation confirmed
+                confirmed     = trend_ok and rejection_ok
 
-            confirmed = trend_ok and rejection_ok
             if not confirmed:
                 logger.info(f"[MTF] {symbol} {direction.upper()} blocked on {tf_confirm} — trend_ok={trend_ok} rejection_ok={rejection_ok}")
             return confirmed
@@ -798,13 +806,16 @@ class Bot:
                             f"[EMA CONFIRMED] {signal.direction.upper()} {symbol} "
                             f"@ {signal.entry_price:.4f} | Q={quality} | {signal.reason}"
                         )
-                        if not self._session_paused and quality >= 5 and not self._bias_blocks(signal.direction, market_bias, is_bull_trap=is_trap) and self._mtf_confirm(symbol, signal.direction):
+                        if not self._session_paused and quality >= 5 and not self._bias_blocks(signal.direction, market_bias, is_bull_trap=is_trap) and self._mtf_confirm(symbol, signal.direction, is_bull_trap=is_trap):
                             self.notifier.confirmed_signal(signal, self._strategy_label("EMA Momentum", signal), quality)
                             self._bybit_order(signal)
                             if self.paper_enabled and symbol not in self._paper_positions:
                                 self._paper_open(signal, "EMA Momentum", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(signal.direction, market_bias, is_bull_trap=is_trap) else f"quality {quality} < 5")
+                            if self._session_paused:                                reason = "paused"
+                            elif self._bias_blocks(signal.direction, market_bias, is_bull_trap=is_trap): reason = "bias blocked"
+                            elif quality < 5:                                       reason = f"quality {quality} < 5"
+                            else:                                                   reason = "MTF blocked"
                             logger.info(f"[EMA] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, signal.direction + "_ema", signal.stage)
                         self._daily_alerts.append({"stage": signal.stage, "direction": signal.direction, "symbol": symbol})
@@ -856,7 +867,7 @@ class Bot:
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
                         bb_trap = "Bull Trap" in bb_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap) and self._mtf_confirm(symbol, bb_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap) and self._mtf_confirm(symbol, bb_sig["direction"], is_bull_trap=bb_trap):
                             self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q)
                             self._bybit_order(bb_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -869,7 +880,10 @@ class Bot:
                                             reason=bb_sig.get("reason", ""))
                                 self._paper_open(dummy, "BB Breakout", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(bb_sig["direction"], market_bias) else f"quality {q} < 5")
+                            if self._session_paused:                               reason = "paused"
+                            elif self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap): reason = "bias blocked"
+                            elif q < 5:                                            reason = f"quality {q} < 5"
+                            else:                                                  reason = "MTF blocked"
                             logger.info(f"[BB] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"])
                         self._daily_alerts.append({"stage": bb_sig["stage"], "direction": bb_sig["direction"], "symbol": symbol})
@@ -885,7 +899,7 @@ class Bot:
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         vp_trap = "Bull Trap" in vp_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap) and self._mtf_confirm(symbol, vp_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap) and self._mtf_confirm(symbol, vp_sig["direction"], is_bull_trap=vp_trap):
                             self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q)
                             self._bybit_order(vp_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -898,7 +912,10 @@ class Bot:
                                             reason=vp_sig.get("reason", ""))
                                 self._paper_open(dummy, "Break of Structure", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(vp_sig["direction"], market_bias) else f"quality {q} < 5")
+                            if self._session_paused:                               reason = "paused"
+                            elif self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap): reason = "bias blocked"
+                            elif q < 5:                                            reason = f"quality {q} < 5"
+                            else:                                                  reason = "MTF blocked"
                             logger.info(f"[BOS] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
                         self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
@@ -926,7 +943,10 @@ class Bot:
                                             reason=rd_sig.get("reason", ""))
                                 self._paper_open(dummy, "RSI Divergence", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(rd_sig["direction"], market_bias) else f"quality {q} < 5")
+                            if self._session_paused:                              reason = "paused"
+                            elif self._bias_blocks(rd_sig["direction"], market_bias): reason = "bias blocked"
+                            elif q < 5:                                           reason = f"quality {q} < 5"
+                            else:                                                  reason = "MTF blocked"
                             logger.info(f"[DIV] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
                         self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
@@ -954,7 +974,10 @@ class Bot:
                                             reason=mz_sig.get("reason", ""))
                                 self._paper_open(dummy, "MACD Zero Cross", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(mz_sig["direction"], market_bias) else f"quality {q} < 5")
+                            if self._session_paused:                              reason = "paused"
+                            elif self._bias_blocks(mz_sig["direction"], market_bias): reason = "bias blocked"
+                            elif q < 5:                                           reason = f"quality {q} < 5"
+                            else:                                                  reason = "MTF blocked"
                             logger.info(f"[MACD0] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"])
                         self._daily_alerts.append({"stage": mz_sig["stage"], "direction": mz_sig["direction"], "symbol": symbol})
@@ -982,7 +1005,10 @@ class Bot:
                                             reason=wm_sig.get("reason", ""))
                                 self._paper_open(dummy, "Whale Momentum", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(wm_sig["direction"], market_bias) else f"quality {q} < 5")
+                            if self._session_paused:                              reason = "paused"
+                            elif self._bias_blocks(wm_sig["direction"], market_bias): reason = "bias blocked"
+                            elif q < 5:                                           reason = f"quality {q} < 5"
+                            else:                                                  reason = "MTF blocked"
                             logger.info(f"[WHALE] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"])
                         self._daily_alerts.append({"stage": wm_sig["stage"], "direction": wm_sig["direction"], "symbol": symbol})
@@ -998,7 +1024,7 @@ class Bot:
                             f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
                         )
                         vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) and self._mtf_confirm(symbol, vwap_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) and self._mtf_confirm(symbol, vwap_sig["direction"], is_bull_trap=vwap_trap):
                             self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q)
                             self._bybit_order(vwap_sig, symbol)
                             if self.paper_enabled and symbol not in self._paper_positions:
@@ -1011,7 +1037,10 @@ class Bot:
                                             reason=vwap_sig.get("reason", ""))
                                 self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
                         else:
-                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) else f"quality {q} < 5")
+                            if self._session_paused:                                   reason = "paused"
+                            elif self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap): reason = "bias blocked"
+                            elif q < 5:                                                reason = f"quality {q} < 5"
+                            else:                                                      reason = "MTF blocked"
                             logger.info(f"[VWAP] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"])
                         self._daily_alerts.append({"stage": vwap_sig["stage"], "direction": vwap_sig["direction"], "symbol": symbol})
