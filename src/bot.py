@@ -99,7 +99,7 @@ class Bot:
             testnet       = env.get("BYBIT_TESTNET", "false").lower() == "true",
             leverage      = int(env.get("BYBIT_LEVERAGE", "10")),
             risk_pct      = self.risk_pct,
-            max_positions = 50,
+            max_positions = 10,
             max_risk_usdt = float(env.get("BYBIT_MAX_RISK", "10")),
         )
         self.pair_selector = PairSelector(self.exchange, cfg)
@@ -117,7 +117,7 @@ class Bot:
         self._forex_positions:    dict[str, Position] = {}
         self._forex_stats = {"tp3": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
 
-        # Session tracking: 50 trades opened → 5h pause → reset
+        # Session tracking: 10 trades opened → 3h pause → reset
         self._session_count     = 0          # trades opened this session
         self._session_paused    = False
         self._resume_at         = None       # datetime when pause ends
@@ -231,7 +231,7 @@ class Bot:
                 f"🔄 <b>New Session Started</b>\n"
                 f"Balance reset to <code>${self.paper_balance:.0f}</code> — scanning for signals..."
             )
-            logger.info("[PAPER] Session reset — new 50-trade cycle started")
+            logger.info("[PAPER] Session reset — new 10-trade cycle started")
 
     def _paper_open(self, signal, strategy_name: str = "", live_price: float = None):
         """
@@ -302,13 +302,13 @@ class Bot:
             f"[PAPER] OPENED {direction.upper()} {symbol} "
             f"@ {entry:.4f} (live) | Risk=${risk_amount:.2f} | Size={size:.4f} | "
             f"SL={sl:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f} | "
-            f"Session: {self._session_count}/50"
+            f"Session: {self._session_count}/10"
         )
         self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
         save_state(self)
 
         # Stop opening new trades once 50 have been opened
-        if self._session_count >= 50:
+        if self._session_count >= 10:
             self._session_paused = True  # no new entries — wait for all to close
 
     def _paper_close(self, symbol: str, exit_price: float, reason: str, tp_level: int = 0):
@@ -347,9 +347,9 @@ class Bot:
         del self._paper_positions[symbol]
         open_count = len(self._paper_positions)
 
-        if self._session_count >= 50 and open_count == 0:
+        if self._session_count >= 10 and open_count == 0:
             self._send_session_summary()
-            self._resume_at = datetime.utcnow() + timedelta(hours=5)
+            self._resume_at = datetime.utcnow() + timedelta(hours=3)
             logger.info("[PAPER] Session complete — 5h pause started")
 
         logger.info(

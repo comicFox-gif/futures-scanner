@@ -102,8 +102,16 @@ def load_state(bot) -> bool:
     """
     Restore paper trading state from disk into bot.
     Returns True if state was loaded, False if no file / fresh start.
+    Set RESET_STATE=true env var to wipe state and start fresh.
     """
     path = Path(STATE_FILE)
+
+    if os.getenv("RESET_STATE", "false").lower() == "true":
+        if path.exists():
+            path.unlink()
+        logger.info("[STATE] RESET_STATE=true — wiped state, starting fresh")
+        return False
+
     if not path.exists():
         logger.info("[STATE] No state file found — starting fresh")
         return False
