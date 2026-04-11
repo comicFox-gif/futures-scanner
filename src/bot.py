@@ -141,6 +141,10 @@ class Bot:
         self._cmd_offset   = 0
         logger.info(f"[CMD] ADMIN_BOT_TOKEN={'SET' if self._admin_token else 'MISSING'} | TELEGRAM_ADMIN_ID={'SET' if self._admin_id else 'MISSING'}")
 
+        # Mode recommendation tracking — alert once when scalp/swing conditions change
+        self._mode_rec: str | None = None           # last recommendation sent
+        self._last_mode_alert: datetime | None = None
+
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
 
@@ -786,22 +790,21 @@ class Bot:
                 # ── Strategy 1: EMA Momentum ──────────────────────────────
                 if not in_paper:
                     signal = self.strategy.generate_signal(symbol, htf_df, entry_df)
-
                     if signal.stage == 2 and not self._is_on_cooldown(symbol, signal.direction + "_ema", signal.stage):
-                        quality = 5  # EMA requires all 5 conditions
+                        quality = 5
+                        is_trap = "Bull Trap" in getattr(signal, "reason", "")
                         logger.info(
                             f"[EMA CONFIRMED] {signal.direction.upper()} {symbol} "
-                            f"@ {signal.entry_price:.4f} | RSI={signal.rsi:.1f} | Q={quality} | {signal.reason}"
+                            f"@ {signal.entry_price:.4f} | Q={quality} | {signal.reason}"
                         )
-                        if not self._session_paused and quality >= 5 and not self._bias_blocks(signal.direction, market_bias) and self._mtf_confirm(symbol, signal.direction):
+                        if not self._session_paused and quality >= 5 and not self._bias_blocks(signal.direction, market_bias, is_bull_trap=is_trap) and self._mtf_confirm(symbol, signal.direction):
                             self.notifier.confirmed_signal(signal, self._strategy_label("EMA Momentum", signal), quality)
-                            if self.paper_enabled:
-                                self._paper_open(signal, "EMA Momentum", live_price=current_price)
-                            self._forex_paper_open(signal, "EMA Momentum", live_price=current_price)
                             self._bybit_order(signal)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                self._paper_open(signal, "EMA Momentum", live_price=current_price)
                         else:
-                            logger.info(f"[EMA] Skipped {symbol} — quality {quality} < 5 or bias blocked ({market_bias})")
-
+                            reason = "paused" if self._session_paused else ("bias blocked" if self._bias_blocks(signal.direction, market_bias, is_bull_trap=is_trap) else f"quality {quality} < 5")
+                            logger.info(f"[EMA] Skipped {symbol} — {reason}")
                         self._mark_sent(symbol, signal.direction + "_ema", signal.stage)
                         self._daily_alerts.append({"stage": signal.stage, "direction": signal.direction, "symbol": symbol})
                         signals_found += 1
@@ -1054,6 +1057,86 @@ class Bot:
     # Telegram command listener (admin only)
     # ------------------------------------------------------------------
 
+    def _check_mode_recommendation(self):
+        """
+        Each tick: check BTC 1h ADX + active session window.
+        Alert admin when conditions flip between scalp-friendly and swing-friendly.
+        London open: 07-11 UTC | NY open: 13-17 UTC = scalp windows (high liquidity).
+        Outside those windows / ADX < 20 = swing conditions.
+        Sends at most once per 2 hours to avoid spam.
+        """
+        if not self._admin_token or not self._admin_id:
+            return
+        try:
+            import pandas as pd
+            now_utc = datetime.utcnow()
+            hour    = now_utc.hour
+
+            # Session windows (UTC)
+            in_london  = 7 <= hour < 11
+            in_ny      = 13 <= hour < 17
+            in_active  = in_london or in_ny
+
+            # BTC 1h conditions
+            btc_raw = self._fetch_ohlcv("BTC/USDT:USDT", "1h")
+            if btc_raw is None or len(btc_raw) < 40:
+                return
+            btc_df       = self.strategy.enrich(btc_raw.copy())
+            row          = btc_df.iloc[-2]
+            adx          = float(row.get("adx", 20))
+            atr          = float(row.get("atr", 0))
+            atr_sma      = btc_df["atr"].rolling(20).mean().iloc[-2]
+            atr_expanding = (not pd.isna(atr_sma)) and atr > float(atr_sma)
+            trending      = (not pd.isna(adx)) and adx >= 25
+
+            # Determine recommendation
+            if in_active and (trending or atr_expanding):
+                rec = "scalp"
+            elif not in_active or (not trending and not atr_expanding):
+                rec = "swing"
+            else:
+                return  # ambiguous conditions — stay silent
+
+            # Only alert on change, and at most once per 2 hours
+            if rec == self._mode_rec:
+                return
+            if self._last_mode_alert and (now_utc - self._last_mode_alert).total_seconds() < 7200:
+                return
+
+            self._mode_rec        = rec
+            self._last_mode_alert = now_utc
+
+            mode_buttons = {
+                "inline_keyboard": [[
+                    {"text": "⚡ Switch to Scalp", "callback_data": "cmd_scalp"},
+                    {"text": "📈 Switch to Swing", "callback_data": "cmd_swing"},
+                ]]
+            }
+
+            if rec == "scalp":
+                session_label = "London" if in_london else "NY"
+                atr_label     = "↑ expanding" if atr_expanding else "normal"
+                msg = (
+                    f"⚡ <b>Scalp Conditions Active</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Session: <b>{session_label} open</b> | ADX 1h: <b>{adx:.0f}</b> | ATR: {atr_label}\n"
+                    f"Current mode: <b>{self.mode.upper()}</b>\n\n"
+                    f"Liquidity is high — faster setups on <b>15m/30m</b> work well now."
+                )
+            else:
+                session_label = "Asian session" if not in_active else "Low volatility"
+                msg = (
+                    f"📈 <b>Swing Conditions Active</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Conditions: <b>{session_label}</b> | ADX 1h: <b>{adx:.0f}</b>\n"
+                    f"Current mode: <b>{self.mode.upper()}</b>\n\n"
+                    f"Low volatility / ranging — <b>4h/1h</b> swing setups preferred."
+                )
+            self._admin_send(msg, markup=mode_buttons)
+            logger.info(f"[MODE REC] {rec.upper()} recommended (ADX={adx:.0f}, session={in_active}, atr_exp={atr_expanding})")
+        except Exception as e:
+            logger.warning(f"[MODE REC] check error: {e}")
+
     def _admin_send(self, text: str, markup: dict = None):
         """Send a message via the dedicated admin bot."""
         if not self._admin_token or not self._admin_id:
@@ -1071,11 +1154,17 @@ class Bot:
 
     def _control_panel_markup(self) -> dict:
         """Inline keyboard for the admin control panel."""
-        bybit_btn = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
-        bybit_cb  = "cmd_stop" if self.bybit.enabled else "cmd_start"
+        bybit_btn  = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
+        bybit_cb   = "cmd_stop" if self.bybit.enabled else "cmd_start"
+        scalp_btn  = "⚡ Scalp (active)" if self.mode == "scalp" else "⚡ Switch Scalp"
+        swing_btn  = "📈 Swing (active)" if self.mode == "swing" else "📈 Switch Swing"
         return {
             "inline_keyboard": [
                 [{"text": bybit_btn, "callback_data": bybit_cb}],
+                [
+                    {"text": scalp_btn, "callback_data": "cmd_scalp"},
+                    {"text": swing_btn, "callback_data": "cmd_swing"},
+                ],
                 [{"text": "📊 Status", "callback_data": "cmd_status"}],
             ]
         }
@@ -1149,6 +1238,20 @@ class Bot:
                     elif cb_data == "cmd_status":
                         self._answer_callback(cb_id)
                         self._send_control_panel()
+                    elif cb_data == "cmd_scalp":
+                        self.mode     = "scalp"
+                        self.tf_trend = "30m"
+                        self.tf_entry = "15m"
+                        logger.info("[CMD] Switched to SCALP mode (30m trend / 15m entry)")
+                        self._answer_callback(cb_id, "⚡ Scalp mode active")
+                        self._send_control_panel()
+                    elif cb_data == "cmd_swing":
+                        self.mode     = "swing"
+                        self.tf_trend = "4h"
+                        self.tf_entry = "1h"
+                        logger.info("[CMD] Switched to SWING mode (4h trend / 1h entry)")
+                        self._answer_callback(cb_id, "📈 Swing mode active")
+                        self._send_control_panel()
                     continue
 
                 # ── Text command ─────────────────────────────────────────
@@ -1193,7 +1296,7 @@ class Bot:
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
         bybit_note = f" | Bybit: {'ON' if self.bybit.enabled else 'OFF'}"
-        strat_list = ["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "🐋 Whale Momentum"]
+        strat_list = ["S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "🐋 Whale Momentum"]
         if self.mode != "scalp":
             strat_list.append("VWAP Pullback")
         self.notifier.scanner_started(
@@ -1214,6 +1317,7 @@ class Bot:
         while self._running:
             try:
                 self._poll_commands()
+                self._check_mode_recommendation()
                 self._tick()
             except KeyboardInterrupt:
                 logger.info("Stopped by user.")
