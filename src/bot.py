@@ -408,9 +408,12 @@ class Bot:
                 f"──────────────────────────────\n"
                 f"<i>{signal['reason_str']}</i>"
             )
-            # Auto-close the paper position at current price
+            # Auto-close paper position
             if self.paper_enabled and symbol in self._paper_positions:
                 self._paper_close(symbol, current_price, "Whale exit")
+            # Auto-close Bybit live position
+            if self.bybit.enabled:
+                self.bybit.close_position(symbol, pos.direction)
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""

@@ -270,16 +270,6 @@ class BybitExecutor:
             logger.warning(f"[BYBIT] qty rounds to 0 for {symbol} — skipping")
             return {}
 
-        # --- Verify effective risk after all caps/rounding ---
-        effective_risk = qty * sl_dist
-        min_risk = self.max_risk_usdt * 0.5   # must be at least 50% of target ($2.50 at $5 cap)
-        if effective_risk < min_risk:
-            logger.warning(
-                f"[BYBIT] Skipping {symbol} — effective risk ${effective_risk:.2f} < ${min_risk:.2f} min "
-                f"(SL too tight or position capped). Not worth fees."
-            )
-            return {}
-
         sl_price = self._round_price(sl, spec)
         tp_price = self._round_price(tp3, spec)
         notional = qty * ref_price
@@ -338,6 +328,38 @@ class BybitExecutor:
     # ------------------------------------------------------------------
     # Move SL to break-even (called when TP2 hit)
     # ------------------------------------------------------------------
+
+    def close_position(self, symbol: str, direction: str) -> bool:
+        """Market-close an open position immediately (whale exit / manual close)."""
+        if not self.enabled:
+            return False
+        bybit_symbol = self._to_symbol(symbol)
+        try:
+            resp = self.session.get_positions(category="linear", symbol=bybit_symbol)
+            size = 0.0
+            for pos in resp["result"]["list"]:
+                s = float(pos.get("size", 0))
+                if s > 0:
+                    size = s
+                    break
+            if size == 0:
+                logger.info(f"[BYBIT] close_position: no open position for {bybit_symbol}")
+                return False
+            close_side = "Sell" if direction == "long" else "Buy"
+            self.session.place_order(
+                category="linear",
+                symbol=bybit_symbol,
+                side=close_side,
+                orderType="Market",
+                qty=str(size),
+                positionIdx=0,
+                reduceOnly=True,
+            )
+            logger.info(f"[BYBIT] Position CLOSED {bybit_symbol} size={size} (whale exit)")
+            return True
+        except Exception as e:
+            logger.error(f"[BYBIT] close_position({bybit_symbol}): {e}")
+            return False
 
     def move_sl_to_breakeven(self, symbol: str, direction: str, entry_price: float) -> bool:
         """Move SL to entry price (break-even) using set_trading_stop."""
