@@ -135,9 +135,10 @@ class Bot:
         self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
 
-        # Admin command polling (no thread — runs each tick)
-        self._admin_id  = (env.get("TELEGRAM_ADMIN_ID") or os.getenv("TELEGRAM_ADMIN_ID", "")).strip()
-        self._cmd_offset = 0
+        # Admin command polling — uses dedicated ADMIN_BOT_TOKEN (separate from signal bot)
+        self._admin_token  = (env.get("ADMIN_BOT_TOKEN") or os.getenv("ADMIN_BOT_TOKEN", "")).strip()
+        self._admin_id     = (env.get("TELEGRAM_ADMIN_ID") or os.getenv("TELEGRAM_ADMIN_ID", "")).strip()
+        self._cmd_offset   = 0
 
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
@@ -1011,6 +1012,21 @@ class Bot:
     # Telegram command listener (admin only)
     # ------------------------------------------------------------------
 
+    def _admin_send(self, text: str, markup: dict = None):
+        """Send a message via the dedicated admin bot."""
+        if not self._admin_token or not self._admin_id:
+            return
+        try:
+            payload = {"chat_id": self._admin_id, "text": text, "parse_mode": "HTML"}
+            if markup:
+                payload["reply_markup"] = markup
+            requests.post(
+                f"https://api.telegram.org/bot{self._admin_token}/sendMessage",
+                json=payload, timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"[CMD] Admin send failed: {e}")
+
     def _control_panel_markup(self) -> dict:
         """Inline keyboard for the admin control panel."""
         bybit_btn = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
@@ -1022,32 +1038,24 @@ class Bot:
             ]
         }
 
-    def _send_admin(self, chat_id: str, text: str, markup: dict = None):
-        """Send a message directly to admin chat, optionally with inline buttons."""
-        try:
-            payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-            if markup:
-                payload["reply_markup"] = markup
-            requests.post(
-                f"https://api.telegram.org/bot{self.notifier.token}/sendMessage",
-                json=payload,
-                timeout=10,
-            )
-        except Exception as e:
-            logger.warning(f"[CMD] Admin reply failed: {e}")
+    def _send_admin(self, text: str, markup: dict = None):
+        """Send via admin bot (kept for compatibility)."""
+        self._admin_send(text, markup)
 
-    def _answer_callback(self, token: str, callback_id: str, text: str = ""):
+    def _answer_callback(self, callback_id: str, text: str = ""):
         """Acknowledge a button press so Telegram removes the loading spinner."""
+        if not self._admin_token:
+            return
         try:
             requests.post(
-                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                f"https://api.telegram.org/bot{self._admin_token}/answerCallbackQuery",
                 json={"callback_query_id": callback_id, "text": text},
                 timeout=10,
             )
         except Exception as e:
             logger.warning(f"[CMD] answerCallbackQuery failed: {e}")
 
-    def _send_control_panel(self, admin_id: str):
+    def _send_control_panel(self, *_):
         """Send the control panel with current state and action buttons."""
         bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"
         paper_state = "🟢 ON" if self.paper_enabled else "🔴 OFF"
@@ -1061,13 +1069,13 @@ class Bot:
             f"Open positions:  {open_pos}\n"
             f"Mode: {self.mode.upper()}"
         )
-        self._send_admin(admin_id, text, markup=self._control_panel_markup())
+        self._admin_send(text, markup=self._control_panel_markup())
 
     def _poll_commands(self):
         """Check Telegram for admin commands once per tick. No threads — runs in main loop."""
-        if not self._admin_id or not self.notifier.token:
+        if not self._admin_token or not self._admin_id:
             return
-        token = self.notifier.token
+        token = self._admin_token
         try:
             resp = requests.get(
                 f"https://api.telegram.org/bot{token}/getUpdates",
@@ -1089,16 +1097,16 @@ class Bot:
                     if cb_data == "cmd_stop":
                         self.bybit.enabled = False
                         logger.info("[CMD] Bybit execution DISABLED via button")
-                        self._answer_callback(token, cb_id, "⏹ Trading stopped")
-                        self._send_control_panel(self._admin_id)
+                        self._answer_callback(cb_id, "⏹ Trading stopped")
+                        self._send_control_panel()
                     elif cb_data == "cmd_start":
                         self.bybit.enabled = True
                         logger.info("[CMD] Bybit execution ENABLED via button")
-                        self._answer_callback(token, cb_id, "▶️ Trading started")
-                        self._send_control_panel(self._admin_id)
+                        self._answer_callback(cb_id, "▶️ Trading started")
+                        self._send_control_panel()
                     elif cb_data == "cmd_status":
-                        self._answer_callback(token, cb_id)
-                        self._send_control_panel(self._admin_id)
+                        self._answer_callback(cb_id)
+                        self._send_control_panel()
                     continue
 
                 # ── Text command ─────────────────────────────────────────
@@ -1111,10 +1119,10 @@ class Bot:
                 if chat != self._admin_id:
                     continue
                 if text in ("/start", "/panel", "/help"):
-                    self._send_control_panel(self._admin_id)
+                    self._send_control_panel()
                 elif text == "/stop":
                     self.bybit.enabled = False
-                    self._send_control_panel(self._admin_id)
+                    self._send_control_panel()
         except Exception as e:
             logger.warning(f"[CMD] Poll error: {e}")
 
@@ -1155,11 +1163,11 @@ class Bot:
         )
         # Forex startup alert intentionally removed — forex bot runs as a separate service
 
-        if self._admin_id and self.notifier.token:
+        if self._admin_token and self._admin_id:
             logger.info(f"[CMD] Admin commands active (admin_id={self._admin_id}) — polling each tick")
-            self._send_control_panel(self._admin_id)
+            self._send_control_panel()
         else:
-            logger.info("[CMD] No TELEGRAM_ADMIN_ID set — admin commands disabled")
+            logger.info("[CMD] ADMIN_BOT_TOKEN or TELEGRAM_ADMIN_ID not set — admin commands disabled")
 
         while self._running:
             try:

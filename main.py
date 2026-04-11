@@ -154,6 +154,7 @@ def main():
         "BYBIT_LEVERAGE":     os.getenv("BYBIT_LEVERAGE", "10"),
         "BYBIT_MAX_RISK":     os.getenv("BYBIT_MAX_RISK", "5"),     # max USDT risk per trade (SL exposure)
         "TELEGRAM_ADMIN_ID": os.getenv("TELEGRAM_ADMIN_ID", ""),
+        "ADMIN_BOT_TOKEN":   os.getenv("ADMIN_BOT_TOKEN", ""),
         # Gate.io
         "GATE_API_KEY":       os.getenv("GATE_API_KEY", ""),
         "GATE_API_SECRET":    os.getenv("GATE_API_SECRET", ""),
