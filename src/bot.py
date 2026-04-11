@@ -9,6 +9,7 @@ Every 60s:
 """
 
 from __future__ import annotations
+import os
 import time
 import logging
 import traceback
@@ -1163,7 +1164,6 @@ class Bot:
         # Forex startup alert intentionally removed — forex bot runs as a separate service
 
         # Start admin command listener if token available
-        import os
         admin_id = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
         if admin_id and self.notifier.token:
             t = threading.Thread(target=self._command_listener, args=(admin_id,), daemon=True)
