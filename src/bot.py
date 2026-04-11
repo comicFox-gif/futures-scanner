@@ -317,7 +317,7 @@ class Bot:
         elif reason == "SL hit":
             result = "sl";     self._trade_stats["sl"]    += 1
         elif tp_level >= 2:
-            result = "tp2";    self._trade_stats.setdefault("tp2", 0); self._trade_stats["tp2"] += 1
+            result = "tp3";    self._trade_stats["tp3"] += 1
         else:
             result = "other"
         self._trade_stats["total"] += 1
@@ -329,7 +329,7 @@ class Bot:
             self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
         ss = self._strategy_stats[sn]
         ss["total"] += 1
-        if result == "tp2":    ss["tp2"]   += 1
+        if result == "tp3":    ss["tp3"]   += 1
         elif result == "be_sl": ss["be_sl"] += 1
         elif result == "sl":    ss["sl"]    += 1
         if pos.closed_pnl > 0: ss["wins"]  += 1
@@ -1025,10 +1025,13 @@ class Bot:
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
         bybit_note = f" | Bybit: {'ON' if self.bybit.enabled else 'OFF'}"
+        strat_list = ["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "🐋 Whale Momentum"]
+        if self.mode != "scalp":
+            strat_list.append("VWAP Pullback")
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["EMA Trend", "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence", "MACD Zero Cross", "VWAP Pullback", "🐋 Whale Momentum"],
+            strategies=strat_list,
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
         )
