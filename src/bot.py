@@ -13,7 +13,6 @@ import os
 import time
 import logging
 import traceback
-import threading
 import requests
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -135,6 +134,10 @@ class Bot:
         self._last_summary_date         = None
         self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
+
+        # Admin command polling (no thread — runs each tick)
+        self._admin_id  = (env.get("TELEGRAM_ADMIN_ID") or os.getenv("TELEGRAM_ADMIN_ID", "")).strip()
+        self._cmd_offset = 0
 
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
@@ -1060,72 +1063,60 @@ class Bot:
         )
         self._send_admin(admin_id, text, markup=self._control_panel_markup())
 
-    def _command_listener(self, admin_id: str):
-        """Poll Telegram for admin commands and button presses in a background thread."""
-        token  = self.notifier.token
-        offset = 0
-        logger.info(f"[CMD] Command listener started — admin_id={admin_id}")
+    def _poll_commands(self):
+        """Check Telegram for admin commands once per tick. No threads — runs in main loop."""
+        if not self._admin_id or not self.notifier.token:
+            return
+        token = self.notifier.token
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params={"offset": self._cmd_offset, "timeout": 0, "allowed_updates": ["message", "callback_query"]},
+                timeout=10,
+            )
+            data = resp.json()
+            for update in data.get("result", []):
+                self._cmd_offset = update["update_id"] + 1
 
-        # Send control panel on startup
-        self._send_control_panel(admin_id)
-
-        while self._running:
-            try:
-                resp = requests.get(
-                    f"https://api.telegram.org/bot{token}/getUpdates",
-                    params={"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]},
-                    timeout=35,
-                )
-                data = resp.json()
-                for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-
-                    # ── Inline button press ──────────────────────────────
-                    cb = update.get("callback_query")
-                    if cb:
-                        cb_chat = str(cb.get("from", {}).get("id", ""))
-                        if cb_chat != admin_id:
-                            continue
-                        cb_data = cb.get("data", "")
-                        cb_id   = cb["id"]
-
-                        if cb_data == "cmd_stop":
-                            self.bybit.enabled = False
-                            logger.info("[CMD] Bybit execution DISABLED via button")
-                            self._answer_callback(token, cb_id, "⏹ Trading stopped")
-                            self._send_control_panel(admin_id)
-
-                        elif cb_data == "cmd_start":
-                            self.bybit.enabled = True
-                            logger.info("[CMD] Bybit execution ENABLED via button")
-                            self._answer_callback(token, cb_id, "▶️ Trading started")
-                            self._send_control_panel(admin_id)
-
-                        elif cb_data == "cmd_status":
-                            self._answer_callback(token, cb_id)
-                            self._send_control_panel(admin_id)
+                # ── Inline button press ──────────────────────────────────
+                cb = update.get("callback_query")
+                if cb:
+                    cb_chat = str(cb.get("from", {}).get("id", ""))
+                    if cb_chat != self._admin_id:
                         continue
-
-                    # ── Text command fallback ────────────────────────────
-                    msg  = update.get("message", {})
-                    chat = str(msg.get("chat", {}).get("id", ""))
-                    text = msg.get("text", "").strip().lower()
-
-                    if text:
-                        logger.info(f"[CMD] Message from chat_id={chat} text='{text}' (admin={admin_id})")
-
-                    if chat != admin_id:
-                        continue
-
-                    if text in ("/start", "/panel", "/help"):
-                        self._send_control_panel(admin_id)
-                    elif text == "/stop":
+                    cb_data = cb.get("data", "")
+                    cb_id   = cb["id"]
+                    if cb_data == "cmd_stop":
                         self.bybit.enabled = False
-                        self._send_control_panel(admin_id)
+                        logger.info("[CMD] Bybit execution DISABLED via button")
+                        self._answer_callback(token, cb_id, "⏹ Trading stopped")
+                        self._send_control_panel(self._admin_id)
+                    elif cb_data == "cmd_start":
+                        self.bybit.enabled = True
+                        logger.info("[CMD] Bybit execution ENABLED via button")
+                        self._answer_callback(token, cb_id, "▶️ Trading started")
+                        self._send_control_panel(self._admin_id)
+                    elif cb_data == "cmd_status":
+                        self._answer_callback(token, cb_id)
+                        self._send_control_panel(self._admin_id)
+                    continue
 
-            except Exception as e:
-                logger.warning(f"[CMD] Listener error: {e}")
-                time.sleep(5)
+                # ── Text command ─────────────────────────────────────────
+                msg  = update.get("message", {})
+                chat = str(msg.get("chat", {}).get("id", ""))
+                text = msg.get("text", "").strip().lower()
+                if not text:
+                    continue
+                logger.info(f"[CMD] Message from chat_id={chat} text='{text}' (admin={self._admin_id})")
+                if chat != self._admin_id:
+                    continue
+                if text in ("/start", "/panel", "/help"):
+                    self._send_control_panel(self._admin_id)
+                elif text == "/stop":
+                    self.bybit.enabled = False
+                    self._send_control_panel(self._admin_id)
+        except Exception as e:
+            logger.warning(f"[CMD] Poll error: {e}")
 
     # ------------------------------------------------------------------
     # Run
@@ -1164,17 +1155,15 @@ class Bot:
         )
         # Forex startup alert intentionally removed — forex bot runs as a separate service
 
-        # Start admin command listener if token available
-        admin_id = (self.env.get("TELEGRAM_ADMIN_ID") or os.getenv("TELEGRAM_ADMIN_ID", "")).strip()
-        if admin_id and self.notifier.token:
-            t = threading.Thread(target=self._command_listener, args=(admin_id,), daemon=True)
-            t.start()
-            logger.info(f"[CMD] Admin command listener active (admin_id={admin_id})")
+        if self._admin_id and self.notifier.token:
+            logger.info(f"[CMD] Admin commands active (admin_id={self._admin_id}) — polling each tick")
+            self._send_control_panel(self._admin_id)
         else:
-            logger.info("[CMD] No TELEGRAM_ADMIN_ID set — command listener disabled")
+            logger.info("[CMD] No TELEGRAM_ADMIN_ID set — admin commands disabled")
 
         while self._running:
             try:
+                self._poll_commands()
                 self._tick()
             except KeyboardInterrupt:
                 logger.info("Stopped by user.")
