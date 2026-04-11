@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import math
 import traceback
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger("futures_bot.bybit")
@@ -45,6 +46,8 @@ class BybitExecutor:
         self.max_risk_usdt = max_risk_usdt
         self.enabled  = bool(api_key and api_secret)
         self._instrument_cache: dict[str, dict] = {}
+        self._last_order: dict[str, datetime] = {}   # symbol → last order time
+        self._order_cooldown_min = 20
 
         if not self.enabled:
             logger.info("[BYBIT] No API keys — executor disabled")
@@ -210,6 +213,12 @@ class BybitExecutor:
         if self.has_open_position(symbol):
             return {}
 
+        last = self._last_order.get(symbol)
+        if last and datetime.utcnow() - last < timedelta(minutes=self._order_cooldown_min):
+            remaining = int((timedelta(minutes=self._order_cooldown_min) - (datetime.utcnow() - last)).total_seconds() / 60)
+            logger.info(f"[BYBIT] Skipping {symbol} — order cooldown ({remaining}min remaining)")
+            return {}
+
         direction = signal["direction"]
         entry     = float(signal["entry"])
         sl        = float(signal["sl"])
@@ -308,6 +317,7 @@ class BybitExecutor:
                     tpOrderType="Market",   # must be Market when tpslMode=Full
                 )
                 order_id = resp["result"]["orderId"]
+                self._last_order[symbol] = datetime.utcnow()
                 logger.info(
                     f"[BYBIT] ORDER PLACED {side.upper()} {symbol} qty={qty} "
                     f"| SL={sl_price} | TP={tp_price} | id={order_id}"
