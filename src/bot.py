@@ -46,6 +46,7 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 
 class Bot:
     def __init__(self, cfg: dict, env: dict):
+        self.env  = env   # keep full env dict for later use in run()
         # Mode switch: "scalp" swaps signal + filter params before strategies load
         self.mode = cfg.get("mode", "swing")
         self.send_warnings = False   # confirmed signals only — no setup/warning alerts
@@ -1164,7 +1165,7 @@ class Bot:
         # Forex startup alert intentionally removed — forex bot runs as a separate service
 
         # Start admin command listener if token available
-        admin_id = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
+        admin_id = (self.env.get("TELEGRAM_ADMIN_ID") or os.getenv("TELEGRAM_ADMIN_ID", "")).strip()
         if admin_id and self.notifier.token:
             t = threading.Thread(target=self._command_listener, args=(admin_id,), daemon=True)
             t.start()

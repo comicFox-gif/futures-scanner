@@ -6,7 +6,7 @@
 
   "dynamic_pairs": {
     "enabled": true,
-    "top_n": 80,
+    "top_n": 40,
     "refresh_hours": 4,
     "min_volume_usd": 5000000
   },
