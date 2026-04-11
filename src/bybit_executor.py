@@ -238,29 +238,10 @@ class BybitExecutor:
             logger.warning(f"[BYBIT] Bad levels SHORT {symbol}: TP={tp3} E={entry} SL={sl}")
             return {}
 
-        balance   = self._get_balance()
         risk_usdt = 4.0  # fixed $4 risk per trade
 
-        # Reference price for sizing: use the highest of entry/sl to guard against
-        # stale or wrong entry prices in signals (e.g. entry=0.08 when market=0.80).
-        # For LONG: entry > sl → ref = entry.  For SHORT: sl > entry → ref = sl.
-        # Either way max(entry, sl) is always a conservative (lower qty) estimate.
-        ref_price = max(entry, sl)
-
-        # --- qty = coins such that loss at SL == risk_usdt ---
+        # qty = exactly the number of coins that loses $4 if SL is hit
         qty = risk_usdt / sl_dist
-
-        # --- Margin cap: each slot = balance / max_positions ---
-        # With 50 simultaneous positions each uses at most 1/50th of balance as margin.
-        slot_margin  = balance / self.max_positions        # e.g. 100k/50 = 2 000 USDT
-        max_notional = slot_margin * self.leverage         # e.g. 2 000 * 10 = 20 000 USDT
-        max_qty_cap  = max_notional / ref_price            # conservative: uses highest price
-        if qty > max_qty_cap:
-            logger.info(
-                f"[BYBIT] qty capped: {qty:.4f} → {max_qty_cap:.4f} "
-                f"(slot margin={slot_margin:.0f} USDT | notional cap={max_notional:.0f} USDT | ref={ref_price:.6f})"
-            )
-            qty = max_qty_cap
 
         # --- Round to instrument step size and clamp to [min, maxOrderQty] ---
         spec = self._get_instrument_info(symbol)
@@ -270,14 +251,14 @@ class BybitExecutor:
             logger.warning(f"[BYBIT] qty rounds to 0 for {symbol} — skipping")
             return {}
 
-        sl_price = self._round_price(sl, spec)
-        tp_price = self._round_price(tp3, spec)
-        notional = qty * ref_price
-        margin   = notional / self.leverage
+        sl_price  = self._round_price(sl, spec)
+        tp_price  = self._round_price(tp3, spec)
+        notional  = qty * entry
+        effective_risk = qty * sl_dist
 
         logger.info(
-            f"[BYBIT] {symbol} | Balance={balance:.2f} | Risk={risk_usdt:.2f} USDT "
-            f"| qty={qty} | notional≈{notional:.2f} | margin≈{margin:.2f} | SL={sl_price} TP={tp_price}"
+            f"[BYBIT] {symbol} | Risk=${effective_risk:.2f} "
+            f"| qty={qty} | notional≈{notional:.2f} | SL={sl_price} TP={tp_price}"
         )
 
         if not self._set_leverage(symbol):
