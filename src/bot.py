@@ -12,6 +12,8 @@ from __future__ import annotations
 import time
 import logging
 import traceback
+import threading
+import requests
 from datetime import datetime, date, timedelta
 from typing import Optional
 
@@ -1001,6 +1003,87 @@ class Bot:
         self.notifier.paper_positions_update(self._paper_positions, self.paper_balance, self.paper_start_balance)
 
     # ------------------------------------------------------------------
+    # Telegram command listener (admin only)
+    # ------------------------------------------------------------------
+
+    def _send_admin(self, chat_id: str, text: str):
+        """Send a message directly to admin chat."""
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{self.notifier.token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"[CMD] Admin reply failed: {e}")
+
+    def _command_listener(self, admin_id: str):
+        """Poll Telegram for admin commands in a background thread."""
+        import os
+        token  = self.notifier.token
+        offset = 0
+        logger.info(f"[CMD] Command listener started — admin_id={admin_id}")
+
+        while self._running:
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{token}/getUpdates",
+                    params={"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
+                    timeout=35,
+                )
+                data = resp.json()
+                for update in data.get("result", []):
+                    offset = update["update_id"] + 1
+                    msg    = update.get("message", {})
+                    chat   = str(msg.get("chat", {}).get("id", ""))
+                    text   = msg.get("text", "").strip().lower()
+
+                    if chat != admin_id:
+                        continue  # ignore non-admin
+
+                    if text in ("/stop", "/stop_trading"):
+                        self.bybit.enabled = False
+                        logger.info("[CMD] Bybit execution DISABLED by admin command")
+                        self._send_admin(admin_id,
+                            "🔴 <b>Bybit execution OFF</b>\n"
+                            "Signals still posting to channel. No live orders will be placed."
+                        )
+
+                    elif text in ("/start", "/start_trading"):
+                        self.bybit.enabled = True
+                        logger.info("[CMD] Bybit execution ENABLED by admin command")
+                        self._send_admin(admin_id,
+                            "🟢 <b>Bybit execution ON</b>\n"
+                            "Live orders will be placed on next confirmed signal."
+                        )
+
+                    elif text == "/status":
+                        bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"
+                        paper_state = "🟢 ON" if self.paper_enabled else "🔴 OFF"
+                        open_pos    = len(self._paper_positions)
+                        balance     = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
+                        self._send_admin(admin_id,
+                            f"📊 <b>Bot Status</b>\n"
+                            f"Bybit execution: {bybit_state}\n"
+                            f"Paper trading: {paper_state} ({balance})\n"
+                            f"Open paper positions: {open_pos}\n"
+                            f"Mode: {self.mode.upper()}"
+                        )
+
+                    elif text == "/help":
+                        self._send_admin(admin_id,
+                            "🤖 <b>Admin Commands</b>\n"
+                            "/start — enable Bybit live execution\n"
+                            "/stop — disable Bybit live execution\n"
+                            "/status — show current bot state\n"
+                            "/help — show this message"
+                        )
+
+            except Exception as e:
+                logger.warning(f"[CMD] Listener error: {e}")
+                time.sleep(5)
+
+    # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
 
@@ -1036,6 +1119,16 @@ class Bot:
             mode=self.mode,
         )
         # Forex startup alert intentionally removed — forex bot runs as a separate service
+
+        # Start admin command listener if token available
+        import os
+        admin_id = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
+        if admin_id and self.notifier.token:
+            t = threading.Thread(target=self._command_listener, args=(admin_id,), daemon=True)
+            t.start()
+            logger.info(f"[CMD] Admin command listener active (admin_id={admin_id})")
+        else:
+            logger.info("[CMD] No TELEGRAM_ADMIN_ID set — command listener disabled")
 
         while self._running:
             try:
