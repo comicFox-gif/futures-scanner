@@ -147,8 +147,8 @@ class BybitExecutor:
                     return float(c["availableToWithdraw"] or c["walletBalance"] or 0)
             return 0.0
         except Exception as e:
-            logger.warning(f"[BYBIT] get_balance failed: {e} — using 1000 fallback")
-            return 1000.0
+            logger.warning(f"[BYBIT] get_balance failed: {e} — using 431 fallback")
+            return 431.0
 
     def has_open_position(self, symbol: str) -> bool:
         """Return True if there is already an open position for this symbol."""
@@ -230,8 +230,9 @@ class BybitExecutor:
             return {}
 
         balance   = self._get_balance()
-        # Always risk exactly max_risk_usdt ($5) per trade regardless of balance size.
-        risk_usdt = self.max_risk_usdt
+        # Dynamic risk: balance × risk_pct, hard-capped at max_risk_usdt ($5).
+        # e.g. $431 × 2% = $8.62 → capped to $5. Always hits the cap at current balance.
+        risk_usdt = min(balance * self.risk_pct, self.max_risk_usdt)
 
         # Reference price for sizing: use the highest of entry/sl to guard against
         # stale or wrong entry prices in signals (e.g. entry=0.08 when market=0.80).
@@ -260,6 +261,16 @@ class BybitExecutor:
 
         if qty <= 0:
             logger.warning(f"[BYBIT] qty rounds to 0 for {symbol} — skipping")
+            return {}
+
+        # --- Verify effective risk after all caps/rounding ---
+        effective_risk = qty * sl_dist
+        min_risk = self.max_risk_usdt * 0.5   # must be at least 50% of target ($2.50 at $5 cap)
+        if effective_risk < min_risk:
+            logger.warning(
+                f"[BYBIT] Skipping {symbol} — effective risk ${effective_risk:.2f} < ${min_risk:.2f} min "
+                f"(SL too tight or position capped). Not worth fees."
+            )
             return {}
 
         sl_price = self._round_price(sl, spec)

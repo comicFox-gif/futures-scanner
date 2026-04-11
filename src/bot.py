@@ -934,8 +934,8 @@ class Bot:
                         self._daily_alerts.append({"stage": wm_sig["stage"], "direction": wm_sig["direction"], "symbol": symbol})
                         signals_found += 1
 
-                # ── Strategy 8: VWAP Pullback ─────────────────────────────
-                if not in_paper:
+                # ── Strategy 8: VWAP Pullback (swing only) ───────────────
+                if not in_paper and self.mode != "scalp":
                     vwap_sig = self.vwap_strategy.generate_signal(symbol, htf_df, entry_df)
                     if vwap_sig and vwap_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"]):
                         q = vwap_sig.get("quality", 3)
