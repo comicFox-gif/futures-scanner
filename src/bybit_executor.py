@@ -265,42 +265,48 @@ class BybitExecutor:
             logger.error(f"[BYBIT] Aborting {symbol} — could not set leverage")
             return {}
 
-        return self._submit_order(symbol, side, qty, sl_price, tp_price, spec)
+        # Limit price: 2 ticks inside market for near-instant fill with maker fees
+        tick = spec["tick_size"]
+        if side == "Buy":
+            limit_price = self._round_price(entry - tick * 2, spec)
+        else:
+            limit_price = self._round_price(entry + tick * 2, spec)
+
+        return self._submit_order(symbol, side, qty, limit_price, sl_price, tp_price, spec)
 
     def _submit_order(self, symbol: str, side: str, qty: float,
-                      sl_price: str, tp_price: str, spec: dict) -> dict:
-        """Submit the order; on 'too large' error halve qty and retry once."""
+                      limit_price: str, sl_price: str, tp_price: str, spec: dict) -> dict:
+        """Submit a limit order 2 ticks from market; on 'too large' halve qty and retry once."""
         for attempt in range(2):
             try:
                 resp = self.session.place_order(
                     category="linear",
                     symbol=symbol,
                     side=side,
-                    orderType="Market",
+                    orderType="Limit",
+                    price=limit_price,
+                    timeInForce="GTC",
                     qty=str(qty),
-                    positionIdx=0,          # one-way mode — never reduce-only
+                    positionIdx=0,
                     stopLoss=sl_price,
                     takeProfit=tp_price,
                     tpslMode="Full",
                     slOrderType="Market",
-                    tpOrderType="Market",   # must be Market when tpslMode=Full
+                    tpOrderType="Market",
                 )
                 order_id = resp["result"]["orderId"]
                 self._last_order[symbol] = datetime.utcnow()
                 logger.info(
-                    f"[BYBIT] ORDER PLACED {side.upper()} {symbol} qty={qty} "
-                    f"| SL={sl_price} | TP={tp_price} | id={order_id}"
+                    f"[BYBIT] LIMIT ORDER {side.upper()} {symbol} qty={qty} "
+                    f"@ {limit_price} | SL={sl_price} | TP={tp_price} | id={order_id}"
                 )
                 return {"order_id": order_id}
 
             except Exception as e:
                 detail = str(getattr(e, "message", e))
-                # Bybit: "number of contracts exceeds maximum limit" → halve and retry
                 if attempt == 0 and ("too large" in detail.lower() or "exceeds maximum" in detail.lower()):
                     qty = self._round_qty(qty / 2, spec)
-                    logger.warning(
-                        f"[BYBIT] qty too large — halving to {qty} and retrying"
-                    )
+                    logger.warning(f"[BYBIT] qty too large — halving to {qty} and retrying")
                     continue
                 logger.error(f"[BYBIT] place_order({symbol}): {detail}\n{traceback.format_exc()}")
                 return {}
