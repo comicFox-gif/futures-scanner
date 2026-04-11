@@ -1109,6 +1109,9 @@ class Bot:
                     chat = str(msg.get("chat", {}).get("id", ""))
                     text = msg.get("text", "").strip().lower()
 
+                    if text:
+                        logger.info(f"[CMD] Message from chat_id={chat} text='{text}' (admin={admin_id})")
+
                     if chat != admin_id:
                         continue
 
