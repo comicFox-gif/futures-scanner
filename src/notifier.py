@@ -11,6 +11,9 @@ from datetime import datetime
 
 logger = logging.getLogger("futures_bot.notifier")
 
+_SUB_BOT_URL = os.getenv("SUB_BOT_URL", "").rstrip("/")
+_SUB_BOT_KEY = os.getenv("SUB_BOT_API_KEY", "")
+
 LINE  = "━" * 30
 DLINE = "─" * 30
 
@@ -40,6 +43,23 @@ class Notifier:
     # ------------------------------------------------------------------
     # Core senders
     # ------------------------------------------------------------------
+
+    def _forward_to_subbot(self, message: str):
+        """Forward a formatted HTML message to the subscription bot for fan-out."""
+        if not _SUB_BOT_URL:
+            return
+        try:
+            headers = {}
+            if _SUB_BOT_KEY:
+                headers["X-API-Key"] = _SUB_BOT_KEY
+            requests.post(
+                f"{_SUB_BOT_URL}/broadcast",
+                json={"message": message},
+                headers=headers,
+                timeout=5,
+            )
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"SubBot forward failed: {e}")
 
     def _post(self, token: str, chat_id: str, message: str):
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -77,9 +97,11 @@ class Notifier:
         if is_forex:
             if self.forex_enabled and forex_message:
                 self._post(self.forex_token, self.forex_chat_id, forex_message)
+            self._forward_to_subbot(forex_message or message)
         else:
             if self.enabled:
                 self._post(self.token, self.chat_id, message)
+            self._forward_to_subbot(message)
 
     # ------------------------------------------------------------------
     # Formatters

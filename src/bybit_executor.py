@@ -239,9 +239,7 @@ class BybitExecutor:
             return {}
 
         balance   = self._get_balance()
-        # Dynamic risk: balance × risk_pct, hard-capped at max_risk_usdt ($5).
-        # e.g. $431 × 2% = $8.62 → capped to $5. Always hits the cap at current balance.
-        risk_usdt = min(balance * self.risk_pct, self.max_risk_usdt)
+        risk_usdt = 4.0  # fixed $4 risk per trade
 
         # Reference price for sizing: use the highest of entry/sl to guard against
         # stale or wrong entry prices in signals (e.g. entry=0.08 when market=0.80).
