@@ -144,6 +144,7 @@ class Bot:
         # Mode recommendation tracking — alert once when scalp/swing conditions change
         self._mode_rec: str | None = None           # last recommendation sent
         self._last_mode_alert: datetime | None = None
+        self._mode_rec_reason: str = ""             # human-readable reason for last rec
 
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
@@ -1116,6 +1117,7 @@ class Bot:
             if rec == "scalp":
                 session_label = "London" if in_london else "NY"
                 atr_label     = "↑ expanding" if atr_expanding else "normal"
+                self._mode_rec_reason = f"{session_label} session open | ADX 1h: {adx:.0f} | ATR: {atr_label}"
                 msg = (
                     f"⚡ <b>Scalp Conditions Active</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1125,6 +1127,7 @@ class Bot:
                 )
             else:
                 session_label = "Asian session" if not in_active else "Low volatility"
+                self._mode_rec_reason = f"{session_label} | ADX 1h: {adx:.0f}"
                 msg = (
                     f"📈 <b>Swing Conditions Active</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1245,6 +1248,13 @@ class Bot:
                         logger.info("[CMD] Switched to SCALP mode (30m trend / 15m entry)")
                         self._answer_callback(cb_id, "⚡ Scalp mode active")
                         self._send_control_panel()
+                        reason = self._mode_rec_reason or "London/NY session open — high liquidity"
+                        self.notifier.send(
+                            f"⚡ <b>Mode switched to SCALP</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Reason: {reason}\n"
+                            f"Scanning on <b>30m trend / 15m entry</b> — faster setups active."
+                        )
                     elif cb_data == "cmd_swing":
                         self.mode     = "swing"
                         self.tf_trend = "4h"
@@ -1252,6 +1262,13 @@ class Bot:
                         logger.info("[CMD] Switched to SWING mode (4h trend / 1h entry)")
                         self._answer_callback(cb_id, "📈 Swing mode active")
                         self._send_control_panel()
+                        reason = self._mode_rec_reason or "Asian session / low volatility — ranging market"
+                        self.notifier.send(
+                            f"📈 <b>Mode switched to SWING</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Reason: {reason}\n"
+                            f"Scanning on <b>4h trend / 1h entry</b> — higher timeframe setups only."
+                        )
                     continue
 
                 # ── Text command ─────────────────────────────────────────
