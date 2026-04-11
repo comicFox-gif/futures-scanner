@@ -1006,78 +1006,117 @@ class Bot:
     # Telegram command listener (admin only)
     # ------------------------------------------------------------------
 
-    def _send_admin(self, chat_id: str, text: str):
-        """Send a message directly to admin chat."""
+    def _control_panel_markup(self) -> dict:
+        """Inline keyboard for the admin control panel."""
+        bybit_btn = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
+        bybit_cb  = "cmd_stop" if self.bybit.enabled else "cmd_start"
+        return {
+            "inline_keyboard": [
+                [{"text": bybit_btn, "callback_data": bybit_cb}],
+                [{"text": "📊 Status", "callback_data": "cmd_status"}],
+            ]
+        }
+
+    def _send_admin(self, chat_id: str, text: str, markup: dict = None):
+        """Send a message directly to admin chat, optionally with inline buttons."""
         try:
+            payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+            if markup:
+                payload["reply_markup"] = markup
             requests.post(
                 f"https://api.telegram.org/bot{self.notifier.token}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                json=payload,
                 timeout=10,
             )
         except Exception as e:
             logger.warning(f"[CMD] Admin reply failed: {e}")
 
+    def _answer_callback(self, token: str, callback_id: str, text: str = ""):
+        """Acknowledge a button press so Telegram removes the loading spinner."""
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                json={"callback_query_id": callback_id, "text": text},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"[CMD] answerCallbackQuery failed: {e}")
+
+    def _send_control_panel(self, admin_id: str):
+        """Send the control panel with current state and action buttons."""
+        bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"
+        paper_state = "🟢 ON" if self.paper_enabled else "🔴 OFF"
+        open_pos    = len(self._paper_positions)
+        balance     = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
+        text = (
+            f"🤖 <b>Bot Control Panel</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Bybit execution: {bybit_state}\n"
+            f"Paper trading:   {paper_state} ({balance})\n"
+            f"Open positions:  {open_pos}\n"
+            f"Mode: {self.mode.upper()}"
+        )
+        self._send_admin(admin_id, text, markup=self._control_panel_markup())
+
     def _command_listener(self, admin_id: str):
-        """Poll Telegram for admin commands in a background thread."""
-        import os
+        """Poll Telegram for admin commands and button presses in a background thread."""
         token  = self.notifier.token
         offset = 0
         logger.info(f"[CMD] Command listener started — admin_id={admin_id}")
+
+        # Send control panel on startup
+        self._send_control_panel(admin_id)
 
         while self._running:
             try:
                 resp = requests.get(
                     f"https://api.telegram.org/bot{token}/getUpdates",
-                    params={"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
+                    params={"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]},
                     timeout=35,
                 )
                 data = resp.json()
                 for update in data.get("result", []):
                     offset = update["update_id"] + 1
-                    msg    = update.get("message", {})
-                    chat   = str(msg.get("chat", {}).get("id", ""))
-                    text   = msg.get("text", "").strip().lower()
+
+                    # ── Inline button press ──────────────────────────────
+                    cb = update.get("callback_query")
+                    if cb:
+                        cb_chat = str(cb.get("from", {}).get("id", ""))
+                        if cb_chat != admin_id:
+                            continue
+                        cb_data = cb.get("data", "")
+                        cb_id   = cb["id"]
+
+                        if cb_data == "cmd_stop":
+                            self.bybit.enabled = False
+                            logger.info("[CMD] Bybit execution DISABLED via button")
+                            self._answer_callback(token, cb_id, "⏹ Trading stopped")
+                            self._send_control_panel(admin_id)
+
+                        elif cb_data == "cmd_start":
+                            self.bybit.enabled = True
+                            logger.info("[CMD] Bybit execution ENABLED via button")
+                            self._answer_callback(token, cb_id, "▶️ Trading started")
+                            self._send_control_panel(admin_id)
+
+                        elif cb_data == "cmd_status":
+                            self._answer_callback(token, cb_id)
+                            self._send_control_panel(admin_id)
+                        continue
+
+                    # ── Text command fallback ────────────────────────────
+                    msg  = update.get("message", {})
+                    chat = str(msg.get("chat", {}).get("id", ""))
+                    text = msg.get("text", "").strip().lower()
 
                     if chat != admin_id:
-                        continue  # ignore non-admin
+                        continue
 
-                    if text in ("/stop", "/stop_trading"):
+                    if text in ("/start", "/panel", "/help"):
+                        self._send_control_panel(admin_id)
+                    elif text == "/stop":
                         self.bybit.enabled = False
-                        logger.info("[CMD] Bybit execution DISABLED by admin command")
-                        self._send_admin(admin_id,
-                            "🔴 <b>Bybit execution OFF</b>\n"
-                            "Signals still posting to channel. No live orders will be placed."
-                        )
-
-                    elif text in ("/start", "/start_trading"):
-                        self.bybit.enabled = True
-                        logger.info("[CMD] Bybit execution ENABLED by admin command")
-                        self._send_admin(admin_id,
-                            "🟢 <b>Bybit execution ON</b>\n"
-                            "Live orders will be placed on next confirmed signal."
-                        )
-
-                    elif text == "/status":
-                        bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"
-                        paper_state = "🟢 ON" if self.paper_enabled else "🔴 OFF"
-                        open_pos    = len(self._paper_positions)
-                        balance     = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
-                        self._send_admin(admin_id,
-                            f"📊 <b>Bot Status</b>\n"
-                            f"Bybit execution: {bybit_state}\n"
-                            f"Paper trading: {paper_state} ({balance})\n"
-                            f"Open paper positions: {open_pos}\n"
-                            f"Mode: {self.mode.upper()}"
-                        )
-
-                    elif text == "/help":
-                        self._send_admin(admin_id,
-                            "🤖 <b>Admin Commands</b>\n"
-                            "/start — enable Bybit live execution\n"
-                            "/stop — disable Bybit live execution\n"
-                            "/status — show current bot state\n"
-                            "/help — show this message"
-                        )
+                        self._send_control_panel(admin_id)
 
             except Exception as e:
                 logger.warning(f"[CMD] Listener error: {e}")
