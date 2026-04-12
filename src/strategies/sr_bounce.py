@@ -159,7 +159,8 @@ class SRBounceStrategy:
         self,
         symbol: str,
         htf_df: pd.DataFrame,   # 4H — for S/R level detection
-        entry_df: pd.DataFrame, # 15m — for bounce confirmation
+        entry_df: pd.DataFrame, # 1H — for bounce confirmation
+        precision_df: pd.DataFrame | None = None,  # 15m/5m — for tighter SL
     ) -> dict:
         """
         Returns signal dict:
@@ -172,6 +173,10 @@ class SRBounceStrategy:
         atr   = float(row["atr"])
         rsi   = float(row["rsi"])
         vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
+        # Use precision TF ATR for tighter SL when available (scalp: 5m, swing: 15m)
+        p_atr = float(precision_df.iloc[-2]["atr"]) if precision_df is not None and len(precision_df) >= 2 else atr
+        if pd.isna(p_atr) or p_atr == 0:
+            p_atr = atr
 
         # Detect key levels from 4H
         levels = find_key_levels(
@@ -226,7 +231,7 @@ class SRBounceStrategy:
                         logger.debug(f"[SR] {symbol} LONG blocked — buy-side liquidity sweep")
                         return None
                     if detect_bull_trap(entry_df, f"ema_{self.ema_slow}"):
-                        sl_dist = atr * self.atr_sl_mult
+                        sl_dist = p_atr * self.atr_sl_mult
                         if bull_trap_short_confirmed(entry_df):
                             logger.debug(f"[SR] {symbol} bull trap → fading with SHORT")
                             return {
@@ -264,7 +269,7 @@ class SRBounceStrategy:
             elif approaching:
                 # Stage 1 warning — price getting close
                 if lv_touches >= self.sr_min_touches:
-                    sl_dist = atr * self.atr_sl_mult
+                    sl_dist = p_atr * self.atr_sl_mult
                     return {
                         "stage": 1, "direction": "long", "symbol": symbol,
                         "entry": price,
@@ -332,7 +337,7 @@ class SRBounceStrategy:
 
             elif approaching:
                 if lv_touches >= self.sr_min_touches:
-                    sl_dist = atr * self.atr_sl_mult
+                    sl_dist = p_atr * self.atr_sl_mult
                     return {
                         "stage": 1, "direction": "short", "symbol": symbol,
                         "entry": price,

@@ -124,7 +124,11 @@ class RSIDivergenceStrategy:
 
         vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
         body = candle_body_ratio(entry_df)
-        sl_dist = atr * self.atr_sl_mult
+        # Use precision TF ATR for tighter SL when available (scalp: 5m, swing: 15m)
+        p_atr = float(precision_df.iloc[-2]["atr"]) if precision_df is not None and len(precision_df) >= 2 else atr
+        if pd.isna(p_atr) or p_atr == 0:
+            p_atr = atr
+        sl_dist = p_atr * self.atr_sl_mult
 
         # HTF trend alignment from itf_df (used as trend frame)
         htf_row   = itf_df.iloc[-2]

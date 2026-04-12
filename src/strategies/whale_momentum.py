@@ -81,7 +81,8 @@ class WhaleMomentumStrategy:
         )
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
-                        entry_df: pd.DataFrame) -> dict | None:
+                        entry_df: pd.DataFrame,
+                        precision_df: pd.DataFrame | None = None) -> dict | None:
         if len(entry_df) < 15:
             return None
 
@@ -108,7 +109,11 @@ class WhaleMomentumStrategy:
         htf_bull = htf_price > ema50_htf
         htf_bear = htf_price < ema50_htf
 
-        sl_dist = atr * self.atr_sl_mult
+        # Use precision TF ATR for tighter SL when available (scalp: 5m, swing: 15m)
+        p_atr = float(precision_df.iloc[-2]["atr"]) if precision_df is not None and len(precision_df) >= 2 else atr
+        if pd.isna(p_atr) or p_atr == 0:
+            p_atr = atr
+        sl_dist = p_atr * self.atr_sl_mult
 
         # ── LONG: institutions aggressively buying ─────────────────────────
         if htf_bull and rsi <= self.rsi_max:

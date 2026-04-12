@@ -840,7 +840,7 @@ class Bot:
 
                 # ── Strategy 2: S/R Bounce ────────────────────────────────
                 if sr_df is not None and not in_paper:
-                    sr_sig = self.sr_strategy.generate_signal(symbol, sr_df, entry_df)
+                    sr_sig = self.sr_strategy.generate_signal(symbol, sr_df, entry_df, precision_df)
 
                     if sr_sig and sr_sig["stage"] == 2 and not self._is_on_cooldown(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"]):
                         q = sr_sig.get("quality", 3)
@@ -881,7 +881,7 @@ class Bot:
 
                 # ── Strategy 3: BB Squeeze Breakout ───────────────────────
                 if not in_paper:
-                    bb_sig = self.bb_strategy.generate_signal(symbol, htf_df, entry_df)
+                    bb_sig = self.bb_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if bb_sig and bb_sig["stage"] == 2 and not self._is_on_cooldown(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"]):
                         q = bb_sig.get("quality", 3)
                         logger.info(
@@ -917,7 +917,7 @@ class Bot:
 
                 # ── Strategy 4: Break of Structure ────────────────────────
                 if not in_paper:
-                    vp_sig = self.vp_strategy.generate_signal(symbol, htf_df, entry_df)
+                    vp_sig = self.vp_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if vp_sig and vp_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"]):
                         q = vp_sig.get("quality", 3)
                         logger.info(
@@ -953,7 +953,7 @@ class Bot:
 
                 # ── Strategy 5: RSI Divergence ────────────────────────────
                 if not in_paper:
-                    rd_sig = self.rd_strategy.generate_signal(symbol, htf_df, entry_df)
+                    rd_sig = self.rd_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if rd_sig and rd_sig["stage"] == 2 and not self._is_on_cooldown(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"]):
                         q = rd_sig.get("quality", 3)
                         logger.info(
@@ -988,7 +988,7 @@ class Bot:
 
                 # ── Strategy 6: MACD Zero Cross ───────────────────────────
                 if not in_paper:
-                    mz_sig = self.mz_strategy.generate_signal(symbol, htf_df, entry_df)
+                    mz_sig = self.mz_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if mz_sig and mz_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"]):
                         q = mz_sig.get("quality", 3)
                         logger.info(
@@ -1023,7 +1023,7 @@ class Bot:
 
                 # ── Strategy 7: Whale Momentum ────────────────────────────
                 if not in_paper:
-                    wm_sig = self.wm_strategy.generate_signal(symbol, htf_df, entry_df)
+                    wm_sig = self.wm_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if wm_sig and wm_sig["stage"] == 2 and not self._is_on_cooldown(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"]):
                         q = wm_sig.get("quality", 5)
                         logger.info(
@@ -1058,7 +1058,7 @@ class Bot:
 
                 # ── Strategy 8: VWAP Pullback (swing only) ───────────────
                 if not in_paper and self.mode != "scalp":
-                    vwap_sig = self.vwap_strategy.generate_signal(symbol, htf_df, entry_df)
+                    vwap_sig = self.vwap_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if vwap_sig and vwap_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"]):
                         q = vwap_sig.get("quality", 3)
                         logger.info(

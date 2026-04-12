@@ -78,7 +78,8 @@ class VWAPPullbackStrategy:
         return score
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
-                        entry_df: pd.DataFrame) -> dict | None:
+                        entry_df: pd.DataFrame,
+                        precision_df: pd.DataFrame | None = None) -> dict | None:
         if len(entry_df) < 30:
             return None
 
