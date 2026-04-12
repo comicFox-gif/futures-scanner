@@ -110,8 +110,8 @@ class StructureBreakStrategy:
         score += 1                                                      # C2: break confirmed (gate passed)
         if vol_ratio >= self.vol_mult:                      score += 1  # C3
         if adx >= self.adx_min:                             score += 1  # C4
-        rsi_ok = (direction == "long"  and 48 <= rsi <= 62) or \
-                 (direction == "short" and 38 <= rsi <= 52)
+        rsi_ok = (direction == "long"  and 45 <= rsi <= 65) or \
+                 (direction == "short" and 45 <= rsi <= 65)  # min 45 avoids shorting oversold
         if rsi_ok and body >= self.min_body:                score += 1  # C5
         return score
 

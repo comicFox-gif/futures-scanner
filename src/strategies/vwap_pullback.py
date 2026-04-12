@@ -73,7 +73,7 @@ class VWAPPullbackStrategy:
         if vol_ratio >= self.vol_mult:                             score += 1  # C4
         adx_ok  = adx >= self.adx_min
         rsi_ok  = (direction == "long"  and 40 <= rsi <= 65) or \
-                  (direction == "short" and 35 <= rsi <= 60)
+                  (direction == "short" and 45 <= rsi <= 65)  # min 45 avoids shorting oversold
         if adx_ok and rsi_ok:                                      score += 1  # C5
         return score
 

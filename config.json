@@ -33,9 +33,9 @@
     "macd_signal": 9,
     "rsi_period": 14,
     "rsi_long_min": 42,
-    "rsi_long_max": 62,
-    "rsi_short_min": 38,
-    "rsi_short_max": 58,
+    "rsi_long_max": 65,
+    "rsi_short_min": 45,
+    "rsi_short_max": 65,
     "atr_period": 14,
     "atr_sl_multiplier": 1.5,
     "volume_sma_period": 20,
@@ -110,8 +110,8 @@
     "body_min": 0.55,
     "delta_mult": 1.8,
     "lookback": 3,
-    "rsi_max": 62,
-    "rsi_min": 38
+    "rsi_max": 65,
+    "rsi_min": 45
   },
 
   "structure_break": {
@@ -171,8 +171,8 @@
     "body_min": 0.50,
     "delta_mult": 1.5,
     "lookback": 3,
-    "rsi_max": 62,
-    "rsi_min": 38
+    "rsi_max": 65,
+    "rsi_min": 45
   },
 
   "scalp_structure_break": {

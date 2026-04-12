@@ -72,8 +72,8 @@ class BollingerBreakoutStrategy:
         if broke_out:                                             score += 1  # C2
         if vol_ratio >= self.vol_mult:                            score += 1  # C3
         if adx >= self.adx_min:                                   score += 1  # C4
-        if direction == "long"  and 45 <= rsi <= 70:              score += 1  # C5
-        elif direction == "short" and 30 <= rsi <= 55:            score += 1
+        if direction == "long"  and 45 <= rsi <= 65:              score += 1  # C5: not overbought
+        elif direction == "short" and 45 <= rsi <= 65:            score += 1  # not oversold
         return score
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
