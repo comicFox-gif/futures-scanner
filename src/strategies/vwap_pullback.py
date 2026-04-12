@@ -109,7 +109,11 @@ class VWAPPullbackStrategy:
         bull_trend = htf_price > ema50_htf
         bear_trend = htf_price < ema50_htf
 
-        sl_dist    = atr * self.atr_sl_mult
+        # Use precision TF ATR for tighter SL when available (scalp: 5m, swing: 15m)
+        p_atr = float(precision_df.iloc[-2]["atr"]) if precision_df is not None and len(precision_df) >= 2 else atr
+        if pd.isna(p_atr) or p_atr == 0:
+            p_atr = atr
+        sl_dist    = p_atr * self.atr_sl_mult
         touch_zone = atr * self.touch_atr_mult
         sweep      = detect_liquidity_sweep(entry_df)
 

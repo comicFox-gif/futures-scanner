@@ -107,8 +107,9 @@ class RSIDivergenceStrategy:
     def generate_signal(
         self,
         symbol: str,
-        itf_df: pd.DataFrame,   # 1H — divergence detection
-        entry_df: pd.DataFrame, # 15m — entry confirmation
+        itf_df: pd.DataFrame,                      # 1H — divergence detection
+        entry_df: pd.DataFrame,                    # entry TF — confirmation
+        precision_df: pd.DataFrame | None = None,  # 15m/5m — tighter SL
     ) -> dict | None:
         row   = entry_df.iloc[-2]
         price = float(row["close"])
