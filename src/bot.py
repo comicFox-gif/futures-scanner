@@ -1245,11 +1245,14 @@ class Bot:
                     {"text": swing_btn, "callback_data": "cmd_swing"},
                 ],
                 [
-                    {"text": f"{'✅' if c==1 else '🎯'} Conf 1", "callback_data": "cmd_conf_1"},
-                    {"text": f"{'✅' if c==2 else '🎯'} Conf 2", "callback_data": "cmd_conf_2"},
-                    {"text": f"{'✅' if c==3 else '🎯'} Conf 3", "callback_data": "cmd_conf_3"},
-                    {"text": f"{'✅' if c==4 else '🎯'} Conf 4", "callback_data": "cmd_conf_4"},
-                    {"text": f"{'✅' if c==5 else '🎯'} Conf 5", "callback_data": "cmd_conf_5"},
+                    {"text": f"{'✅' if c==1 else '·'} Min 1", "callback_data": "cmd_conf_1"},
+                    {"text": f"{'✅' if c==2 else '·'} Min 2", "callback_data": "cmd_conf_2"},
+                    {"text": f"{'✅' if c==3 else '·'} Min 3", "callback_data": "cmd_conf_3"},
+                ],
+                [
+                    {"text": f"{'✅' if c==4 else '·'} Min 4", "callback_data": "cmd_conf_4"},
+                    {"text": f"{'✅' if c==5 else '·'} Min 5", "callback_data": "cmd_conf_5"},
+                    {"text": "🎯 Confluence", "callback_data": "cmd_status"},
                 ],
                 [{"text": "📊 Status", "callback_data": "cmd_status"}],
             ]
@@ -1416,6 +1419,7 @@ class Bot:
             strategies=strat_list,
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
+            confluence_min=self._confluence_min,
         )
         # Forex startup alert intentionally removed — forex bot runs as a separate service
 
