@@ -312,8 +312,8 @@ class Bot:
         self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
         save_state(self)
 
-        # Stop opening new trades once 50 have been opened
-        if self._session_count >= 10:
+        # Stop opening new trades once 20 have been opened
+        if self._session_count >= 20:
             self._session_paused = True  # no new entries — wait for all to close
 
     def _paper_close(self, symbol: str, exit_price: float, reason: str, tp_level: int = 0):
@@ -352,7 +352,7 @@ class Bot:
         del self._paper_positions[symbol]
         open_count = len(self._paper_positions)
 
-        if self._session_count >= 10 and open_count == 0:
+        if self._session_count >= 20 and open_count == 0:
             self._send_session_summary()
             self._resume_at = datetime.utcnow() + timedelta(hours=3)
             logger.info("[PAPER] Session complete — 5h pause started")

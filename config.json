@@ -152,8 +152,8 @@
 
   "scalp_signal": {
     "tp1_rr": 1.0,
-    "tp2_rr": 2.0,
-    "tp3_rr": 2.0,
+    "tp2_rr": 1.5,
+    "tp3_rr": 1.5,
     "atr_sl_multiplier": 0.8,
     "signal_cooldown_minutes": 30
   },
