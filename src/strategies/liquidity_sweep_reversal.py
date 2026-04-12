@@ -117,11 +117,13 @@ class LiquiditySweepReversalStrategy:
         return score
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
-                        entry_df: pd.DataFrame) -> dict | None:
+                        entry_df: pd.DataFrame,
+                        precision_df: pd.DataFrame | None = None) -> dict | None:
         if len(entry_df) < _STRUCT_LOOKBACK + _SWEEP_LOOKBACK + 10:
             return None
 
         row   = entry_df.iloc[-2]
+        p_row = precision_df.iloc[-2] if precision_df is not None and len(precision_df) >= 2 else row
         price = float(row["close"])
         atr   = float(row["atr"])
         rsi   = float(row["rsi"])
@@ -144,7 +146,7 @@ class LiquiditySweepReversalStrategy:
 
         # ── LONG: sell-side sweep (lows grabbed → now buying) ──────────────
         if sweep_type == "sell_side":
-            candle_ok = bounce_candle_clean(row, "long")
+            candle_ok = bounce_candle_clean(p_row, "long")
             # HTF supports: not in a violent bear (price > EMA50 is ideal but not required)
             htf_ok = not pd.isna(ema50_htf) and htf_price > ema50_htf * 0.97
             quality = self._quality(True, candle_ok, rsi, vol_ratio, htf_ok)
@@ -169,7 +171,7 @@ class LiquiditySweepReversalStrategy:
 
         # ── SHORT: buy-side sweep (highs grabbed → now selling) ────────────
         if sweep_type == "buy_side":
-            candle_ok = bounce_candle_clean(row, "short")
+            candle_ok = bounce_candle_clean(p_row, "short")
             # HTF supports: not in a violent bull
             htf_ok = not pd.isna(ema50_htf) and htf_price < ema50_htf * 1.03
             quality = self._quality(True, candle_ok, rsi, vol_ratio, htf_ok)

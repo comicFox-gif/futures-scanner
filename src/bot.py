@@ -68,8 +68,9 @@ class Bot:
             if "scalp_whale_momentum" in cfg:
                 cfg = {**cfg, "whale_momentum": cfg["scalp_whale_momentum"]}
         self.cfg = cfg
-        self.tf_trend: str = cfg["timeframe_trend"]
-        self.tf_entry: str = cfg["timeframe_entry"]
+        self.tf_trend: str     = cfg["timeframe_trend"]
+        self.tf_entry: str     = cfg["timeframe_entry"]
+        self.tf_precision: str = "5m" if self.mode == "scalp" else "15m"
         self.lookback: int = cfg["strategy"]["lookback_candles"]
         self.poll_interval: int = cfg["bot"]["poll_interval_seconds"]
         self.daily_summary_hour: int = cfg["bot"].get("daily_summary_utc_hour", 0)
@@ -720,50 +721,63 @@ class Bot:
         except Exception:
             return "neutral"
 
-    def _mtf_confirm(self, symbol: str, direction: str, is_bull_trap: bool = False) -> bool:
+    def _mtf_confirm(self, symbol: str, direction: str,
+                     precision_df: pd.DataFrame | None = None,
+                     is_bull_trap: bool = False) -> bool:
         """
-        3rd timeframe confirmation before entering a signal.
-        Scalp: confirm on 5m  — trend (EMA50) + rejection candle.
-        Swing: confirm on 15m — trend (EMA50) + rejection candle.
-        Bull trap shorts bypass the trend check — they fade a pump ABOVE EMA50,
-        so requiring price < EMA50 would always block them. Only the rejection candle is checked.
+        Precision entry confirmation on the 3rd (lowest) timeframe.
+        Swing: 15m  |  Scalp: 5m
+
+        Checks three things on the precision candle:
+          1. Candle direction aligns with trade (bullish close for long, bearish for short)
+          2. Clean body — no heavy wick against the trade (bounce_candle_clean)
+          3. Price side of EMA50 on precision TF (trend alignment)
+             Bull trap shorts skip #3 — they fade a pump already above EMA50.
+
+        precision_df: pre-enriched precision TF dataframe (fetched once per symbol in _tick).
+                      If None, falls back to fetching it here so callers never need to guard.
         Returns True if confirmed, False to skip.
         """
-        tf_confirm = "5m" if self.mode == "scalp" else "15m"
+        from src.indicators import bounce_candle_clean
+        tf_label = self.tf_precision
         try:
-            raw = self._fetch_ohlcv(symbol, tf_confirm)
-            if raw is None or len(raw) < 20:
-                return True  # can't confirm — don't block the signal
-            df  = self.strategy.enrich(raw.copy())
-            if len(df) < 5:
-                return True
-            row      = df.iloc[-2]
-            close    = float(row["close"])
-            open_    = float(row["open"])
+            if precision_df is None or len(precision_df) < 5:
+                # Fallback fetch (should only happen if tick loop didn't provide it)
+                raw = self._fetch_ohlcv(symbol, tf_label)
+                if raw is None or len(raw) < 20:
+                    return True
+                precision_df = self.strategy.enrich(raw.copy())
+                if len(precision_df) < 5:
+                    return True
+
+            row       = precision_df.iloc[-2]
+            close     = float(row["close"])
+            open_     = float(row["open"])
             ema50_col = f"ema_{self.cfg['strategy']['ema_slow']}"
-            ema50    = float(row.get(ema50_col, float("nan")))
-            if pd.isna(ema50):
-                return True
+            ema50     = float(row.get(ema50_col, float("nan")))
 
             if direction == "short":
-                rejection_ok = close < open_           # bearish candle = rejection confirmed
+                candle_ok    = close < open_                        # bearish precision candle
+                clean_ok     = bounce_candle_clean(row, "short")
                 if is_bull_trap:
-                    # Fading a pump — price is intentionally above EMA50, skip trend check
-                    trend_ok  = True
-                    confirmed = rejection_ok
+                    confirmed = candle_ok and clean_ok              # skip EMA50 check for trap fade
                 else:
-                    trend_ok  = close < ema50          # price below EMA50 = downtrend
-                    confirmed = trend_ok and rejection_ok
+                    trend_ok  = pd.isna(ema50) or close < ema50
+                    confirmed = trend_ok and candle_ok and clean_ok
             else:
-                trend_ok      = close > ema50          # price above EMA50 = uptrend
-                rejection_ok  = close > open_          # bullish candle = continuation confirmed
-                confirmed     = trend_ok and rejection_ok
+                candle_ok    = close > open_                        # bullish precision candle
+                clean_ok     = bounce_candle_clean(row, "long")
+                trend_ok     = pd.isna(ema50) or close > ema50
+                confirmed    = trend_ok and candle_ok and clean_ok
 
             if not confirmed:
-                logger.info(f"[MTF] {symbol} {direction.upper()} blocked on {tf_confirm} — trend_ok={trend_ok} rejection_ok={rejection_ok}")
+                logger.info(
+                    f"[PREC] {symbol} {direction.upper()} blocked on {tf_label} "
+                    f"candle={'✓' if candle_ok else '✗'} clean={'✓' if clean_ok else '✗'}"
+                )
             return confirmed
         except Exception as e:
-            logger.warning(f"[MTF] {symbol} confirm error: {e} — allowing signal")
+            logger.warning(f"[PREC] {symbol} confirm error: {e} — allowing signal")
             return True
 
     def _tick(self):
@@ -782,17 +796,19 @@ class Bot:
         signals_found = 0
         for symbol in symbols:
             try:
-                htf_raw   = self._fetch_ohlcv(symbol, self.tf_trend)
-                entry_raw = self._fetch_ohlcv(symbol, self.tf_entry)
+                htf_raw       = self._fetch_ohlcv(symbol, self.tf_trend)
+                entry_raw     = self._fetch_ohlcv(symbol, self.tf_entry)
+                precision_raw = self._fetch_ohlcv(symbol, self.tf_precision)
                 if htf_raw is None or entry_raw is None:
                     continue
 
                 # Fetch 4H data for S/R strategy
                 sr_raw = self._fetch_ohlcv(symbol, self.tf_sr)
 
-                htf_df   = self.strategy.enrich(htf_raw.copy())
-                entry_df = self.strategy.enrich(entry_raw.copy())
-                sr_df    = self.sr_strategy.enrich(sr_raw.copy()) if sr_raw is not None else None
+                htf_df       = self.strategy.enrich(htf_raw.copy())
+                entry_df     = self.strategy.enrich(entry_raw.copy())
+                precision_df = self.strategy.enrich(precision_raw.copy()) if precision_raw is not None else None
+                sr_df        = self.sr_strategy.enrich(sr_raw.copy()) if sr_raw is not None else None
 
                 # Skip symbols without enough candle history.
                 # OKX caps at 300 candles per call; after EMA200 dropna ~100 rows remain.
@@ -832,7 +848,7 @@ class Bot:
                             f"[SR CONFIRMED] {sr_sig['direction'].upper()} {symbol} "
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(sr_sig["direction"], market_bias) and self._mtf_confirm(symbol, sr_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(sr_sig["direction"], market_bias) and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
                             sr_trap = "Bull Trap" in sr_sig.get("reason", "")
                             conf = self._confluence(htf_df, entry_df, sr_sig["direction"], sr_sig["entry"], sr_trap)
                             if conf[0] >= self._confluence_min:
@@ -873,7 +889,7 @@ class Bot:
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
                         bb_trap = "Bull Trap" in bb_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap) and self._mtf_confirm(symbol, bb_sig["direction"], is_bull_trap=bb_trap):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap) and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
                             conf = self._confluence(htf_df, entry_df, bb_sig["direction"], bb_sig["entry"], bb_trap)
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q, confluence=conf)
@@ -909,7 +925,7 @@ class Bot:
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         vp_trap = "Bull Trap" in vp_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap) and self._mtf_confirm(symbol, vp_sig["direction"], is_bull_trap=vp_trap):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap) and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
                             conf = self._confluence(htf_df, entry_df, vp_sig["direction"], vp_sig["entry"], vp_trap)
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q, confluence=conf)
@@ -944,7 +960,7 @@ class Bot:
                             f"[DIV CONFIRMED] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(rd_sig["direction"], market_bias) and self._mtf_confirm(symbol, rd_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(rd_sig["direction"], market_bias) and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, rd_sig["direction"], rd_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q, confluence=conf)
@@ -979,7 +995,7 @@ class Bot:
                             f"[MACD0 CONFIRMED] {mz_sig['direction'].upper()} {symbol} "
                             f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(mz_sig["direction"], market_bias) and self._mtf_confirm(symbol, mz_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(mz_sig["direction"], market_bias) and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mz_sig["direction"], mz_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q, confluence=conf)
@@ -1014,7 +1030,7 @@ class Bot:
                             f"[WHALE CONFIRMED] {wm_sig['direction'].upper()} {symbol} "
                             f"@ {wm_sig['entry']:.4f} | Q={q} | {wm_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(wm_sig["direction"], market_bias) and self._mtf_confirm(symbol, wm_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(wm_sig["direction"], market_bias) and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, wm_sig["direction"], wm_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q, confluence=conf)
@@ -1050,7 +1066,7 @@ class Bot:
                             f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
                         )
                         vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) and self._mtf_confirm(symbol, vwap_sig["direction"], is_bull_trap=vwap_trap):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
                             conf = self._confluence(htf_df, entry_df, vwap_sig["direction"], vwap_sig["entry"], vwap_trap)
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q, confluence=conf)
@@ -1078,11 +1094,11 @@ class Bot:
 
                 # ── Strategy 9: FVG Retest ────────────────────────────────
                 if not in_paper:
-                    fvg_sig = self.fvg_strategy.generate_signal(symbol, htf_df, entry_df)
+                    fvg_sig = self.fvg_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if fvg_sig and fvg_sig["stage"] == 2 and not self._is_on_cooldown(symbol, fvg_sig["direction"] + "_fvg", fvg_sig["stage"]):
                         q = fvg_sig.get("quality", 3)
                         logger.info(f"[FVG CONFIRMED] {fvg_sig['direction'].upper()} {symbol} @ {fvg_sig['entry']:.4f} | Q={q} | {fvg_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(fvg_sig["direction"], market_bias) and self._mtf_confirm(symbol, fvg_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(fvg_sig["direction"], market_bias) and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, fvg_sig["direction"], fvg_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(fvg_sig, self._strategy_label("FVG Retest", fvg_sig), q, confluence=conf)
@@ -1110,11 +1126,11 @@ class Bot:
 
                 # ── Strategy 10: Liquidity Sweep Reversal ─────────────────
                 if not in_paper:
-                    sw_sig = self.sw_strategy.generate_signal(symbol, htf_df, entry_df)
+                    sw_sig = self.sw_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if sw_sig and sw_sig["stage"] == 2 and not self._is_on_cooldown(symbol, sw_sig["direction"] + "_sw", sw_sig["stage"]):
                         q = sw_sig.get("quality", 3)
                         logger.info(f"[SWEEP CONFIRMED] {sw_sig['direction'].upper()} {symbol} @ {sw_sig['entry']:.4f} | Q={q} | {sw_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(sw_sig["direction"], market_bias) and self._mtf_confirm(symbol, sw_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(sw_sig["direction"], market_bias) and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, sw_sig["direction"], sw_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(sw_sig, self._strategy_label("Sweep Reversal", sw_sig), q, confluence=conf)
@@ -1142,11 +1158,11 @@ class Bot:
 
                 # ── Strategy 11: Order Block Retest ───────────────────────
                 if not in_paper:
-                    ob_sig = self.ob_strategy.generate_signal(symbol, htf_df, entry_df)
+                    ob_sig = self.ob_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if ob_sig and ob_sig["stage"] == 2 and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
                         q = ob_sig.get("quality", 3)
                         logger.info(f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} @ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(ob_sig["direction"], market_bias) and self._mtf_confirm(symbol, ob_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(ob_sig["direction"], market_bias) and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, ob_sig["direction"], ob_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(ob_sig, self._strategy_label("OB Retest", ob_sig), q, confluence=conf)
@@ -1174,11 +1190,11 @@ class Bot:
 
                 # ── Strategy 12: MSS Pullback ─────────────────────────────
                 if not in_paper:
-                    mss_sig = self.mss_strategy.generate_signal(symbol, htf_df, entry_df)
+                    mss_sig = self.mss_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
                     if mss_sig and mss_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mss_sig["direction"] + "_mss", mss_sig["stage"]):
                         q = mss_sig.get("quality", 3)
                         logger.info(f"[MSS CONFIRMED] {mss_sig['direction'].upper()} {symbol} @ {mss_sig['entry']:.4f} | Q={q} | {mss_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(mss_sig["direction"], market_bias) and self._mtf_confirm(symbol, mss_sig["direction"]):
+                        if not self._session_paused and q >= 5 and not self._bias_blocks(mss_sig["direction"], market_bias) and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mss_sig["direction"], mss_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(mss_sig, self._strategy_label("MSS Pullback", mss_sig), q, confluence=conf)
@@ -1441,10 +1457,11 @@ class Bot:
                         self._answer_callback(cb_id)
                         self._send_control_panel()
                     elif cb_data == "cmd_scalp":
-                        self.mode     = "scalp"
-                        self.tf_trend = "30m"
-                        self.tf_entry = "15m"
-                        logger.info("[CMD] Switched to SCALP mode (30m trend / 15m entry)")
+                        self.mode         = "scalp"
+                        self.tf_trend     = "30m"
+                        self.tf_entry     = "15m"
+                        self.tf_precision = "5m"
+                        logger.info("[CMD] Switched to SCALP mode (30m trend / 15m structure / 5m precision)")
                         self._answer_callback(cb_id, "⚡ Scalp mode active")
                         self._send_control_panel()
                         reason = self._mode_rec_reason or "London/NY session open — high liquidity"
@@ -1452,13 +1469,14 @@ class Bot:
                             f"⚡ <b>Mode switched to SCALP</b>\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Reason: {reason}\n"
-                            f"Scanning on <b>30m trend / 15m entry</b> — faster setups active."
+                            f"Trend: <b>30m</b>  →  Structure: <b>15m</b>  →  Precision: <b>5m</b>"
                         )
                     elif cb_data == "cmd_swing":
-                        self.mode     = "swing"
-                        self.tf_trend = "4h"
-                        self.tf_entry = "1h"
-                        logger.info("[CMD] Switched to SWING mode (4h trend / 1h entry)")
+                        self.mode         = "swing"
+                        self.tf_trend     = "4h"
+                        self.tf_entry     = "1h"
+                        self.tf_precision = "15m"
+                        logger.info("[CMD] Switched to SWING mode (4h trend / 1h structure / 15m precision)")
                         self._answer_callback(cb_id, "📈 Swing mode active")
                         self._send_control_panel()
                         reason = self._mode_rec_reason or "Asian session / low volatility — ranging market"
@@ -1466,7 +1484,7 @@ class Bot:
                             f"📈 <b>Mode switched to SWING</b>\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Reason: {reason}\n"
-                            f"Scanning on <b>4h trend / 1h entry</b> — higher timeframe setups only."
+                            f"Trend: <b>4h</b>  →  Structure: <b>1h</b>  →  Precision: <b>15m</b>"
                         )
                     elif cb_data.startswith("cmd_conf_"):
                         try:
@@ -1511,7 +1529,7 @@ class Bot:
         dp_note   = f"Dynamic pairs: TOP {dp_cfg.get('top_n', 30)} by 24h volume | Refresh: every {dp_cfg.get('refresh_hours', 4)}h"
         logger.info("=" * 60)
         logger.info(f"Scanner started — {dp_note}{paper_note} | Mode: {self.mode.upper()}")
-        logger.info(f"Trend TF: {self.tf_trend} | Entry TF: {self.tf_entry} | SR TF: {self.tf_sr}")
+        logger.info(f"Trend TF: {self.tf_trend} | Structure TF: {self.tf_entry} | Precision TF: {self.tf_precision} | SR TF: {self.tf_sr}")
         logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
         logger.info("=" * 60)
 
@@ -1536,6 +1554,7 @@ class Bot:
             label=f"Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
             confluence_min=self._confluence_min,
+            tf_precision=self.tf_precision,
         )
         # Forex startup alert intentionally removed — forex bot runs as a separate service
 

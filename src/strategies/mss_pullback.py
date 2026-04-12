@@ -94,12 +94,14 @@ class MSSPullbackStrategy:
         return find_swing_lows_idx(window, self.swing_left, self.swing_right)
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
-                        entry_df: pd.DataFrame) -> dict | None:
+                        entry_df: pd.DataFrame,
+                        precision_df: pd.DataFrame | None = None) -> dict | None:
         min_len = self.lookback + self.swing_left + self.swing_right + 5
         if len(htf_df) < min_len or len(entry_df) < min_len:
             return None
 
         row   = entry_df.iloc[-2]
+        p_row = precision_df.iloc[-2] if precision_df is not None and len(precision_df) >= 2 else row
         price = float(row["close"])
         atr   = float(row["atr"])
         rsi   = float(row["rsi"])
@@ -132,7 +134,7 @@ class MSSPullbackStrategy:
                     pb_zone_bot = broken_high - atr * self.pb_atr_mult
                     at_pullback = pb_zone_bot <= price <= pb_zone_top
 
-                    candle_ok = bounce_candle_clean(row, "long")
+                    candle_ok = bounce_candle_clean(p_row, "long")
                     quality   = self._quality(True, at_pullback, candle_ok, rsi, vol_ratio)
                     if quality >= 5:
                         sl_price = broken_high - atr * self.atr_sl_mult
@@ -170,7 +172,7 @@ class MSSPullbackStrategy:
                     pb_zone_bot = broken_low - atr * self.pb_atr_mult
                     at_pullback = pb_zone_bot <= price <= pb_zone_top
 
-                    candle_ok = bounce_candle_clean(row, "short")
+                    candle_ok = bounce_candle_clean(p_row, "short")
                     quality   = self._quality(True, at_pullback, candle_ok, rsi, vol_ratio)
                     if quality >= 5:
                         sl_price = broken_low + atr * self.atr_sl_mult

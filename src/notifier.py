@@ -204,7 +204,7 @@ class Notifier:
     def scanner_started(self, symbols: list, tf_trend: str, tf_entry: str,
                         cooldown_min: int, paper_enabled: bool = False, paper_balance: float = 0,
                         strategies=None, label: str = "Signal Scanner", mode: str = "swing",
-                        confluence_min: int = 2):
+                        confluence_min: int = 2, tf_precision: str = "15m"):
         mode_label = "SCALP ⚡" if mode == "scalp" else "SWING 📈"
         strats = strategies or ["EMA Trend", "S/R Bounce", "BB Breakout", "EMA Ribbon", "RSI Div"]
         strat_str = "  •  ".join(strats)
@@ -217,7 +217,8 @@ class Notifier:
         self.send(
             f"🟢 <b>{label} Online</b>\n"
             f"{LINE}\n"
-            f"<b>{len(symbols)} pairs</b>  ·  {mode_label}  ·  {tf_trend}/{tf_entry}\n"
+            f"<b>{len(symbols)} pairs</b>  ·  {mode_label}\n"
+            f"Trend: <b>{tf_trend}</b>  →  Structure: <b>{tf_entry}</b>  →  Precision: <b>{tf_precision}</b>\n"
             f"Cooldown: {cooldown_min}min  ·  Confluence min: <b>{confluence_min}/5</b>  {conf_label}\n"
             f"{DLINE}\n"
             f"{strat_str}\n"

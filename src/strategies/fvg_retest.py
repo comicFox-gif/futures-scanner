@@ -77,11 +77,14 @@ class FVGRetestStrategy:
         return score
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
-                        entry_df: pd.DataFrame) -> dict | None:
+                        entry_df: pd.DataFrame,
+                        precision_df: pd.DataFrame | None = None) -> dict | None:
         if len(entry_df) < self.lookback + 10:
             return None
 
         row   = entry_df.iloc[-2]
+        # Use precision TF candle for entry confirmation if available
+        p_row = precision_df.iloc[-2] if precision_df is not None and len(precision_df) >= 2 else row
         price = float(row["close"])
         atr   = float(row["atr"])
         rsi   = float(row["rsi"])
@@ -110,7 +113,7 @@ class FVGRetestStrategy:
         if htf_bull:
             for z in reversed(zones):   # most recent FVG first
                 if z["type"] == "bull" and z["bot"] <= price <= z["top"]:
-                    candle_ok = bounce_candle_clean(row, "long")
+                    candle_ok = bounce_candle_clean(p_row, "long")
                     quality   = self._quality(True, candle_ok, True, rsi, vol_ratio)
                     if quality < 5:
                         logger.debug(f"[FVG] {symbol} LONG quality {quality} < 5 — skip")
@@ -136,7 +139,7 @@ class FVGRetestStrategy:
         if htf_bear:
             for z in reversed(zones):
                 if z["type"] == "bear" and z["bot"] <= price <= z["top"]:
-                    candle_ok = bounce_candle_clean(row, "short")
+                    candle_ok = bounce_candle_clean(p_row, "short")
                     quality   = self._quality(True, candle_ok, True, rsi, vol_ratio)
                     if quality < 5:
                         logger.debug(f"[FVG] {symbol} SHORT quality {quality} < 5 — skip")
