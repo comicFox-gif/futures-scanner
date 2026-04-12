@@ -198,6 +198,30 @@
     "min_body": 0.40
   },
 
+  "fvg_retest": {
+    "volume_multiplier": 1.3,
+    "lookback": 40
+  },
+
+  "sweep_reversal": {
+    "volume_multiplier": 1.5
+  },
+
+  "ob_retest": {
+    "lookback_candles": 80,
+    "impulse_candles": 3,
+    "impulse_atr_mult": 2.0,
+    "volume_multiplier": 1.3
+  },
+
+  "mss_pullback": {
+    "swing_left": 5,
+    "swing_right": 2,
+    "lookback": 40,
+    "pullback_atr_mult": 2.0,
+    "volume_multiplier": 1.3
+  },
+
   "bot": {
     "poll_interval_seconds": 60,
     "daily_summary_utc_hour": 0
