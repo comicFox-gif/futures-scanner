@@ -788,10 +788,28 @@ class Bot:
         paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
         paper_info = f" | Paper: {paper_bal} | Positions: {open_pos}" if self.paper_enabled else ""
 
-        # Market regime — checked once per tick using BTC as benchmark
+        # Market regime — informational only, does NOT block signals
         market_bias = self._market_bias()
         bias_icon   = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(market_bias, "⚪")
         logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info} | Market: {bias_icon} {market_bias.upper()}")
+
+        # Alert subscribers when bias flips to a directional regime
+        if market_bias != "neutral" and market_bias != getattr(self, "_last_bias_alerted", None):
+            self._last_bias_alerted = market_bias
+            label = "🟢 Bullish" if market_bias == "bullish" else "🔴 Bearish"
+            self.notifier.send(
+                f"📊 <b>Market Bias: {label}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"BTC structure shifted — market is leaning <b>{market_bias}</b>.\n"
+                f"<i>Signals fire in both directions regardless of bias.</i>"
+            )
+        elif market_bias == "neutral" and getattr(self, "_last_bias_alerted", None) not in (None, "neutral"):
+            self._last_bias_alerted = "neutral"
+            self.notifier.send(
+                f"⚪ <b>Market Bias: Neutral</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"BTC structure is ranging — no strong directional bias."
+            )
 
         signals_found = 0
         for symbol in symbols:
@@ -848,7 +866,7 @@ class Bot:
                             f"[SR CONFIRMED] {sr_sig['direction'].upper()} {symbol} "
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(sr_sig["direction"], market_bias) and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
                             sr_trap = "Bull Trap" in sr_sig.get("reason", "")
                             conf = self._confluence(htf_df, entry_df, sr_sig["direction"], sr_sig["entry"], sr_trap)
                             if conf[0] >= self._confluence_min:
@@ -889,7 +907,7 @@ class Bot:
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
                         bb_trap = "Bull Trap" in bb_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap) and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
                             conf = self._confluence(htf_df, entry_df, bb_sig["direction"], bb_sig["entry"], bb_trap)
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q, confluence=conf)
@@ -907,7 +925,6 @@ class Bot:
                                 logger.info(f"[BB] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:                               reason = "paused"
-                            elif self._bias_blocks(bb_sig["direction"], market_bias, is_bull_trap=bb_trap): reason = "bias blocked"
                             elif q < 5:                                            reason = f"quality {q} < 5"
                             else:                                                  reason = "MTF blocked"
                             logger.info(f"[BB] Skipped {symbol} — {reason}")
@@ -925,7 +942,7 @@ class Bot:
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         vp_trap = "Bull Trap" in vp_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap) and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
                             conf = self._confluence(htf_df, entry_df, vp_sig["direction"], vp_sig["entry"], vp_trap)
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q, confluence=conf)
@@ -943,7 +960,6 @@ class Bot:
                                 logger.info(f"[BOS] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:                               reason = "paused"
-                            elif self._bias_blocks(vp_sig["direction"], market_bias, is_bull_trap=vp_trap): reason = "bias blocked"
                             elif q < 5:                                            reason = f"quality {q} < 5"
                             else:                                                  reason = "MTF blocked"
                             logger.info(f"[BOS] Skipped {symbol} — {reason}")
@@ -960,7 +976,7 @@ class Bot:
                             f"[DIV CONFIRMED] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(rd_sig["direction"], market_bias) and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, rd_sig["direction"], rd_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q, confluence=conf)
@@ -978,7 +994,6 @@ class Bot:
                                 logger.info(f"[DIV] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:                              reason = "paused"
-                            elif self._bias_blocks(rd_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                                           reason = f"quality {q} < 5"
                             else:                                                  reason = "MTF blocked"
                             logger.info(f"[DIV] Skipped {symbol} — {reason}")
@@ -995,7 +1010,7 @@ class Bot:
                             f"[MACD0 CONFIRMED] {mz_sig['direction'].upper()} {symbol} "
                             f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(mz_sig["direction"], market_bias) and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mz_sig["direction"], mz_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q, confluence=conf)
@@ -1013,7 +1028,6 @@ class Bot:
                                 logger.info(f"[MACD0] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:                              reason = "paused"
-                            elif self._bias_blocks(mz_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                                           reason = f"quality {q} < 5"
                             else:                                                  reason = "MTF blocked"
                             logger.info(f"[MACD0] Skipped {symbol} — {reason}")
@@ -1030,7 +1044,7 @@ class Bot:
                             f"[WHALE CONFIRMED] {wm_sig['direction'].upper()} {symbol} "
                             f"@ {wm_sig['entry']:.4f} | Q={q} | {wm_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(wm_sig["direction"], market_bias) and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, wm_sig["direction"], wm_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q, confluence=conf)
@@ -1048,7 +1062,6 @@ class Bot:
                                 logger.info(f"[WHALE] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:                              reason = "paused"
-                            elif self._bias_blocks(wm_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                                           reason = f"quality {q} < 5"
                             else:                                                  reason = "MTF blocked"
                             logger.info(f"[WHALE] Skipped {symbol} — {reason}")
@@ -1066,7 +1079,7 @@ class Bot:
                             f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
                         )
                         vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap) and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
                             conf = self._confluence(htf_df, entry_df, vwap_sig["direction"], vwap_sig["entry"], vwap_trap)
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q, confluence=conf)
@@ -1084,7 +1097,6 @@ class Bot:
                                 logger.info(f"[VWAP] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:                                   reason = "paused"
-                            elif self._bias_blocks(vwap_sig["direction"], market_bias, is_bull_trap=vwap_trap): reason = "bias blocked"
                             elif q < 5:                                                reason = f"quality {q} < 5"
                             else:                                                      reason = "MTF blocked"
                             logger.info(f"[VWAP] Skipped {symbol} — {reason}")
@@ -1098,7 +1110,7 @@ class Bot:
                     if fvg_sig and fvg_sig["stage"] == 2 and not self._is_on_cooldown(symbol, fvg_sig["direction"] + "_fvg", fvg_sig["stage"]):
                         q = fvg_sig.get("quality", 3)
                         logger.info(f"[FVG CONFIRMED] {fvg_sig['direction'].upper()} {symbol} @ {fvg_sig['entry']:.4f} | Q={q} | {fvg_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(fvg_sig["direction"], market_bias) and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, fvg_sig["direction"], fvg_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(fvg_sig, self._strategy_label("FVG Retest", fvg_sig), q, confluence=conf)
@@ -1116,7 +1128,6 @@ class Bot:
                                 logger.info(f"[FVG] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:   reason = "paused"
-                            elif self._bias_blocks(fvg_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                reason = f"quality {q} < 5"
                             else:                      reason = "MTF blocked"
                             logger.info(f"[FVG] Skipped {symbol} — {reason}")
@@ -1130,7 +1141,7 @@ class Bot:
                     if sw_sig and sw_sig["stage"] == 2 and not self._is_on_cooldown(symbol, sw_sig["direction"] + "_sw", sw_sig["stage"]):
                         q = sw_sig.get("quality", 3)
                         logger.info(f"[SWEEP CONFIRMED] {sw_sig['direction'].upper()} {symbol} @ {sw_sig['entry']:.4f} | Q={q} | {sw_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(sw_sig["direction"], market_bias) and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, sw_sig["direction"], sw_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(sw_sig, self._strategy_label("Sweep Reversal", sw_sig), q, confluence=conf)
@@ -1148,7 +1159,6 @@ class Bot:
                                 logger.info(f"[SWEEP] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:   reason = "paused"
-                            elif self._bias_blocks(sw_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                reason = f"quality {q} < 5"
                             else:                      reason = "MTF blocked"
                             logger.info(f"[SWEEP] Skipped {symbol} — {reason}")
@@ -1162,7 +1172,7 @@ class Bot:
                     if ob_sig and ob_sig["stage"] == 2 and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
                         q = ob_sig.get("quality", 3)
                         logger.info(f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} @ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(ob_sig["direction"], market_bias) and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, ob_sig["direction"], ob_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(ob_sig, self._strategy_label("OB Retest", ob_sig), q, confluence=conf)
@@ -1180,7 +1190,6 @@ class Bot:
                                 logger.info(f"[OB] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:   reason = "paused"
-                            elif self._bias_blocks(ob_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                reason = f"quality {q} < 5"
                             else:                      reason = "MTF blocked"
                             logger.info(f"[OB] Skipped {symbol} — {reason}")
@@ -1194,7 +1203,7 @@ class Bot:
                     if mss_sig and mss_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mss_sig["direction"] + "_mss", mss_sig["stage"]):
                         q = mss_sig.get("quality", 3)
                         logger.info(f"[MSS CONFIRMED] {mss_sig['direction'].upper()} {symbol} @ {mss_sig['entry']:.4f} | Q={q} | {mss_sig['reason']}")
-                        if not self._session_paused and q >= 5 and not self._bias_blocks(mss_sig["direction"], market_bias) and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
+                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mss_sig["direction"], mss_sig["entry"])
                             if conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(mss_sig, self._strategy_label("MSS Pullback", mss_sig), q, confluence=conf)
@@ -1212,7 +1221,6 @@ class Bot:
                                 logger.info(f"[MSS] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
                         else:
                             if self._session_paused:   reason = "paused"
-                            elif self._bias_blocks(mss_sig["direction"], market_bias): reason = "bias blocked"
                             elif q < 5:                reason = f"quality {q} < 5"
                             else:                      reason = "MTF blocked"
                             logger.info(f"[MSS] Skipped {symbol} — {reason}")
