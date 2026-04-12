@@ -252,7 +252,19 @@ class Notifier:
     # Stage 2 — CONFIRMED (crypto)
     # ------------------------------------------------------------------
 
-    def confirmed_signal(self, signal, strategy_name: str = "EMA Momentum", quality: int = 3):
+    def _confluence_block(self, conf_score: int, conf_labels: list) -> str:
+        """Format the confluence section appended to signal messages."""
+        from src.confluence import confluence_strength_label
+        strength   = confluence_strength_label(conf_score)
+        labels_str = "\n".join(conf_labels) if conf_labels else "—"
+        return (
+            f"\n{DLINE}\n"
+            f"<b>Confluence  {conf_score}/5  {strength}</b>\n"
+            f"{labels_str}"
+        )
+
+    def confirmed_signal(self, signal, strategy_name: str = "EMA Momentum",
+                         quality: int = 3, confluence: tuple | None = None):
         self._signal_no += 1
         direction = signal.direction if hasattr(signal, "direction") else signal["direction"]
         symbol    = signal.symbol if hasattr(signal, "symbol") else signal["symbol"]
@@ -277,13 +289,17 @@ class Notifier:
             extra=f"RSI <code>{rsi:.0f}</code>",
             fmt=self._fmt_fx,
         )
+        if confluence:
+            conf_block = self._confluence_block(*confluence)
+            msg       += conf_block
+            forex_msg += conf_block
         self.send_signal(msg, forex_message=forex_msg, is_forex=self._is_forex_symbol(symbol))
 
     # ------------------------------------------------------------------
     # S/R Bounce confirmed (extra level info)
     # ------------------------------------------------------------------
 
-    def sr_confirmed_signal(self, sig: dict):
+    def sr_confirmed_signal(self, sig: dict, confluence: tuple | None = None):
         self._signal_no += 1
         quality   = sig.get("quality", 3)
         lv_price  = sig["level_price"]
@@ -312,6 +328,10 @@ class Notifier:
             extra=f"{lv_type}: <code>{self._fmt_fx(lv_price)}</code>  ({lv_touch} touches)",
             fmt=self._fmt_fx,
         )
+        if confluence:
+            conf_block = self._confluence_block(*confluence)
+            msg       += conf_block
+            forex_msg += conf_block
         self.send_signal(msg, forex_message=forex_msg, is_forex=self._is_forex_symbol(symbol))
 
     def sr_warning_signal(self, sig: dict):
