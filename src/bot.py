@@ -167,8 +167,7 @@ class Bot:
 
     def _init_exchange(self, cfg: dict, env: dict):
         exchange_id = env.get("EXCHANGE", cfg.get("exchange", "bybit"))
-        # MEXC uses "linear" for USDT perps; OKX uses "swap"
-        type_map    = {"bybit": "linear", "okx": "swap"}
+        type_map    = {"bybit": "linear", "okx": "swap", "mexc": "swap"}
         default_type = type_map.get(exchange_id, "linear")
         api_key    = env.get("API_KEY", "")
         api_secret = env.get("API_SECRET", "")
