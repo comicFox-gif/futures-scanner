@@ -124,7 +124,13 @@ def load_state(bot) -> bool:
         bot._session_count      = state.get("session_count",       0)
         bot._session_paused     = state.get("session_paused",      False)
         bot._session_start_bal  = state.get("session_start_bal",   bot.paper_balance)
-        bot._trade_stats        = state.get("trade_stats",         bot._trade_stats)
+        loaded_stats            = state.get("trade_stats",         {})
+        # Migrate old tp3 key → tp2 if loading a pre-migration state file
+        if "tp3" in loaded_stats and "tp2" not in loaded_stats:
+            loaded_stats["tp2"] = loaded_stats.pop("tp3")
+        if "whale" not in loaded_stats:
+            loaded_stats["whale"] = 0
+        bot._trade_stats        = {**bot._trade_stats, **loaded_stats}
         bot._strategy_stats     = state.get("strategy_stats",      {})
         bot.notifier._signal_no = state.get("signal_no",           0)
 

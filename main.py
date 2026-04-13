@@ -146,13 +146,17 @@ def main():
         "API_KEY":            os.getenv("API_KEY", ""),
         "API_SECRET":         os.getenv("API_SECRET", ""),
         "API_PASSPHRASE":     os.getenv("API_PASSPHRASE", ""),
-        # Bybit
+        # MEXC
+        "MEXC_KEY":           os.getenv("MEXC_KEY", ""),
+        "MEXC_SECRET":        os.getenv("MEXC_SECRET", ""),
+        "MEXC_LEVERAGE":      os.getenv("MEXC_LEVERAGE", "10"),
+        # Bybit (legacy)
         "BYBIT_KEY":          os.getenv("BYBIT_KEY", ""),
         "BYBIT_SECRET":       os.getenv("BYBIT_SECRET", ""),
-        "BYBIT_DEMO":         os.getenv("BYBIT_DEMO", "false"),  # demo trading (api-demo.bybit.com)
+        "BYBIT_DEMO":         os.getenv("BYBIT_DEMO", "false"),
         "BYBIT_TESTNET":      os.getenv("BYBIT_TESTNET", "false"),
         "BYBIT_LEVERAGE":     os.getenv("BYBIT_LEVERAGE", "10"),
-        "BYBIT_MAX_RISK":     os.getenv("BYBIT_MAX_RISK", "5"),     # max USDT risk per trade (SL exposure)
+        "BYBIT_MAX_RISK":     os.getenv("BYBIT_MAX_RISK", "5"),
         "TELEGRAM_ADMIN_ID": os.getenv("TELEGRAM_ADMIN_ID", ""),
         "ADMIN_BOT_TOKEN":   os.getenv("ADMIN_BOT_TOKEN", ""),
         # Gate.io
