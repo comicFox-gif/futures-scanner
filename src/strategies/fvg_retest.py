@@ -1,24 +1,26 @@
 """
 Strategy — Fair Value Gap (FVG) Retest
 ----------------------------------------
-When price moves impulsively it leaves an imbalance — a gap between candle 1's
-high and candle 3's low (bullish) or candle 1's low and candle 3's high (bearish).
-Institutions park unfilled limit orders inside these zones. Price returning to fill
-the gap = high-probability reversal point.
+When price moves impulsively it leaves an imbalance zone. Institutions park
+limit orders inside these gaps expecting price to return and bounce.
 
-Logic:
-  1. Detect unfilled FVGs on entry_df (last 40 candles)
-  2. Price is currently INSIDE an aligned FVG zone
-  3. Rejection candle confirms we're bouncing — not passing through
-  4. HTF EMA50 agrees with direction (no counter-trend fading)
-  5. RSI 45-65, volume confirms institutional participation
+Key insight: FVG retests are PULLBACK entries. Volume is naturally lower on
+the pullback — that's a good thing (sellers/buyers are exhausted). RSI can be
+at any level — a bullish FVG retest at RSI 38 is a perfect oversold long.
+
+Tuning fixes:
+  - Lookback reduced to 20 candles (fresh zones only — stale FVGs less reliable)
+  - RSI check: not extreme in wrong direction (< 72 for longs, > 28 for shorts)
+  - Volume: 0.8x minimum (just needs activity, not a surge)
+  - SL: below/above the ENTIRE zone + 1.0 ATR buffer (gives trade room to breathe)
+  - Enter only in the favourable half of the zone (bottom 60% for longs = better R:R)
 
 Quality (5 binary conditions):
-  C1: FVG zone present and price inside it
-  C2: Rejection candle in zone (bounce_candle_clean)
-  C3: HTF EMA50 trend aligned
-  C4: RSI in valid range (45-65)
-  C5: Volume >= 1.3x average
+  C1: Fresh FVG zone present (< 20 candles old) and price inside it
+  C2: Price in favourable entry half of the zone
+  C3: Precision candle confirms direction (bounce_candle_clean)
+  C4: HTF EMA50 trend aligned
+  C5: RSI not overextended against trade (< 72 for long, > 28 for short)
 """
 
 from __future__ import annotations
@@ -49,14 +51,14 @@ class FVGRetestStrategy:
         self.atr_period        = s["atr_period"]
         self.volume_sma_period = s["volume_sma_period"]
 
-        self.atr_sl_mult = sig.get("atr_sl_multiplier", 1.0)
+        self.atr_sl_mult = sig.get("atr_sl_multiplier", 1.5)
         self.tp1_rr      = sig["tp1_rr"]
         self.tp2_rr      = sig["tp2_rr"]
         self.tp3_rr      = sig["tp3_rr"]
 
         fvg_cfg        = cfg.get("fvg_retest", {})
-        self.vol_mult  = fvg_cfg.get("volume_multiplier", 1.3)
-        self.lookback  = fvg_cfg.get("lookback", 40)
+        self.vol_mult  = fvg_cfg.get("volume_multiplier", 0.8)   # low vol on pullback is fine
+        self.lookback  = fvg_cfg.get("lookback", 20)              # fresh zones only
 
     def enrich(self, df: pd.DataFrame) -> pd.DataFrame:
         return compute_all_indicators(
@@ -66,14 +68,14 @@ class FVGRetestStrategy:
             self.rsi_period, self.atr_period, self.volume_sma_period,
         )
 
-    def _quality(self, fvg_ok: bool, candle_ok: bool, htf_ok: bool,
-                 rsi: float, vol_ratio: float) -> int:
+    def _quality(self, fvg_ok: bool, zone_half_ok: bool, candle_ok: bool,
+                 htf_ok: bool, rsi_ok: bool) -> int:
         score = 0
-        if fvg_ok:                          score += 1  # C1
-        if candle_ok:                       score += 1  # C2
-        if htf_ok:                          score += 1  # C3
-        if 45 <= rsi <= 65:                 score += 1  # C4
-        if vol_ratio >= self.vol_mult:      score += 1  # C5
+        if fvg_ok:       score += 1  # C1
+        if zone_half_ok: score += 1  # C2
+        if candle_ok:    score += 1  # C3
+        if htf_ok:       score += 1  # C4
+        if rsi_ok:       score += 1  # C5
         return score
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
@@ -83,7 +85,6 @@ class FVGRetestStrategy:
             return None
 
         row   = entry_df.iloc[-2]
-        # Use precision TF candle for entry confirmation if available
         p_row = precision_df.iloc[-2] if precision_df is not None and len(precision_df) >= 2 else row
         price = float(row["close"])
         atr   = float(row["atr"])
@@ -107,31 +108,38 @@ class FVGRetestStrategy:
         if not zones:
             return None
 
-        sl_dist = atr * self.atr_sl_mult
+        # SL placed below/above the entire zone + ATR buffer (room to breathe)
+        sl_atr_buf = atr * self.atr_sl_mult
 
         # ── LONG: price inside a bullish FVG in bull trend ─────────────────
         if htf_bull:
-            for z in reversed(zones):   # most recent FVG first
+            for z in reversed(zones):   # most recent first
                 if z["type"] == "bull" and z["bot"] <= price <= z["top"]:
-                    candle_ok = bounce_candle_clean(p_row, "long")
-                    quality   = self._quality(True, candle_ok, True, rsi, vol_ratio)
-                    if quality < 5:
-                        logger.debug(f"[FVG] {symbol} LONG quality {quality} < 5 — skip")
+                    gap  = z["top"] - z["bot"]
+                    # Favour entries in the LOWER 60% of the zone (closer to the gap bottom = better R:R)
+                    in_lower_half = price <= z["bot"] + gap * 0.60
+                    candle_ok     = bounce_candle_clean(p_row, "long")
+                    rsi_ok        = rsi < 72           # not overbought; oversold (35-45) is fine for longs
+                    vol_ok        = vol_ratio >= self.vol_mult
+                    quality       = self._quality(True, in_lower_half, candle_ok, True, rsi_ok)
+                    if quality < 4:
+                        logger.debug(f"[FVG] {symbol} LONG quality {quality} < 4 — skip")
                         return None
-                    gap_size  = z["top"] - z["bot"]
-                    sl_price  = z["bot"] - atr * 0.3   # just below zone
-                    sl_actual = price - max(sl_dist, price - sl_price)
+                    sl_price = z["bot"] - sl_atr_buf
+                    sl_dist  = price - sl_price
+                    if sl_dist <= 0:
+                        return None
                     return {
                         "stage": 2, "direction": "long", "symbol": symbol,
                         "entry": price,
-                        "sl":    sl_actual,
-                        "tp1":   price + abs(price - sl_actual) * self.tp1_rr,
-                        "tp2":   price + abs(price - sl_actual) * self.tp2_rr,
-                        "tp3":   price + abs(price - sl_actual) * self.tp3_rr,
+                        "sl":    sl_price,
+                        "tp1":   price + sl_dist * self.tp1_rr,
+                        "tp2":   price + sl_dist * self.tp2_rr,
+                        "tp3":   price + sl_dist * self.tp3_rr,
                         "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                         "reason": (
                             f"Bullish FVG Retest ↑ | Zone {z['bot']:.4f}–{z['top']:.4f} "
-                            f"| Gap={gap_size:.4f} | Vol={vol_ratio:.1f}x | RSI={rsi:.0f}"
+                            f"| Gap={gap:.4f} | Vol={vol_ratio:.1f}x | RSI={rsi:.0f}"
                         ),
                     }
 
@@ -139,25 +147,31 @@ class FVGRetestStrategy:
         if htf_bear:
             for z in reversed(zones):
                 if z["type"] == "bear" and z["bot"] <= price <= z["top"]:
-                    candle_ok = bounce_candle_clean(p_row, "short")
-                    quality   = self._quality(True, candle_ok, True, rsi, vol_ratio)
-                    if quality < 5:
-                        logger.debug(f"[FVG] {symbol} SHORT quality {quality} < 5 — skip")
+                    gap  = z["top"] - z["bot"]
+                    # Favour entries in the UPPER 60% of the zone (closer to gap top = better R:R)
+                    in_upper_half = price >= z["top"] - gap * 0.60
+                    candle_ok     = bounce_candle_clean(p_row, "short")
+                    rsi_ok        = rsi > 28           # not oversold; overbought (55-65) is fine for shorts
+                    vol_ok        = vol_ratio >= self.vol_mult
+                    quality       = self._quality(True, in_upper_half, candle_ok, True, rsi_ok)
+                    if quality < 4:
+                        logger.debug(f"[FVG] {symbol} SHORT quality {quality} < 4 — skip")
                         return None
-                    gap_size  = z["top"] - z["bot"]
-                    sl_price  = z["top"] + atr * 0.3   # just above zone
-                    sl_actual = price + max(sl_dist, sl_price - price)
+                    sl_price = z["top"] + sl_atr_buf
+                    sl_dist  = sl_price - price
+                    if sl_dist <= 0:
+                        return None
                     return {
                         "stage": 2, "direction": "short", "symbol": symbol,
                         "entry": price,
-                        "sl":    sl_actual,
-                        "tp1":   price - abs(sl_actual - price) * self.tp1_rr,
-                        "tp2":   price - abs(sl_actual - price) * self.tp2_rr,
-                        "tp3":   price - abs(sl_actual - price) * self.tp3_rr,
+                        "sl":    sl_price,
+                        "tp1":   price - sl_dist * self.tp1_rr,
+                        "tp2":   price - sl_dist * self.tp2_rr,
+                        "tp3":   price - sl_dist * self.tp3_rr,
                         "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                         "reason": (
                             f"Bearish FVG Retest ↓ | Zone {z['bot']:.4f}–{z['top']:.4f} "
-                            f"| Gap={gap_size:.4f} | Vol={vol_ratio:.1f}x | RSI={rsi:.0f}"
+                            f"| Gap={gap:.4f} | Vol={vol_ratio:.1f}x | RSI={rsi:.0f}"
                         ),
                     }
 

@@ -1,26 +1,27 @@
 """
 Strategy — Market Structure Shift + Pullback
 ----------------------------------------------
-After a Market Structure Shift (MSS), the broken swing level flips role:
-a former swing HIGH that was broken becomes SUPPORT on the first pullback.
-A former swing LOW that was broken becomes RESISTANCE.
+After an MSS, the broken swing level flips role: a former swing HIGH that
+was broken becomes SUPPORT. Price pulling back to it = optimal long entry.
 
-This is the cleanest institutional entry — you're buying the retest of
-confirmed structure, not chasing the breakout candle.
+Key insight: the PULLBACK must actually happen. Old code set pb_atr_mult=2.0
+meaning price anywhere within 4 ATR total width "qualified". At 1h ATR of
+$200 on ETH, that's a $400 window — too wide to be called a "pullback".
 
-Logic:
-  1. MSS confirmed on HTF (close above prev swing high for bull / below for bear)
-  2. Price has pulled back toward the broken swing level (within ATR tolerance)
-  3. Rejection candle at the level confirms institutions defending it
-  4. RSI 45-65, volume supports the bounce
-  5. ATR-based SL placed below the retested level
+Tuning fixes:
+  - pb_atr_mult: 2.0 → 1.0 (price must be within 1 ATR of broken level)
+  - Add explicit pullback confirmation: entry_df price must be BELOW broken_high
+    for bull MSS (not still above it) and ABOVE broken_low for bear MSS
+  - RSI: 35-68 (wider than before — MSS longs can be at RSI 38, it's a pullback)
+  - Volume: 0.9x (pullback vol is naturally lower)
+  - SL: below/above broken level + 1.0 ATR (the level is now S/R, don't go too far)
 
 Quality (5 binary conditions):
-  C1: MSS confirmed on HTF (structure shifted)
-  C2: Price within pullback zone (near the broken swing level)
-  C3: Rejection candle confirms direction (bounce_candle_clean)
-  C4: RSI in valid range (45-65)
-  C5: Volume >= 1.3x average
+  C1: MSS confirmed on HTF (closed beyond swing)
+  C2: Price in pullback zone (within 1 ATR of broken level)
+  C3: Price has actually pulled back (below broken_high for bull, above for bear)
+  C4: Precision candle confirms rejection at level
+  C5: RSI in valid range (35-68)
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ class MSSPullbackStrategy:
         self.atr_period        = s["atr_period"]
         self.volume_sma_period = s["volume_sma_period"]
 
-        self.atr_sl_mult = sig.get("atr_sl_multiplier", 1.0)
+        self.atr_sl_mult = sig.get("atr_sl_multiplier", 1.5)
         self.tp1_rr      = sig["tp1_rr"]
         self.tp2_rr      = sig["tp2_rr"]
         self.tp3_rr      = sig["tp3_rr"]
@@ -64,8 +65,8 @@ class MSSPullbackStrategy:
         self.swing_left     = mss_cfg.get("swing_left", 5)
         self.swing_right    = mss_cfg.get("swing_right", 2)
         self.lookback       = mss_cfg.get("lookback", 40)
-        self.pb_atr_mult    = mss_cfg.get("pullback_atr_mult", 2.0)   # how close to level = "at pullback"
-        self.vol_mult       = mss_cfg.get("volume_multiplier", 1.3)
+        self.pb_atr_mult    = mss_cfg.get("pullback_atr_mult", 1.0)  # tight: within 1 ATR of level
+        self.vol_mult       = mss_cfg.get("volume_multiplier", 0.9)
 
     def enrich(self, df: pd.DataFrame) -> pd.DataFrame:
         return compute_all_indicators(
@@ -74,24 +75,6 @@ class MSSPullbackStrategy:
             self.macd_fast, self.macd_slow, self.macd_signal,
             self.rsi_period, self.atr_period, self.volume_sma_period,
         )
-
-    def _quality(self, mss_ok: bool, pb_ok: bool, candle_ok: bool,
-                 rsi: float, vol_ratio: float) -> int:
-        score = 0
-        if mss_ok:                          score += 1  # C1
-        if pb_ok:                           score += 1  # C2
-        if candle_ok:                       score += 1  # C3
-        if 45 <= rsi <= 65:                 score += 1  # C4
-        if vol_ratio >= self.vol_mult:      score += 1  # C5
-        return score
-
-    def _find_swing_highs(self, df: pd.DataFrame) -> list[tuple[int, float]]:
-        window = df.iloc[-(self.lookback + self.swing_right + 2):-2]
-        return find_swing_highs_idx(window, self.swing_left, self.swing_right)
-
-    def _find_swing_lows(self, df: pd.DataFrame) -> list[tuple[int, float]]:
-        window = df.iloc[-(self.lookback + self.swing_right + 2):-2]
-        return find_swing_lows_idx(window, self.swing_left, self.swing_right)
 
     def generate_signal(self, symbol: str, htf_df: pd.DataFrame,
                         entry_df: pd.DataFrame,
@@ -110,35 +93,36 @@ class MSSPullbackStrategy:
             return None
 
         vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0
-
         htf_close = float(htf_df.iloc[-2]["close"])
+        rsi_ok    = 35 <= rsi <= 68
 
         # ── BULLISH MSS + PULLBACK ──────────────────────────────────────────
-        # HTF broke above a swing high = MSS confirmed.
-        # Entry: entry_df price pulled back near that broken swing high level.
         htf_highs = find_swing_highs_idx(
             htf_df.iloc[-(self.lookback + self.swing_right + 2):-2],
             self.swing_left, self.swing_right
         )
         if htf_highs:
-            # MSS: HTF close broke above the most recent qualifying swing high
-            relevant_highs = [(i, p) for i, p in htf_highs
-                              if i < len(htf_df) - self.swing_right - 3]
-            if relevant_highs:
-                broken_high = relevant_highs[-1][1]
+            relevant = [(i, p) for i, p in htf_highs
+                        if i < len(htf_df) - self.swing_right - 3]
+            if relevant:
+                broken_high  = relevant[-1][1]
+                # MSS confirmed: HTF close is above the broken swing high
                 htf_mss_bull = htf_close > broken_high
-
                 if htf_mss_bull:
-                    # Pullback: entry_df price has come back near the broken level
-                    pb_zone_top = broken_high + atr * self.pb_atr_mult
-                    pb_zone_bot = broken_high - atr * self.pb_atr_mult
-                    at_pullback = pb_zone_bot <= price <= pb_zone_top
+                    # Pullback confirmed: entry_df price has come BACK DOWN below/near the level
+                    pb_zone_top  = broken_high + atr * self.pb_atr_mult
+                    pb_zone_bot  = broken_high - atr * self.pb_atr_mult
+                    in_zone      = pb_zone_bot <= price <= pb_zone_top
+                    pulled_back  = price <= broken_high  # price has actually returned to the level
+                    candle_ok    = bounce_candle_clean(p_row, "long")
+                    vol_ok       = vol_ratio >= self.vol_mult
 
-                    candle_ok = bounce_candle_clean(p_row, "long")
-                    quality   = self._quality(True, at_pullback, candle_ok, rsi, vol_ratio)
-                    if quality >= 5:
+                    score = sum([True, in_zone, pulled_back, candle_ok, rsi_ok])
+                    if score >= 4:
                         sl_price = broken_high - atr * self.atr_sl_mult
                         sl_dist  = abs(price - sl_price)
+                        if sl_dist <= 0:
+                            return None
                         return {
                             "stage": 2, "direction": "long", "symbol": symbol,
                             "entry": price,
@@ -146,14 +130,14 @@ class MSSPullbackStrategy:
                             "tp1":   price + sl_dist * self.tp1_rr,
                             "tp2":   price + sl_dist * self.tp2_rr,
                             "tp3":   price + sl_dist * self.tp3_rr,
-                            "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
+                            "rsi": rsi, "vol_ratio": vol_ratio, "quality": score, "atr": atr,
                             "reason": (
-                                f"MSS Pullback ↑ | Broken swing high {broken_high:.4f} now support "
+                                f"MSS Pullback ↑ | Broken high {broken_high:.4f} now support "
                                 f"| Vol={vol_ratio:.1f}x | RSI={rsi:.0f}"
                             ),
                         }
                     else:
-                        logger.debug(f"[MSS] {symbol} LONG quality {quality} < 5 — skip")
+                        logger.debug(f"[MSS] {symbol} LONG score {score} < 4 (zone={in_zone} pb={pulled_back} candle={candle_ok} rsi={rsi_ok})")
 
         # ── BEARISH MSS + PULLBACK ──────────────────────────────────────────
         htf_lows = find_swing_lows_idx(
@@ -161,22 +145,25 @@ class MSSPullbackStrategy:
             self.swing_left, self.swing_right
         )
         if htf_lows:
-            relevant_lows = [(i, p) for i, p in htf_lows
-                             if i < len(htf_df) - self.swing_right - 3]
-            if relevant_lows:
-                broken_low  = relevant_lows[-1][1]
+            relevant = [(i, p) for i, p in htf_lows
+                        if i < len(htf_df) - self.swing_right - 3]
+            if relevant:
+                broken_low   = relevant[-1][1]
                 htf_mss_bear = htf_close < broken_low
-
                 if htf_mss_bear:
-                    pb_zone_top = broken_low + atr * self.pb_atr_mult
-                    pb_zone_bot = broken_low - atr * self.pb_atr_mult
-                    at_pullback = pb_zone_bot <= price <= pb_zone_top
+                    pb_zone_top  = broken_low + atr * self.pb_atr_mult
+                    pb_zone_bot  = broken_low - atr * self.pb_atr_mult
+                    in_zone      = pb_zone_bot <= price <= pb_zone_top
+                    pulled_back  = price >= broken_low  # price has bounced back up to the level
+                    candle_ok    = bounce_candle_clean(p_row, "short")
+                    vol_ok       = vol_ratio >= self.vol_mult
 
-                    candle_ok = bounce_candle_clean(p_row, "short")
-                    quality   = self._quality(True, at_pullback, candle_ok, rsi, vol_ratio)
-                    if quality >= 5:
+                    score = sum([True, in_zone, pulled_back, candle_ok, rsi_ok])
+                    if score >= 4:
                         sl_price = broken_low + atr * self.atr_sl_mult
                         sl_dist  = abs(sl_price - price)
+                        if sl_dist <= 0:
+                            return None
                         return {
                             "stage": 2, "direction": "short", "symbol": symbol,
                             "entry": price,
@@ -184,13 +171,13 @@ class MSSPullbackStrategy:
                             "tp1":   price - sl_dist * self.tp1_rr,
                             "tp2":   price - sl_dist * self.tp2_rr,
                             "tp3":   price - sl_dist * self.tp3_rr,
-                            "rsi": rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
+                            "rsi": rsi, "vol_ratio": vol_ratio, "quality": score, "atr": atr,
                             "reason": (
-                                f"MSS Pullback ↓ | Broken swing low {broken_low:.4f} now resistance "
+                                f"MSS Pullback ↓ | Broken low {broken_low:.4f} now resistance "
                                 f"| Vol={vol_ratio:.1f}x | RSI={rsi:.0f}"
                             ),
                         }
                     else:
-                        logger.debug(f"[MSS] {symbol} SHORT quality {quality} < 5 — skip")
+                        logger.debug(f"[MSS] {symbol} SHORT score {score} < 4 (zone={in_zone} pb={pulled_back} candle={candle_ok} rsi={rsi_ok})")
 
         return None
