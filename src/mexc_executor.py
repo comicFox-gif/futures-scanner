@@ -31,15 +31,26 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import requests
 
 logger = logging.getLogger("futures_bot.mexc")
 
 BASE = "https://contract.mexc.com"
+
+
+def _no_sci(json_str: str) -> str:
+    """Replace scientific-notation numbers in a JSON string with fixed decimal notation.
+    e.g. 3.6917667e-06 → 0.0000036917667  (MEXC rejects sci-notation in order bodies)
+    """
+    def fix(m: re.Match) -> str:
+        return format(Decimal(m.group(0)), 'f')
+    return re.sub(r'-?\d+(?:\.\d+)?[eE][+-]?\d+', fix, json_str)
 
 
 class MexcExecutor:
@@ -57,13 +68,7 @@ class MexcExecutor:
         self._last_order:    dict[str, datetime] = {}
         self._order_cooldown_min = 20
 
-        # Proxy support — set MEXC_PROXY env var to route around datacenter IP blocks
-        # Format: http://user:pass@host:port  or  socks5://user:pass@host:port
-        proxy_url = os.getenv("MEXC_PROXY", "")
-        self._proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        if proxy_url:
-            host = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url.split("//")[-1]
-            logger.info(f"[MEXC] Proxy configured: {host}")
+        self._proxies = None
 
         if not self.enabled:
             logger.info("[MEXC] No API keys — executor disabled")
@@ -108,7 +113,7 @@ class MexcExecutor:
         return data
 
     def _post(self, path: str, body: dict) -> dict:
-        body_str = json.dumps(body, separators=(",", ":"))
+        body_str = _no_sci(json.dumps(body, separators=(",", ":")))
         resp = requests.post(
             BASE + path,
             headers=self._headers(body_str),
@@ -163,7 +168,15 @@ class MexcExecutor:
         return spec
 
     def _round_price(self, price: float, scale: int) -> float:
-        return round(price, scale)
+        """Round price to scale decimal places, auto-extending for sub-cent prices."""
+        if price <= 0:
+            return 0.0
+        rounded = round(price, scale)
+        if rounded == 0.0:
+            # scale too small for this price — use enough places for 4 significant figures
+            needed = -int(math.floor(math.log10(abs(price)))) + 4
+            rounded = round(price, max(scale, needed))
+        return rounded
 
     # ------------------------------------------------------------------
     # Balance
