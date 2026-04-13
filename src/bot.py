@@ -34,7 +34,7 @@ from src.strategies.ob_retest import OBRetestStrategy
 from src.strategies.mss_pullback import MSSPullbackStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
-from src.bybit_executor import BybitExecutor
+from src.mexc_executor import MexcExecutor
 from src.state_manager import save_state, load_state
 from src.confluence import score_confluence
 
@@ -102,15 +102,13 @@ class Bot:
             forex_symbols=set(cfg.get("forex_symbols", [])),
         )
         self.exchange    = self._init_exchange(cfg, env)
-        self.bybit       = BybitExecutor(
-            api_key       = env.get("BYBIT_KEY", ""),
-            api_secret    = env.get("BYBIT_SECRET", ""),
-            demo          = env.get("BYBIT_DEMO", "false").lower() == "true",
-            testnet       = env.get("BYBIT_TESTNET", "false").lower() == "true",
-            leverage      = int(env.get("BYBIT_LEVERAGE", "10")),
+        self.bybit       = MexcExecutor(
+            api_key       = env.get("MEXC_KEY", ""),
+            api_secret    = env.get("MEXC_SECRET", ""),
+            leverage      = int(env.get("MEXC_LEVERAGE", "10")),
             risk_pct      = self.risk_pct,
             max_positions = 10,
-            max_risk_usdt = float(env.get("BYBIT_MAX_RISK", "10")),
+            max_risk_usdt = float(env.get("MEXC_MAX_RISK", "10")),
         )
         self.pair_selector = PairSelector(self.exchange, cfg)
 
@@ -169,7 +167,7 @@ class Bot:
 
     def _init_exchange(self, cfg: dict, env: dict):
         exchange_id = env.get("EXCHANGE", cfg.get("exchange", "bybit"))
-        # Bybit uses "linear" for USDT perps; OKX uses "swap"
+        # MEXC uses "linear" for USDT perps; OKX uses "swap"
         type_map    = {"bybit": "linear", "okx": "swap"}
         default_type = type_map.get(exchange_id, "linear")
         api_key    = env.get("API_KEY", "")
@@ -207,7 +205,7 @@ class Bot:
             return None
 
     def _fetch_live_price(self, symbol: str) -> float | None:
-        """Fetch the current live mark/last price from Bybit via ccxt."""
+        """Fetch the current live mark/last price from MEXC via ccxt."""
         try:
             ticker = self.exchange.fetch_ticker(symbol)
             price  = ticker.get("last") or ticker.get("close")
@@ -255,7 +253,7 @@ class Bot:
     def _paper_open(self, signal, strategy_name: str = "", live_price: float = None):
         """
         Open a simulated position from a confirmed signal.
-        live_price: live Bybit ticker price — used as the actual entry price.
+        live_price: live MEXC ticker price — used as the actual entry price.
                     Falls back to signal.entry_price if not provided.
         """
         self._check_session_resume()
@@ -278,7 +276,7 @@ class Bot:
         sig_tp3   = signal.tp3         if hasattr(signal, "tp3")         else signal["tp3"]
         direction = signal.direction   if hasattr(signal, "direction")   else signal["direction"]
 
-        # Use live Bybit price as entry; recalculate SL/TP offsets from it
+        # Use live MEXC price as entry; recalculate SL/TP offsets from it
         entry   = live_price if live_price else sig_entry
         sl_dist = abs(sig_entry - sig_sl)   # original distance from signal
         if sl_dist == 0:
@@ -430,7 +428,7 @@ class Bot:
             # Auto-close paper position
             if self.paper_enabled and symbol in self._paper_positions:
                 self._paper_close(symbol, current_price, "Whale exit")
-            # Auto-close Bybit live position
+            # Auto-close MEXC live position
             if self.bybit.enabled:
                 self.bybit.close_position(symbol, pos.direction)
 
@@ -495,7 +493,7 @@ class Bot:
                 be_note   = " → Break-Even" if new_sl == pos.entry_price else f" → {new_sl:.4f}"
                 logger.info(f"[PAPER] SL moved{be_note} for {symbol}")
                 self.notifier.paper_tp_hit(pos, 2, pos.tp2, 0, self.paper_balance)
-                # Move SL to break-even on Bybit
+                # Move SL to break-even on MEXC
                 if self.bybit.enabled:
                     self.bybit.move_sl_to_breakeven(symbol, pos.direction, pos.entry_price)
 
@@ -504,7 +502,7 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _forex_paper_open(self, signal, strategy_name: str = "", live_price: float = None):
-        """Open a forex paper position mirroring the confirmed signal using live Bybit price."""
+        """Open a forex paper position mirroring the confirmed signal using live MEXC price."""
         if not self.notifier.forex_enabled:
             return
         symbol = signal.symbol if hasattr(signal, "symbol") else signal.get("symbol", "")
@@ -591,7 +589,7 @@ class Bot:
             return 0, []
 
     def _bybit_order(self, sig, symbol: str = ""):
-        """Place order on Bybit. Accepts Signal dataclass or dict."""
+        """Place order on MEXC. Accepts Signal dataclass or dict."""
         if not self.bybit.enabled or self._session_paused:
             return
         if hasattr(sig, "entry_price"):   # Signal dataclass
@@ -837,7 +835,7 @@ class Bot:
                     logger.debug(f"Skipping {symbol}: insufficient candle history ({len(htf_df)} htf, {len(entry_df)} entry)")
                     continue
 
-                # Use live Bybit price for paper trade monitoring and entry.
+                # Use live MEXC price for paper trade monitoring and entry.
                 # Falls back to last closed candle only if ticker fetch fails.
                 live_price    = self._fetch_live_price(symbol)
                 current_price = live_price if live_price else float(entry_df.iloc[-2]["close"])
@@ -1394,14 +1392,14 @@ class Bot:
 
     def _send_control_panel(self, *_):
         """Send the control panel with current state and action buttons."""
-        bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"
+        bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"  # self.bybit is MexcExecutor
         paper_state = "🟢 ON" if self.paper_enabled else "🔴 OFF"
         open_pos    = len(self._paper_positions)
         balance     = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
         text = (
             f"🤖 <b>Bot Control Panel</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Bybit execution: {bybit_state}\n"
+            f"MEXC execution:  {bybit_state}\n"
             f"Paper trading:   {paper_state} ({balance})\n"
             f"Open positions:  {open_pos}\n"
             f"Mode: {self.mode.upper()}\n"
@@ -1434,12 +1432,12 @@ class Bot:
                     cb_id   = cb["id"]
                     if cb_data == "cmd_stop":
                         self.bybit.enabled = False
-                        logger.info("[CMD] Bybit execution DISABLED via button")
+                        logger.info("[CMD] MEXC execution DISABLED via button")
                         self._answer_callback(cb_id, "⏹ Trading stopped")
                         self._send_control_panel()
                     elif cb_data == "cmd_start":
                         self.bybit.enabled = True
-                        logger.info("[CMD] Bybit execution ENABLED via button")
+                        logger.info("[CMD] MEXC execution ENABLED via button")
                         self._answer_callback(cb_id, "▶️ Trading started")
                         self._send_control_panel()
                     elif cb_data == "cmd_status":
@@ -1534,7 +1532,7 @@ class Bot:
             logger.error(f"Pair selector failed on startup: {e} — using fallback list")
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
-        bybit_note = f" | Bybit: {'ON' if self.bybit.enabled else 'OFF'}"
+        bybit_note = f" | MEXC: {'ON' if self.bybit.enabled else 'OFF'}"
         strat_list = [
             "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence",
             "MACD Zero Cross", "🐋 Whale Momentum",
