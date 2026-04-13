@@ -251,13 +251,28 @@ class BybitExecutor:
             logger.warning(f"[BYBIT] qty rounds to 0 for {symbol} — skipping")
             return {}
 
+        # --- Notional cap: never exceed 80% of available margin × leverage ---
+        balance     = self._get_balance()
+        max_notional = balance * self.leverage * 0.80
+        qty_cap      = self._round_qty(max_notional / entry, spec)
+        if qty > qty_cap:
+            logger.warning(
+                f"[BYBIT] {symbol} qty={qty} notional≈{qty*entry:.2f} exceeds margin cap "
+                f"(balance={balance:.2f} lev={self.leverage}x) — capping to {qty_cap}"
+            )
+            qty = qty_cap
+
+        if qty <= 0:
+            logger.warning(f"[BYBIT] qty rounds to 0 after cap for {symbol} — skipping")
+            return {}
+
         sl_price  = self._round_price(sl, spec)
         tp_price  = self._round_price(tp3, spec)
         notional  = qty * entry
         effective_risk = qty * sl_dist
 
         logger.info(
-            f"[BYBIT] {symbol} | Risk=${effective_risk:.2f} "
+            f"[BYBIT] {symbol} | Balance=${balance:.2f} | Risk=${effective_risk:.2f} "
             f"| qty={qty} | notional≈{notional:.2f} | SL={sl_price} TP={tp_price}"
         )
 
@@ -265,27 +280,18 @@ class BybitExecutor:
             logger.error(f"[BYBIT] Aborting {symbol} — could not set leverage")
             return {}
 
-        # Limit price: 2 ticks inside market for near-instant fill with maker fees
-        tick = spec["tick_size"]
-        if side == "Buy":
-            limit_price = self._round_price(entry - tick * 2, spec)
-        else:
-            limit_price = self._round_price(entry + tick * 2, spec)
-
-        return self._submit_order(symbol, side, qty, limit_price, sl_price, tp_price, spec)
+        return self._submit_order(symbol, side, qty, sl_price, tp_price, spec)
 
     def _submit_order(self, symbol: str, side: str, qty: float,
-                      limit_price: str, sl_price: str, tp_price: str, spec: dict) -> dict:
-        """Submit a limit order 2 ticks from market; on 'too large' halve qty and retry once."""
+                      sl_price: str, tp_price: str, spec: dict) -> dict:
+        """Submit a market order; on 'too large' halve qty and retry once."""
         for attempt in range(2):
             try:
                 resp = self.session.place_order(
                     category="linear",
                     symbol=symbol,
                     side=side,
-                    orderType="Limit",
-                    price=limit_price,
-                    timeInForce="GTC",
+                    orderType="Market",
                     qty=str(qty),
                     positionIdx=0,
                     stopLoss=sl_price,
@@ -297,16 +303,16 @@ class BybitExecutor:
                 order_id = resp["result"]["orderId"]
                 self._last_order[symbol] = datetime.utcnow()
                 logger.info(
-                    f"[BYBIT] LIMIT ORDER {side.upper()} {symbol} qty={qty} "
-                    f"@ {limit_price} | SL={sl_price} | TP={tp_price} | id={order_id}"
+                    f"[BYBIT] MARKET ORDER {side.upper()} {symbol} qty={qty} "
+                    f"| SL={sl_price} | TP={tp_price} | id={order_id}"
                 )
                 return {"order_id": order_id}
 
             except Exception as e:
                 detail = str(getattr(e, "message", e))
-                if attempt == 0 and ("too large" in detail.lower() or "exceeds maximum" in detail.lower()):
+                if attempt == 0 and ("too large" in detail.lower() or "exceeds maximum" in detail.lower() or "not enough" in detail.lower()):
                     qty = self._round_qty(qty / 2, spec)
-                    logger.warning(f"[BYBIT] qty too large — halving to {qty} and retrying")
+                    logger.warning(f"[BYBIT] order rejected — halving qty to {qty} and retrying")
                     continue
                 logger.error(f"[BYBIT] place_order({symbol}): {detail}\n{traceback.format_exc()}")
                 return {}

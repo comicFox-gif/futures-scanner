@@ -157,7 +157,8 @@ class Bot:
         self._mode_rec_reason: str = ""             # human-readable reason for last rec
 
         # Confluence threshold — minimum score (1-5) to fire a signal
-        self._confluence_min: int = int(os.getenv("CONF_MIN", "2"))
+        self._confluence_min: int     = int(os.getenv("CONF_MIN", "2"))
+        self._confluence_enabled: bool = True   # toggle via Telegram button
 
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
@@ -869,27 +870,24 @@ class Bot:
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
                             sr_trap = "Bull Trap" in sr_sig.get("reason", "")
                             conf = self._confluence(htf_df, entry_df, sr_sig["direction"], sr_sig["entry"], sr_trap)
-                            if conf[0] >= self._confluence_min:
-                                if sr_trap:
-                                    self.notifier.confirmed_signal(sr_sig, self._strategy_label("S/R Bounce", sr_sig), q, confluence=conf)
-                                else:
-                                    self.notifier.sr_confirmed_signal(sr_sig, confluence=conf)
-                                self._bybit_order(sr_sig, symbol)
-                                if symbol not in self._forex_positions:
-                                    self._forex_paper_open(sr_sig, "S/R Bounce", live_price=current_price)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(
-                                        stage=2, direction=sr_sig["direction"], symbol=symbol,
-                                        entry_price=sr_sig["entry"], stop_loss=sr_sig["sl"],
-                                        tp1=sr_sig["tp1"], tp2=sr_sig["tp2"], tp3=sr_sig["tp3"],
-                                        atr=sr_sig["atr"], rsi=sr_sig["rsi"],
-                                        volume_ratio=sr_sig.get("vol_ratio", 0),
-                                        reason=sr_sig.get("reason", ""),
-                                    )
-                                    self._paper_open(dummy, "S/R Bounce", live_price=current_price)
+                            if sr_trap:
+                                self.notifier.confirmed_signal(sr_sig, self._strategy_label("S/R Bounce", sr_sig), q, confluence=conf)
                             else:
-                                logger.info(f"[SR] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                                self.notifier.sr_confirmed_signal(sr_sig, confluence=conf)
+                            self._bybit_order(sr_sig, symbol)
+                            if symbol not in self._forex_positions:
+                                self._forex_paper_open(sr_sig, "S/R Bounce", live_price=current_price)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(
+                                    stage=2, direction=sr_sig["direction"], symbol=symbol,
+                                    entry_price=sr_sig["entry"], stop_loss=sr_sig["sl"],
+                                    tp1=sr_sig["tp1"], tp2=sr_sig["tp2"], tp3=sr_sig["tp3"],
+                                    atr=sr_sig["atr"], rsi=sr_sig["rsi"],
+                                    volume_ratio=sr_sig.get("vol_ratio", 0),
+                                    reason=sr_sig.get("reason", ""),
+                                )
+                                self._paper_open(dummy, "S/R Bounce", live_price=current_price)
                         else:
                             logger.info(f"[SR] Skipped {symbol} — quality {q} < 5")
 
@@ -909,20 +907,17 @@ class Bot:
                         bb_trap = "Bull Trap" in bb_sig.get("reason", "")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
                             conf = self._confluence(htf_df, entry_df, bb_sig["direction"], bb_sig["entry"], bb_trap)
-                            if conf[0] >= self._confluence_min:
-                                self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q, confluence=conf)
-                                self._bybit_order(bb_sig, symbol)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(stage=2, direction=bb_sig["direction"], symbol=symbol,
-                                                entry_price=bb_sig["entry"], stop_loss=bb_sig["sl"],
-                                                tp1=bb_sig["tp1"], tp2=bb_sig["tp2"], tp3=bb_sig["tp3"],
-                                                atr=bb_sig["atr"], rsi=bb_sig["rsi"],
-                                                volume_ratio=bb_sig.get("vol_ratio", 0),
-                                                reason=bb_sig.get("reason", ""))
-                                    self._paper_open(dummy, "BB Breakout", live_price=current_price)
-                            else:
-                                logger.info(f"[BB] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                            self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q, confluence=conf)
+                            self._bybit_order(bb_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=bb_sig["direction"], symbol=symbol,
+                                            entry_price=bb_sig["entry"], stop_loss=bb_sig["sl"],
+                                            tp1=bb_sig["tp1"], tp2=bb_sig["tp2"], tp3=bb_sig["tp3"],
+                                            atr=bb_sig["atr"], rsi=bb_sig["rsi"],
+                                            volume_ratio=bb_sig.get("vol_ratio", 0),
+                                            reason=bb_sig.get("reason", ""))
+                                self._paper_open(dummy, "BB Breakout", live_price=current_price)
                         else:
                             if self._session_paused:                               reason = "paused"
                             elif q < 5:                                            reason = f"quality {q} < 5"
@@ -944,20 +939,17 @@ class Bot:
                         vp_trap = "Bull Trap" in vp_sig.get("reason", "")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
                             conf = self._confluence(htf_df, entry_df, vp_sig["direction"], vp_sig["entry"], vp_trap)
-                            if conf[0] >= self._confluence_min:
-                                self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q, confluence=conf)
-                                self._bybit_order(vp_sig, symbol)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(stage=2, direction=vp_sig["direction"], symbol=symbol,
-                                                entry_price=vp_sig["entry"], stop_loss=vp_sig["sl"],
-                                                tp1=vp_sig["tp1"], tp2=vp_sig["tp2"], tp3=vp_sig["tp3"],
-                                                atr=vp_sig["atr"], rsi=vp_sig["rsi"],
-                                                volume_ratio=vp_sig.get("vol_ratio", 0),
-                                                reason=vp_sig.get("reason", ""))
-                                    self._paper_open(dummy, "Break of Structure", live_price=current_price)
-                            else:
-                                logger.info(f"[BOS] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                            self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q, confluence=conf)
+                            self._bybit_order(vp_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=vp_sig["direction"], symbol=symbol,
+                                            entry_price=vp_sig["entry"], stop_loss=vp_sig["sl"],
+                                            tp1=vp_sig["tp1"], tp2=vp_sig["tp2"], tp3=vp_sig["tp3"],
+                                            atr=vp_sig["atr"], rsi=vp_sig["rsi"],
+                                            volume_ratio=vp_sig.get("vol_ratio", 0),
+                                            reason=vp_sig.get("reason", ""))
+                                self._paper_open(dummy, "Break of Structure", live_price=current_price)
                         else:
                             if self._session_paused:                               reason = "paused"
                             elif q < 5:                                            reason = f"quality {q} < 5"
@@ -978,20 +970,17 @@ class Bot:
                         )
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, rd_sig["direction"], rd_sig["entry"])
-                            if conf[0] >= self._confluence_min:
-                                self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q, confluence=conf)
-                                self._bybit_order(rd_sig, symbol)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
-                                                entry_price=rd_sig["entry"], stop_loss=rd_sig["sl"],
-                                                tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
-                                                atr=rd_sig["atr"], rsi=rd_sig["rsi"],
-                                                volume_ratio=rd_sig.get("vol_ratio", 0),
-                                                reason=rd_sig.get("reason", ""))
-                                    self._paper_open(dummy, "RSI Divergence", live_price=current_price)
-                            else:
-                                logger.info(f"[DIV] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                            self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q, confluence=conf)
+                            self._bybit_order(rd_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
+                                            entry_price=rd_sig["entry"], stop_loss=rd_sig["sl"],
+                                            tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
+                                            atr=rd_sig["atr"], rsi=rd_sig["rsi"],
+                                            volume_ratio=rd_sig.get("vol_ratio", 0),
+                                            reason=rd_sig.get("reason", ""))
+                                self._paper_open(dummy, "RSI Divergence", live_price=current_price)
                         else:
                             if self._session_paused:                              reason = "paused"
                             elif q < 5:                                           reason = f"quality {q} < 5"
@@ -1012,20 +1001,17 @@ class Bot:
                         )
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mz_sig["direction"], mz_sig["entry"])
-                            if conf[0] >= self._confluence_min:
-                                self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q, confluence=conf)
-                                self._bybit_order(mz_sig, symbol)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(stage=2, direction=mz_sig["direction"], symbol=symbol,
-                                                entry_price=mz_sig["entry"], stop_loss=mz_sig["sl"],
-                                                tp1=mz_sig["tp1"], tp2=mz_sig["tp2"], tp3=mz_sig["tp3"],
-                                                atr=mz_sig["atr"], rsi=mz_sig["rsi"],
-                                                volume_ratio=mz_sig.get("vol_ratio", 0),
-                                                reason=mz_sig.get("reason", ""))
-                                    self._paper_open(dummy, "MACD Zero Cross", live_price=current_price)
-                            else:
-                                logger.info(f"[MACD0] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                            self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q, confluence=conf)
+                            self._bybit_order(mz_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=mz_sig["direction"], symbol=symbol,
+                                            entry_price=mz_sig["entry"], stop_loss=mz_sig["sl"],
+                                            tp1=mz_sig["tp1"], tp2=mz_sig["tp2"], tp3=mz_sig["tp3"],
+                                            atr=mz_sig["atr"], rsi=mz_sig["rsi"],
+                                            volume_ratio=mz_sig.get("vol_ratio", 0),
+                                            reason=mz_sig.get("reason", ""))
+                                self._paper_open(dummy, "MACD Zero Cross", live_price=current_price)
                         else:
                             if self._session_paused:                              reason = "paused"
                             elif q < 5:                                           reason = f"quality {q} < 5"
@@ -1046,20 +1032,17 @@ class Bot:
                         )
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, wm_sig["direction"], wm_sig["entry"])
-                            if conf[0] >= self._confluence_min:
-                                self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q, confluence=conf)
-                                self._bybit_order(wm_sig, symbol)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(stage=2, direction=wm_sig["direction"], symbol=symbol,
-                                                entry_price=wm_sig["entry"], stop_loss=wm_sig["sl"],
-                                                tp1=wm_sig["tp1"], tp2=wm_sig["tp2"], tp3=wm_sig["tp3"],
-                                                atr=wm_sig["atr"], rsi=wm_sig["rsi"],
-                                                volume_ratio=wm_sig.get("vol_ratio", 0),
-                                                reason=wm_sig.get("reason", ""))
-                                    self._paper_open(dummy, "Whale Momentum", live_price=current_price)
-                            else:
-                                logger.info(f"[WHALE] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                            self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q, confluence=conf)
+                            self._bybit_order(wm_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=wm_sig["direction"], symbol=symbol,
+                                            entry_price=wm_sig["entry"], stop_loss=wm_sig["sl"],
+                                            tp1=wm_sig["tp1"], tp2=wm_sig["tp2"], tp3=wm_sig["tp3"],
+                                            atr=wm_sig["atr"], rsi=wm_sig["rsi"],
+                                            volume_ratio=wm_sig.get("vol_ratio", 0),
+                                            reason=wm_sig.get("reason", ""))
+                                self._paper_open(dummy, "Whale Momentum", live_price=current_price)
                         else:
                             if self._session_paused:                              reason = "paused"
                             elif q < 5:                                           reason = f"quality {q} < 5"
@@ -1081,20 +1064,17 @@ class Bot:
                         vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
                             conf = self._confluence(htf_df, entry_df, vwap_sig["direction"], vwap_sig["entry"], vwap_trap)
-                            if conf[0] >= self._confluence_min:
-                                self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q, confluence=conf)
-                                self._bybit_order(vwap_sig, symbol)
-                                if self.paper_enabled and symbol not in self._paper_positions:
-                                    from src.strategy import Signal as Sig
-                                    dummy = Sig(stage=2, direction=vwap_sig["direction"], symbol=symbol,
-                                                entry_price=vwap_sig["entry"], stop_loss=vwap_sig["sl"],
-                                                tp1=vwap_sig["tp1"], tp2=vwap_sig["tp2"], tp3=vwap_sig["tp3"],
-                                                atr=vwap_sig["atr"], rsi=vwap_sig["rsi"],
-                                                volume_ratio=vwap_sig.get("vol_ratio", 0),
-                                                reason=vwap_sig.get("reason", ""))
-                                    self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
-                            else:
-                                logger.info(f"[VWAP] {symbol} confluence {conf[0]} < min {self._confluence_min} — skip")
+                            self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q, confluence=conf)
+                            self._bybit_order(vwap_sig, symbol)
+                            if self.paper_enabled and symbol not in self._paper_positions:
+                                from src.strategy import Signal as Sig
+                                dummy = Sig(stage=2, direction=vwap_sig["direction"], symbol=symbol,
+                                            entry_price=vwap_sig["entry"], stop_loss=vwap_sig["sl"],
+                                            tp1=vwap_sig["tp1"], tp2=vwap_sig["tp2"], tp3=vwap_sig["tp3"],
+                                            atr=vwap_sig["atr"], rsi=vwap_sig["rsi"],
+                                            volume_ratio=vwap_sig.get("vol_ratio", 0),
+                                            reason=vwap_sig.get("reason", ""))
+                                self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
                         else:
                             if self._session_paused:                                   reason = "paused"
                             elif q < 5:                                                reason = f"quality {q} < 5"
@@ -1112,7 +1092,7 @@ class Bot:
                         logger.info(f"[FVG CONFIRMED] {fvg_sig['direction'].upper()} {symbol} @ {fvg_sig['entry']:.4f} | Q={q} | {fvg_sig['reason']}")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, fvg_sig["direction"], fvg_sig["entry"])
-                            if conf[0] >= self._confluence_min:
+                            if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(fvg_sig, self._strategy_label("FVG Retest", fvg_sig), q, confluence=conf)
                                 self._bybit_order(fvg_sig, symbol)
                                 if self.paper_enabled and symbol not in self._paper_positions:
@@ -1143,7 +1123,7 @@ class Bot:
                         logger.info(f"[SWEEP CONFIRMED] {sw_sig['direction'].upper()} {symbol} @ {sw_sig['entry']:.4f} | Q={q} | {sw_sig['reason']}")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, sw_sig["direction"], sw_sig["entry"])
-                            if conf[0] >= self._confluence_min:
+                            if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(sw_sig, self._strategy_label("Sweep Reversal", sw_sig), q, confluence=conf)
                                 self._bybit_order(sw_sig, symbol)
                                 if self.paper_enabled and symbol not in self._paper_positions:
@@ -1174,7 +1154,7 @@ class Bot:
                         logger.info(f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} @ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, ob_sig["direction"], ob_sig["entry"])
-                            if conf[0] >= self._confluence_min:
+                            if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(ob_sig, self._strategy_label("OB Retest", ob_sig), q, confluence=conf)
                                 self._bybit_order(ob_sig, symbol)
                                 if self.paper_enabled and symbol not in self._paper_positions:
@@ -1205,7 +1185,7 @@ class Bot:
                         logger.info(f"[MSS CONFIRMED] {mss_sig['direction'].upper()} {symbol} @ {mss_sig['entry']:.4f} | Q={q} | {mss_sig['reason']}")
                         if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mss_sig["direction"], mss_sig["entry"])
-                            if conf[0] >= self._confluence_min:
+                            if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(mss_sig, self._strategy_label("MSS Pullback", mss_sig), q, confluence=conf)
                                 self._bybit_order(mss_sig, symbol)
                                 if self.paper_enabled and symbol not in self._paper_positions:
@@ -1372,7 +1352,8 @@ class Bot:
         bybit_cb   = "cmd_stop" if self.bybit.enabled else "cmd_start"
         scalp_btn  = "⚡ Scalp ✓" if self.mode == "scalp" else "⚡ Scalp"
         swing_btn  = "📈 Swing ✓" if self.mode == "swing" else "📈 Swing"
-        c = self._confluence_min
+        c    = self._confluence_min
+        conf_toggle = "🎯 Confluence: ON ✅" if self._confluence_enabled else "🎯 Confluence: OFF ❌"
         return {
             "inline_keyboard": [
                 [{"text": bybit_btn, "callback_data": bybit_cb}],
@@ -1380,6 +1361,7 @@ class Bot:
                     {"text": scalp_btn, "callback_data": "cmd_scalp"},
                     {"text": swing_btn, "callback_data": "cmd_swing"},
                 ],
+                [{"text": conf_toggle, "callback_data": "cmd_conf_toggle"}],
                 [
                     {"text": f"{'✅' if c==1 else '·'} Min 1", "callback_data": "cmd_conf_1"},
                     {"text": f"{'✅' if c==2 else '·'} Min 2", "callback_data": "cmd_conf_2"},
@@ -1388,7 +1370,6 @@ class Bot:
                 [
                     {"text": f"{'✅' if c==4 else '·'} Min 4", "callback_data": "cmd_conf_4"},
                     {"text": f"{'✅' if c==5 else '·'} Min 5", "callback_data": "cmd_conf_5"},
-                    {"text": "🎯 Confluence", "callback_data": "cmd_status"},
                 ],
                 [{"text": "📊 Status", "callback_data": "cmd_status"}],
             ]
@@ -1424,7 +1405,7 @@ class Bot:
             f"Paper trading:   {paper_state} ({balance})\n"
             f"Open positions:  {open_pos}\n"
             f"Mode: {self.mode.upper()}\n"
-            f"Confluence min:  {self._confluence_min}/5"
+            f"Confluence: {'ON — min ' + str(self._confluence_min) + '/5' if self._confluence_enabled else 'OFF (all signals pass)'}"
         )
         self._admin_send(text, markup=self._control_panel_markup())
 
@@ -1494,6 +1475,12 @@ class Bot:
                             f"Reason: {reason}\n"
                             f"Trend: <b>4h</b>  →  Structure: <b>1h</b>  →  Precision: <b>15m</b>"
                         )
+                    elif cb_data == "cmd_conf_toggle":
+                        self._confluence_enabled = not self._confluence_enabled
+                        state = "ON" if self._confluence_enabled else "OFF"
+                        logger.info(f"[CMD] Confluence filtering {state}")
+                        self._answer_callback(cb_id, f"🎯 Confluence {state}")
+                        self._send_control_panel()
                     elif cb_data.startswith("cmd_conf_"):
                         try:
                             new_min = int(cb_data.split("_")[-1])
