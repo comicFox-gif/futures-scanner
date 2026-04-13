@@ -30,6 +30,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -55,6 +56,14 @@ class MexcExecutor:
         self._contract_cache: dict[str, dict] = {}
         self._last_order:    dict[str, datetime] = {}
         self._order_cooldown_min = 20
+
+        # Proxy support — set MEXC_PROXY env var to route around datacenter IP blocks
+        # Format: http://user:pass@host:port  or  socks5://user:pass@host:port
+        proxy_url = os.getenv("MEXC_PROXY", "")
+        self._proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        if proxy_url:
+            host = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url.split("//")[-1]
+            logger.info(f"[MEXC] Proxy configured: {host}")
 
         if not self.enabled:
             logger.info("[MEXC] No API keys — executor disabled")
@@ -89,6 +98,7 @@ class MexcExecutor:
         resp = requests.get(
             BASE + path + (f"?{qs}" if qs else ""),
             headers=self._headers(qs),
+            proxies=self._proxies,
             timeout=10,
         )
         resp.raise_for_status()
@@ -103,7 +113,8 @@ class MexcExecutor:
             BASE + path,
             headers=self._headers(body_str),
             data=body_str,
-            timeout=10,
+            proxies=self._proxies,
+            timeout=15,
         )
         if resp.status_code == 403:
             try:
