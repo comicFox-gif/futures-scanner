@@ -173,10 +173,17 @@ class SRBounceStrategy:
         atr   = float(row["atr"])
         rsi   = float(row["rsi"])
         vol_ratio = row["volume"] / row["volume_sma"] if row["volume_sma"] > 0 else 0
-        # Use precision TF ATR for tighter SL when available (scalp: 5m, swing: 15m)
-        p_atr = float(precision_df.iloc[-2]["atr"]) if precision_df is not None and len(precision_df) >= 2 else atr
-        if pd.isna(p_atr) or p_atr == 0:
-            p_atr = atr
+        # SL anchored to precision candle wick — placed just beyond actual high/low, not ATR-based
+        if precision_df is not None and len(precision_df) >= 2:
+            _p      = precision_df.iloc[-2]
+            _p_low  = float(_p["low"])
+            _p_high = float(_p["high"])
+        else:
+            _p_low  = price - atr * self.atr_sl_mult
+            _p_high = price + atr * self.atr_sl_mult
+        _sl_buf       = atr * 0.2
+        sl_dist_long  = max(price - (_p_low  - _sl_buf), atr * 0.3)
+        sl_dist_short = max((_p_high + _sl_buf) - price, atr * 0.3)
 
         # Detect key levels from 4H
         levels = find_key_levels(
@@ -231,31 +238,29 @@ class SRBounceStrategy:
                         logger.debug(f"[SR] {symbol} LONG blocked — buy-side liquidity sweep")
                         return None
                     if detect_bull_trap(entry_df, f"ema_{self.ema_slow}"):
-                        sl_dist = p_atr * self.atr_sl_mult
                         if bull_trap_short_confirmed(entry_df):
                             logger.debug(f"[SR] {symbol} bull trap → fading with SHORT")
                             return {
                                 "stage": 2, "direction": "short", "symbol": symbol,
-                                "entry": price, "sl": price + sl_dist,
-                                "tp1": price - sl_dist * self.tp1_rr,
-                                "tp2": price - sl_dist * self.tp2_rr,
-                                "tp3": price - sl_dist * self.tp3_rr,
+                                "entry": price, "sl": price + sl_dist_short,
+                                "tp1": price - sl_dist_short * self.tp1_rr,
+                                "tp2": price - sl_dist_short * self.tp2_rr,
+                                "tp3": price - sl_dist_short * self.tp3_rr,
                                 "rsi": rsi, "vol_ratio": vol_ratio, "quality": 5, "atr": atr,
                                 "reason": f"Bull Trap ↓ Fade | SR pump overextended | RSI={rsi:.0f}",
                             }
                         logger.debug(f"[SR] {symbol} LONG blocked — bull trap (no wick confirmation)")
                         return None
                     quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
-                    sl_dist  = atr * self.atr_sl_mult
                     score_tag = f"✅ {score+1}/5 conditions"
                     missing   = f" | Missing: {failed[0]}" if failed else ""
                     return {
                         "stage": 2, "direction": "long", "symbol": symbol,
                         "entry": price,
-                        "sl":    price - sl_dist,
-                        "tp1":   price + sl_dist * self.tp1_rr,
-                        "tp2":   price + sl_dist * self.tp2_rr,
-                        "tp3":   price + sl_dist * self.tp3_rr,
+                        "sl":    price - sl_dist_long,
+                        "tp1":   price + sl_dist_long * self.tp1_rr,
+                        "tp2":   price + sl_dist_long * self.tp2_rr,
+                        "tp3":   price + sl_dist_long * self.tp3_rr,
                         "rsi": rsi, "vol_ratio": vol_ratio,
                         "quality": quality,
                         "level_price": lv_price, "level_touches": lv_touches,
@@ -269,14 +274,13 @@ class SRBounceStrategy:
             elif approaching:
                 # Stage 1 warning — price getting close
                 if lv_touches >= self.sr_min_touches:
-                    sl_dist = p_atr * self.atr_sl_mult
                     return {
                         "stage": 1, "direction": "long", "symbol": symbol,
                         "entry": price,
-                        "sl":    lv_price - sl_dist,
-                        "tp1":   lv_price + sl_dist * self.tp1_rr,
-                        "tp2":   lv_price + sl_dist * self.tp2_rr,
-                        "tp3":   lv_price + sl_dist * self.tp3_rr,
+                        "sl":    lv_price - sl_dist_long,
+                        "tp1":   lv_price + sl_dist_long * self.tp1_rr,
+                        "tp2":   lv_price + sl_dist_long * self.tp2_rr,
+                        "tp3":   lv_price + sl_dist_long * self.tp3_rr,
                         "rsi": rsi, "vol_ratio": vol_ratio,
                         "quality": lv_touches,
                         "level_price": lv_price, "level_touches": lv_touches,
@@ -315,16 +319,15 @@ class SRBounceStrategy:
                         logger.debug(f"[SR] {symbol} SHORT blocked — sell-side liquidity sweep")
                         return None
                     quality  = self._quality_score(lv_strength, vol_ratio, wick_ratio, rsi)
-                    sl_dist  = atr * self.atr_sl_mult
                     score_tag = f"✅ {score+1}/5 conditions"
                     missing   = f" | Missing: {failed[0]}" if failed else ""
                     return {
                         "stage": 2, "direction": "short", "symbol": symbol,
                         "entry": price,
-                        "sl":    price + sl_dist,
-                        "tp1":   price - sl_dist * self.tp1_rr,
-                        "tp2":   price - sl_dist * self.tp2_rr,
-                        "tp3":   price - sl_dist * self.tp3_rr,
+                        "sl":    price + sl_dist_short,
+                        "tp1":   price - sl_dist_short * self.tp1_rr,
+                        "tp2":   price - sl_dist_short * self.tp2_rr,
+                        "tp3":   price - sl_dist_short * self.tp3_rr,
                         "rsi": rsi, "vol_ratio": vol_ratio,
                         "quality": quality,
                         "level_price": lv_price, "level_touches": lv_touches,
@@ -337,14 +340,13 @@ class SRBounceStrategy:
 
             elif approaching:
                 if lv_touches >= self.sr_min_touches:
-                    sl_dist = p_atr * self.atr_sl_mult
                     return {
                         "stage": 1, "direction": "short", "symbol": symbol,
                         "entry": price,
-                        "sl":    lv_price + sl_dist,
-                        "tp1":   lv_price - sl_dist * self.tp1_rr,
-                        "tp2":   lv_price - sl_dist * self.tp2_rr,
-                        "tp3":   lv_price - sl_dist * self.tp3_rr,
+                        "sl":    lv_price + sl_dist_short,
+                        "tp1":   lv_price - sl_dist_short * self.tp1_rr,
+                        "tp2":   lv_price - sl_dist_short * self.tp2_rr,
+                        "tp3":   lv_price - sl_dist_short * self.tp3_rr,
                         "rsi": rsi, "vol_ratio": vol_ratio,
                         "quality": lv_touches,
                         "level_price": lv_price, "level_touches": lv_touches,

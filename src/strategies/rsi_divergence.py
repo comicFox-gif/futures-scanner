@@ -125,11 +125,17 @@ class RSIDivergenceStrategy:
 
         vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0.0
         body = candle_body_ratio(entry_df)
-        # Use precision TF ATR for tighter SL when available (scalp: 5m, swing: 15m)
-        p_atr = float(precision_df.iloc[-2]["atr"]) if precision_df is not None and len(precision_df) >= 2 else atr
-        if pd.isna(p_atr) or p_atr == 0:
-            p_atr = atr
-        sl_dist = p_atr * self.atr_sl_mult
+        # SL anchored to precision candle wick — placed just beyond actual high/low, not ATR-based
+        if precision_df is not None and len(precision_df) >= 2:
+            _p      = precision_df.iloc[-2]
+            _p_low  = float(_p["low"])
+            _p_high = float(_p["high"])
+        else:
+            _p_low  = price - atr * self.atr_sl_mult
+            _p_high = price + atr * self.atr_sl_mult
+        _sl_buf       = atr * 0.2
+        sl_dist_long  = max(price - (_p_low  - _sl_buf), atr * 0.3)
+        sl_dist_short = max((_p_high + _sl_buf) - price, atr * 0.3)
 
         # HTF trend alignment from itf_df (used as trend frame)
         htf_row   = itf_df.iloc[-2]
@@ -158,10 +164,10 @@ class RSIDivergenceStrategy:
                         logger.debug(f"[RSI DIV] {symbol} bull trap → fading with SHORT")
                         return {
                             "stage": 2, "direction": "short", "symbol": symbol,
-                            "entry": price, "sl": price + sl_dist,
-                            "tp1": price - sl_dist * self.tp1_rr,
-                            "tp2": price - sl_dist * self.tp2_rr,
-                            "tp3": price - sl_dist * self.tp3_rr,
+                            "entry": price, "sl": price + sl_dist_short,
+                            "tp1": price - sl_dist_short * self.tp1_rr,
+                            "tp2": price - sl_dist_short * self.tp2_rr,
+                            "tp3": price - sl_dist_short * self.tp3_rr,
                             "rsi": rsi, "vol_ratio": vol_ratio, "quality": 5, "atr": atr,
                             "reason": f"Bull Trap ↓ Fade | RSI div pump overextended | RSI={rsi:.0f}",
                         }
@@ -171,10 +177,10 @@ class RSIDivergenceStrategy:
                 return {
                     "stage": 2, "direction": "long", "symbol": symbol,
                     "entry": price,
-                    "sl":    price - sl_dist,
-                    "tp1":   price + sl_dist * self.tp1_rr,
-                    "tp2":   price + sl_dist * self.tp2_rr,
-                    "tp3":   price + sl_dist * self.tp3_rr,
+                    "sl":    price - sl_dist_long,
+                    "tp1":   price + sl_dist_long * self.tp1_rr,
+                    "tp2":   price + sl_dist_long * self.tp2_rr,
+                    "tp3":   price + sl_dist_long * self.tp3_rr,
                     "rsi": curr_rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                     "reason": f"{div_reason} | MACD + reversal candle confirmed",
                 }
@@ -183,10 +189,10 @@ class RSIDivergenceStrategy:
             return {
                 "stage": 1, "direction": "long", "symbol": symbol,
                 "entry": price,
-                "sl":    price - sl_dist,
-                "tp1":   price + sl_dist * self.tp1_rr,
-                "tp2":   price + sl_dist * self.tp2_rr,
-                "tp3":   price + sl_dist * self.tp3_rr,
+                "sl":    price - sl_dist_long,
+                "tp1":   price + sl_dist_long * self.tp1_rr,
+                "tp2":   price + sl_dist_long * self.tp2_rr,
+                "tp3":   price + sl_dist_long * self.tp3_rr,
                 "rsi": curr_rsi, "vol_ratio": 0, "quality": 2, "atr": atr,
                 "reason": f"{div_reason} | Awaiting 15m confirmation",
             }
@@ -207,10 +213,10 @@ class RSIDivergenceStrategy:
                 return {
                     "stage": 2, "direction": "short", "symbol": symbol,
                     "entry": price,
-                    "sl":    price + sl_dist,
-                    "tp1":   price - sl_dist * self.tp1_rr,
-                    "tp2":   price - sl_dist * self.tp2_rr,
-                    "tp3":   price - sl_dist * self.tp3_rr,
+                    "sl":    price + sl_dist_short,
+                    "tp1":   price - sl_dist_short * self.tp1_rr,
+                    "tp2":   price - sl_dist_short * self.tp2_rr,
+                    "tp3":   price - sl_dist_short * self.tp3_rr,
                     "rsi": curr_rsi, "vol_ratio": vol_ratio, "quality": quality, "atr": atr,
                     "reason": f"{div_reason} | MACD + reversal candle confirmed",
                 }
@@ -218,10 +224,10 @@ class RSIDivergenceStrategy:
             return {
                 "stage": 1, "direction": "short", "symbol": symbol,
                 "entry": price,
-                "sl":    price + sl_dist,
-                "tp1":   price - sl_dist * self.tp1_rr,
-                "tp2":   price - sl_dist * self.tp2_rr,
-                "tp3":   price - sl_dist * self.tp3_rr,
+                "sl":    price + sl_dist_short,
+                "tp1":   price - sl_dist_short * self.tp1_rr,
+                "tp2":   price - sl_dist_short * self.tp2_rr,
+                "tp3":   price - sl_dist_short * self.tp3_rr,
                 "rsi": curr_rsi, "vol_ratio": 0, "quality": 2, "atr": atr,
                 "reason": f"{div_reason} | Awaiting 15m confirmation",
             }

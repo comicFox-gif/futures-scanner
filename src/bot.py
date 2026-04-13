@@ -70,7 +70,7 @@ class Bot:
         self.cfg = cfg
         self.tf_trend: str     = cfg["timeframe_trend"]
         self.tf_entry: str     = cfg["timeframe_entry"]
-        self.tf_precision: str = "5m" if self.mode == "scalp" else "15m"
+        self.tf_precision: str = "15m"  # 15m for both swing and scalp — 5m is too noisy
         self.lookback: int = cfg["strategy"]["lookback_candles"]
         self.poll_interval: int = cfg["bot"]["poll_interval_seconds"]
         self.daily_summary_hour: int = cfg["bot"].get("daily_summary_utc_hour", 0)
@@ -1449,8 +1449,8 @@ class Bot:
                         self.mode         = "scalp"
                         self.tf_trend     = "30m"
                         self.tf_entry     = "15m"
-                        self.tf_precision = "5m"
-                        logger.info("[CMD] Switched to SCALP mode (30m trend / 15m structure / 5m precision)")
+                        self.tf_precision = "15m"
+                        logger.info("[CMD] Switched to SCALP mode (30m trend / 15m structure / 15m precision)")
                         self._answer_callback(cb_id, "⚡ Scalp mode active")
                         self._send_control_panel()
                         reason = self._mode_rec_reason or "London/NY session open — high liquidity"
