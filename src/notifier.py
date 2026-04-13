@@ -247,7 +247,7 @@ class Notifier:
             f"{dir_tag}  •  <b>{symbol}</b>\n"
             f"Price  <code>{self._fmt(price)}</code>   RSI <code>{rsi:.0f}</code>\n"
             f"🛑 SL  <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
-            f"🏆 TP3 <code>{self._fmt(tp3)}</code>\n"
+            f"🏆 TP2 <code>{self._fmt(tp3)}</code>\n"
             f"{DLINE}\n"
             f"<i>{reason}</i>\n"
             f"<i>{self._ts()}</i>"
@@ -414,7 +414,7 @@ class Notifier:
             f"{DLINE}\n"
             f"{dir_tag}  •  <b>{pos.symbol}</b>\n"
             f"Entry  <code>{self._fmt(pos.entry_price)}</code>   SL  <code>{self._fmt(pos.stop_loss)}</code>  (-{sl_pct:.2f}%)\n"
-            f"TP1 <code>{self._fmt(pos.tp1)}</code>  TP2 <code>{self._fmt(pos.tp2)}</code>  TP3 <code>{self._fmt(pos.tp3)}</code>\n"
+            f"TP1 <code>{self._fmt(pos.tp1)}</code>  TP2 <code>{self._fmt(pos.tp2)}</code>\n"
             f"{DLINE}\n"
             f"Risk <code>${pos.margin_locked:.2f}</code>  ·  Avail <code>${available_balance:.2f}</code>  ·  Open <code>{open_count}</code>{session_line}"
         )
@@ -423,15 +423,15 @@ class Notifier:
         strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
         self.send(
             f"🎯 <b>[PAPER] TP{tp_level} — {pos.symbol}</b>{strat_tag}\n"
-            f"Price <code>{self._fmt(price)}</code>  →  TP3 <code>{self._fmt(pos.tp3)}</code>\n"
-            f"<i>Holding to TP3</i>"
+            f"Price <code>{self._fmt(price)}</code>  →  TP2 <code>{self._fmt(pos.tp2)}</code>\n"
+            f"<i>Holding to TP2</i>"
         )
 
     def paper_tp_hit(self, pos, tp_level: int, price: float, pnl: float, balance: float):
-        emojis = {2: "🎯🎯", 3: "🏆"}
+        emojis = {1: "🎯", 2: "🏆"}
         emoji  = emojis.get(tp_level, "🎯")
         strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
-        be_note = "\n🔒 BE activated — SL → entry  ·  Riding to TP3" if tp_level == 2 else ""
+        be_note = "\n🔒 BE activated — SL → entry  ·  Riding to TP2" if tp_level == 1 else ""
         self.send(
             f"{emoji} <b>[PAPER] TP{tp_level} — {pos.symbol}</b>{strat_tag}\n"
             f"Price <code>{self._fmt(price)}</code>   Balance <code>${balance:.2f}</code>{be_note}"
@@ -440,8 +440,10 @@ class Notifier:
     def paper_closed(self, pos, reason: str, exit_price: float,
                      total_pnl: float, balance: float, tp_level: int = 0,
                      stats=None):
-        if tp_level == 3:
+        if tp_level == 2:
             emoji = "🏆"
+        elif reason == "Whale exit":
+            emoji = "🐋"
         elif reason == "SL hit" and pos.be_activated:
             emoji = "🔒"
         elif reason == "SL hit":
@@ -460,7 +462,7 @@ class Notifier:
             stats_line = (
                 f"\n{DLINE}\n"
                 f"All-time  {stats['total']} trades  ·  Win <code>{win_pct:.0f}%</code>  ·  "
-                f"TP3 <code>{stats['tp3']}</code>  SL <code>{stats['sl']}</code>  BE <code>{stats['be_sl']}</code>"
+                f"🏆 TP2 <code>{stats['tp2']}</code>  🐋 Whale <code>{stats['whale']}</code>  🛑 SL <code>{stats['sl']}</code>  🔒 BE <code>{stats['be_sl']}</code>"
             )
 
         self.send(
@@ -487,13 +489,13 @@ class Notifier:
         if strategy_stats:
             ranked = sorted(
                 strategy_stats.items(),
-                key=lambda x: (x[1]["tp3"], x[1]["wins"] / max(x[1]["total"], 1)),
+                key=lambda x: (x[1]["tp2"], x[1]["wins"] / max(x[1]["total"], 1)),
                 reverse=True,
             )
             best_name, best = ranked[0]
             best_wr = best["wins"] / best["total"] * 100 if best["total"] > 0 else 0
             best_strat_line = (
-                f"\n🥇 <b>{best_name}</b>  TP3 <code>{best['tp3']}</code>  "
+                f"\n🥇 <b>{best_name}</b>  TP2 <code>{best['tp2']}</code>  "
                 f"Win <code>{best_wr:.0f}%</code>  ({best['total']} trades)"
             )
 
@@ -502,7 +504,7 @@ class Notifier:
             f"{LINE}\n"
             f"✅ <code>{wins}</code>W  ❌ <code>{losses}</code>L  "
             f"Win Rate <code>{win_pct:.0f}%</code>\n"
-            f"🏆 TP3 <code>{stats['tp3']}</code>  🛑 SL <code>{stats['sl']}</code>  🔒 BE <code>{stats['be_sl']}</code>\n"
+            f"🏆 TP2 <code>{stats['tp2']}</code>  🐋 Whale <code>{stats['whale']}</code>  🛑 SL <code>{stats['sl']}</code>  🔒 BE <code>{stats['be_sl']}</code>\n"
             f"{DLINE}\n"
             f"{pnl_emoji} Batch PnL  <code>{total_pnl:+.2f} USDT</code>\n"
             f"Balance  <code>${current_balance:.2f}</code>  ({bal_change:+.2f})\n"
@@ -521,13 +523,13 @@ class Notifier:
         if strategy_stats:
             ranked = sorted(
                 strategy_stats.items(),
-                key=lambda x: (x[1]["tp3"], x[1]["wins"] / max(x[1]["total"], 1)),
+                key=lambda x: (x[1]["tp2"], x[1]["wins"] / max(x[1]["total"], 1)),
                 reverse=True,
             )
             best_name, best = ranked[0]
             best_wr = best["wins"] / best["total"] * 100 if best["total"] > 0 else 0
             best_strat_line = (
-                f"\n🥇 <b>{best_name}</b>  TP3 <code>{best['tp3']}</code>  "
+                f"\n🥇 <b>{best_name}</b>  TP2 <code>{best['tp2']}</code>  "
                 f"Win <code>{best_wr:.0f}%</code>  ({best['total']} trades)"
             )
 
@@ -536,7 +538,7 @@ class Notifier:
             f"{LINE}\n"
             f"✅ <code>{wins}</code>W  ❌ <code>{losses}</code>L  "
             f"Win Rate <code>{win_pct:.0f}%</code>\n"
-            f"🏆 TP3 <code>{stats['tp3']}</code>  🛑 SL <code>{stats['sl']}</code>  🔒 BE <code>{stats['be_sl']}</code>\n"
+            f"🏆 TP2 <code>{stats['tp2']}</code>  🐋 Whale <code>{stats['whale']}</code>  🛑 SL <code>{stats['sl']}</code>  🔒 BE <code>{stats['be_sl']}</code>\n"
             f"{DLINE}\n"
             f"{pnl_emoji} Session PnL  <code>{total_pnl:+.2f} USDT</code>\n"
             f"Balance  <code>${current_balance:.2f}</code>  ({bal_change:+.2f})\n"
@@ -609,7 +611,7 @@ class Notifier:
             f"{DLINE}\n"
             f"{dir_tag}  •  <b>{pos.symbol}</b>\n"
             f"Entry  <code>{self._fmt_fx(pos.entry_price)}</code>   SL  <code>{self._fmt_fx(pos.stop_loss)}</code>  (-{sl_pct:.2f}%)\n"
-            f"TP1 <code>{self._fmt_fx(pos.tp1)}</code>  TP2 <code>{self._fmt_fx(pos.tp2)}</code>  TP3 <code>{self._fmt_fx(pos.tp3)}</code>\n"
+            f"TP1 <code>{self._fmt_fx(pos.tp1)}</code>  TP2 <code>{self._fmt_fx(pos.tp2)}</code>\n"
             f"{DLINE}\n"
             f"Risk <code>${pos.margin_locked:.2f}</code>  ·  Balance <code>${balance:.2f}</code>  ·  Open <code>{open_count}</code>"
         )
@@ -617,12 +619,12 @@ class Notifier:
     def forex_paper_tp_alert(self, pos, price: float, tp_level: int):
         self.send_forex(
             f"🎯 <b>TP{tp_level} — {pos.symbol}</b>\n"
-            f"Price <code>{self._fmt_fx(price)}</code>  →  TP3 <code>{self._fmt_fx(pos.tp3)}</code>  ·  <i>Holding</i>"
+            f"Price <code>{self._fmt_fx(price)}</code>  →  TP2 <code>{self._fmt_fx(pos.tp2)}</code>  ·  <i>Holding</i>"
         )
 
     def forex_paper_closed(self, pos, reason: str, exit_price: float,
                            total_pnl: float, balance: float, tp_level: int, stats: dict):
-        emoji   = "🏆" if tp_level == 3 else ("🛑" if reason == "SL hit" else "✅")
+        emoji   = "🏆" if tp_level == 2 else ("🐋" if reason == "Whale exit" else ("🛑" if reason == "SL hit" else "✅"))
         pct     = (exit_price - pos.entry_price) / pos.entry_price * 100
         if pos.direction == "short":
             pct = -pct
@@ -632,5 +634,5 @@ class Notifier:
             f"{DLINE}\n"
             f"Entry <code>{self._fmt_fx(pos.entry_price)}</code>  →  Exit <code>{self._fmt_fx(exit_price)}</code>  ({pct:+.2f}%)\n"
             f"PnL <code>{total_pnl:+.2f} USDT</code>  ·  Balance <code>${balance:.2f}</code>\n"
-            f"Stats  {stats['total']} trades  ·  Win <code>{win_pct:.0f}%</code>  ·  TP3 <code>{stats['tp3']}</code>  SL <code>{stats['sl']}</code>"
+            f"Stats  {stats['total']} trades  ·  Win <code>{win_pct:.0f}%</code>  ·  TP2 <code>{stats['tp2']}</code>  SL <code>{stats['sl']}</code>"
         )

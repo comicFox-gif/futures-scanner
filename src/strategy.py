@@ -658,42 +658,74 @@ class Strategy:
 
     def check_position(self, pos: Position, current_price: float) -> list[dict]:
         """
-        Check open paper position against current price.
+        Check open paper position against current live price.
         Returns list of action dicts to execute.
 
-        Simple schedule — notify at TP1/TP2, close all at TP3 or SL.
-        No partials, no BE move. User manages manually if needed.
+        2-level TP schedule (TP3 == TP2 in config so no separate TP3):
+          TP1 → close 50% at pos.tp1, move SL to break-even, notify
+          TP2 → close remaining 50% at pos.tp2 (final close), notify
+          SL  → close all at pos.stop_loss (updated to entry after TP1)
         """
         actions = []
 
         if pos.direction == "long":
+            # SL — close all at stop price (may be entry after TP1 BE move)
             if current_price <= pos.stop_loss:
-                actions.append({"action": "close_all", "reason": "SL hit"})
+                actions.append({
+                    "action": "close_all", "reason": "SL hit",
+                    "exit_price": pos.stop_loss,
+                })
                 return actions
-            if not pos.tp3_hit and current_price >= pos.tp3:
-                actions.append({"action": "close_all", "reason": "TP3 hit", "tp_level": 3})
-                pos.tp3_hit = True
-                return actions
+
+            # TP2 — final close (remaining 50%)
             if not pos.tp2_hit and current_price >= pos.tp2:
-                actions.append({"action": "notify_tp2"})
                 pos.tp2_hit = True
-            elif not pos.tp1_hit and current_price >= pos.tp1:
+                actions.append({
+                    "action": "close_all", "reason": "TP2 hit",
+                    "tp_level": 2, "exit_price": pos.tp2,
+                })
+                return actions
+
+            # TP1 — close 50%, move SL to break-even
+            if not pos.tp1_hit and current_price >= pos.tp1:
+                pos.tp1_hit      = True
+                pos.be_activated = True
+                close_size       = round(pos.size * 0.5, 6)
+                actions.append({
+                    "action": "close_partial", "size": close_size,
+                    "tp_level": 1, "exit_price": pos.tp1,
+                })
+                actions.append({"action": "move_sl", "new_sl": pos.entry_price})
                 actions.append({"action": "notify_tp1"})
-                pos.tp1_hit = True
 
         elif pos.direction == "short":
+            # SL
             if current_price >= pos.stop_loss:
-                actions.append({"action": "close_all", "reason": "SL hit"})
+                actions.append({
+                    "action": "close_all", "reason": "SL hit",
+                    "exit_price": pos.stop_loss,
+                })
                 return actions
-            if not pos.tp3_hit and current_price <= pos.tp3:
-                actions.append({"action": "close_all", "reason": "TP3 hit", "tp_level": 3})
-                pos.tp3_hit = True
-                return actions
+
+            # TP2 — final close
             if not pos.tp2_hit and current_price <= pos.tp2:
-                actions.append({"action": "notify_tp2"})
                 pos.tp2_hit = True
-            elif not pos.tp1_hit and current_price <= pos.tp1:
+                actions.append({
+                    "action": "close_all", "reason": "TP2 hit",
+                    "tp_level": 2, "exit_price": pos.tp2,
+                })
+                return actions
+
+            # TP1 — close 50%, move SL to break-even
+            if not pos.tp1_hit and current_price <= pos.tp1:
+                pos.tp1_hit      = True
+                pos.be_activated = True
+                close_size       = round(pos.size * 0.5, 6)
+                actions.append({
+                    "action": "close_partial", "size": close_size,
+                    "tp_level": 1, "exit_price": pos.tp1,
+                })
+                actions.append({"action": "move_sl", "new_sl": pos.entry_price})
                 actions.append({"action": "notify_tp1"})
-                pos.tp1_hit = True
 
         return actions

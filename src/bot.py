@@ -123,7 +123,7 @@ class Bot:
         self.forex_paper_balance: float = forex_cfg.get("balance", 1000.0)
         self.forex_paper_start:   float = self.forex_paper_balance
         self._forex_positions:    dict[str, Position] = {}
-        self._forex_stats = {"tp3": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+        self._forex_stats = {"tp2": 0, "whale": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
 
         # Session tracking: 10 trades opened → 3h pause → reset
         self._session_count     = 0          # trades opened this session
@@ -133,7 +133,7 @@ class Bot:
         self._session_trades: list[dict] = []   # all closed trades this session
 
         # Lifetime trade stats (reset each session)
-        self._trade_stats    = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+        self._trade_stats    = {"sl": 0, "tp2": 0, "whale": 0, "be_sl": 0, "total": 0, "wins": 0}
         self._strategy_stats: dict[str, dict] = {}
 
         # Stats
@@ -241,7 +241,7 @@ class Bot:
             self._paper_positions   = {}
             self.paper_balance      = self.paper_start_balance
             self._session_start_bal = self.paper_balance
-            self._trade_stats       = {"sl": 0, "tp3": 0, "be_sl": 0, "total": 0, "wins": 0}
+            self._trade_stats       = {"sl": 0, "tp2": 0, "whale": 0, "be_sl": 0, "total": 0, "wins": 0}
             self._strategy_stats    = {}
             self.notifier.send(
                 f"🔄 <b>New Session Started</b>\n"
@@ -338,11 +338,13 @@ class Bot:
         self.paper_balance += pos.margin_locked + pnl
 
         if reason == "SL hit" and pos.be_activated:
-            result = "be_sl";  self._trade_stats["be_sl"] += 1
+            result = "be_sl";  self._trade_stats["be_sl"]  += 1
         elif reason == "SL hit":
-            result = "sl";     self._trade_stats["sl"]    += 1
-        elif tp_level >= 2:
-            result = "tp3";    self._trade_stats["tp3"] += 1
+            result = "sl";     self._trade_stats["sl"]     += 1
+        elif reason == "Whale exit":
+            result = "whale";  self._trade_stats["whale"]  += 1
+        elif tp_level == 2:
+            result = "tp2";    self._trade_stats["tp2"]    += 1
         else:
             result = "other"
         self._trade_stats["total"] += 1
@@ -351,10 +353,11 @@ class Bot:
 
         sn = pos.strategy_name or "Unknown"
         if sn not in self._strategy_stats:
-            self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+            self._strategy_stats[sn] = {"tp2": 0, "whale": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
         ss = self._strategy_stats[sn]
         ss["total"] += 1
-        if result == "tp3":    ss["tp3"]   += 1
+        if result == "tp2":     ss["tp2"]   += 1
+        elif result == "whale": ss["whale"] += 1
         elif result == "be_sl": ss["be_sl"] += 1
         elif result == "sl":    ss["sl"]    += 1
         if pos.closed_pnl > 0: ss["wins"]  += 1
@@ -445,54 +448,54 @@ class Bot:
             act = action["action"]
 
             if act == "close_all":
-                reason   = action.get("reason", "")
-                tp_level = action.get("tp_level", 0)
-                self._paper_close(symbol, current_price, reason, tp_level)
+                reason     = action.get("reason", "")
+                tp_level   = action.get("tp_level", 0)
+                exit_price = action.get("exit_price", current_price)
+                self._paper_close(symbol, exit_price, reason, tp_level)
                 return
 
             elif act == "notify_tp1":
-                self.notifier.paper_tp1_alert(pos, current_price, tp_level=1)
+                self.notifier.paper_tp1_alert(pos, action.get("exit_price", current_price), tp_level=1)
 
             elif act == "notify_tp2":
-                self.notifier.paper_tp1_alert(pos, current_price, tp_level=2)
+                self.notifier.paper_tp1_alert(pos, action.get("exit_price", current_price), tp_level=2)
 
             elif act == "close_partial":
-                pct        = action["pct"]
-                tp_level   = action.get("tp_level", 0)
-                close_size = round(pos.size_remaining * pct, 6)
-                if tp_level == 1:
-                    partial_price = pos.tp1
-                elif tp_level == 2:
-                    partial_price = pos.tp2
-                else:
-                    partial_price = current_price
-                pnl        = self._calc_pnl(pos, partial_price, close_size)
-                pos.size_remaining -= close_size
-                pos.closed_pnl += pnl
-                self.paper_balance += pnl
+                close_size    = action["size"]                   # absolute size (1/3 of original)
+                tp_level      = action.get("tp_level", 0)
+                partial_price = action.get("exit_price", current_price)
 
-                # Track TP2 per strategy
+                # Guard: don't close more than remaining
+                close_size = min(close_size, pos.size_remaining)
+                if close_size <= 0:
+                    continue
+
+                pnl = self._calc_pnl(pos, partial_price, close_size)
+                pos.size_remaining -= close_size
+                pos.closed_pnl     += pnl
+                self.paper_balance  += pnl
+
+                # Track per-strategy TP2
                 if tp_level == 2:
                     sn = pos.strategy_name or "Unknown"
                     if sn not in self._strategy_stats:
-                        self._strategy_stats[sn] = {"tp3": 0, "tp2": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
+                        self._strategy_stats[sn] = {"tp2": 0, "whale": 0, "sl": 0, "be_sl": 0, "total": 0, "wins": 0}
                     self._strategy_stats[sn]["tp2"] += 1
 
                 logger.info(
                     f"[PAPER] TP{tp_level} {symbol} | "
-                    f"{pct*100:.0f}% closed @ {partial_price:.4f} | "
-                    f"PnL={pnl:+.2f} | Balance={self.paper_balance:.2f}"
+                    f"closed {close_size:.4f} units @ {partial_price:.4f} | "
+                    f"PnL={pnl:+.2f} | Balance=${self.paper_balance:.2f}"
                 )
                 self.notifier.paper_tp_hit(pos, tp_level, partial_price, pnl, self.paper_balance)
                 save_state(self)
 
             elif act == "move_sl":
-                new_sl    = action["new_sl"]
+                new_sl        = action["new_sl"]
                 pos.stop_loss = new_sl
-                be_note   = " → Break-Even" if new_sl == pos.entry_price else f" → {new_sl:.4f}"
+                be_note = " → Break-Even" if new_sl == pos.entry_price else f" → {new_sl:.4f}"
                 logger.info(f"[PAPER] SL moved{be_note} for {symbol}")
-                self.notifier.paper_tp_hit(pos, 2, pos.tp2, 0, self.paper_balance)
-                # Move SL to break-even on MEXC
+                # Move SL to break-even on MEXC live position
                 if self.bybit.enabled:
                     self.bybit.move_sl_to_breakeven(symbol, pos.direction, pos.entry_price)
 
@@ -557,14 +560,14 @@ class Bot:
             if act == "close_all":
                 reason   = action.get("reason", "")
                 tp_level = action.get("tp_level", 0)
-                exit_price = pos.stop_loss if reason == "SL hit" else (pos.tp3 if tp_level == 3 else current_price)
+                exit_price = pos.stop_loss if reason == "SL hit" else (pos.tp2 if tp_level == 2 else current_price)
                 pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
                 pos.closed_pnl += pnl
                 self.forex_paper_balance += pos.margin_locked + pnl
 
-                result = "tp3" if tp_level == 3 else ("sl" if reason == "SL hit" else "other")
+                result = "tp2" if tp_level == 2 else ("sl" if reason == "SL hit" else "other")
                 self._forex_stats["total"] += 1
-                if tp_level == 3:        self._forex_stats["tp3"] += 1
+                if tp_level == 2:        self._forex_stats["tp2"] += 1
                 elif reason == "SL hit": self._forex_stats["sl"]  += 1
                 if pos.closed_pnl > 0:   self._forex_stats["wins"] += 1
 
@@ -572,7 +575,7 @@ class Bot:
                 logger.info(
                     f"[FOREX PAPER] CLOSED {symbol} | {reason} @ {exit_price:.5f} "
                     f"| PnL={pnl:+.2f} | Balance={self.forex_paper_balance:.2f} "
-                    f"| W:{self._forex_stats['wins']} TP3:{self._forex_stats['tp3']} SL:{self._forex_stats['sl']}"
+                    f"| W:{self._forex_stats['wins']} TP2:{self._forex_stats['tp2']} SL:{self._forex_stats['sl']}"
                 )
                 return
 
