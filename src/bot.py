@@ -316,8 +316,8 @@ class Bot:
         open_count = len(self._paper_positions)
         logger.info(
             f"[PAPER] OPENED {direction.upper()} {symbol} "
-            f"@ {entry:.4f} (live) | Risk=${risk_amount:.2f} | Size={size:.4f} | "
-            f"SL={sl:.4f} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f} | "
+            f"@ {entry:.8g} (live) | Risk=${risk_amount:.2f} | Size={size:.4f} | "
+            f"SL={sl:.8g} (-{sl_pct:.2f}%) | Available=${self.paper_balance:.2f} | "
             f"Session: {self._session_count}/10"
         )
         self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)

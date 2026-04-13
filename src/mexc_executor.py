@@ -104,6 +104,15 @@ class MexcExecutor:
             data=body_str,
             timeout=10,
         )
+        if resp.status_code == 403:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text[:200]
+            raise RuntimeError(
+                f"403 Forbidden — API key missing 'Trade' permission for futures, "
+                f"or IP not whitelisted. MEXC detail: {detail}"
+            )
         resp.raise_for_status()
         data = resp.json()
         if not data.get("success", True):
