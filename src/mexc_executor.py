@@ -113,6 +113,7 @@ class MexcExecutor:
         return data
 
     def _post(self, path: str, body: dict) -> dict:
+        """POST with signed body. Logs full error on failure."""
         body_str = _no_sci(json.dumps(body, separators=(",", ":")))
         resp = requests.post(
             BASE + path,
@@ -133,7 +134,9 @@ class MexcExecutor:
         resp.raise_for_status()
         data = resp.json()
         if not data.get("success", True):
-            raise RuntimeError(data.get("message", str(data)))
+            raise RuntimeError(
+                f"MEXC error code={data.get('code')} | {data.get('message')} | sent: {body_str[:400]}"
+            )
         return data
 
     # ------------------------------------------------------------------
@@ -331,7 +334,7 @@ class MexcExecutor:
                     "vol":             str(vol),
                     "leverage":        str(self.leverage),
                     "side":            str(side),
-                    "type":            "5",      # market
+                    "type":            "2",      # market (5=market on old API, 2=market on api.mexc.co)
                     "openType":        "2",      # cross margin
                     "stopLossPrice":   format(Decimal(repr(sl_price)), 'f'),
                     "takeProfitPrice": format(Decimal(repr(tp_price)), 'f'),
@@ -388,7 +391,7 @@ class MexcExecutor:
                 "vol":      str(vol),
                 "leverage": str(self.leverage),
                 "side":     str(close_side),
-                "type":     "5",
+                "type":     "2",
                 "openType": "2",
             })
             logger.info(f"[MEXC] Position CLOSED {mexc_sym} vol={vol}")
