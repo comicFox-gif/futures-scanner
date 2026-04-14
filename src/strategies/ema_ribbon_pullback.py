@@ -123,8 +123,8 @@ class EMARibbonPullbackStrategy:
         if ribbon_ok:    score += 1  # C2
         if touched:      score += 1  # C3
         if bounce_ok:    score += 1  # C4
-        rsi_ok = (direction == "long"  and 40 <= rsi <= 60) or \
-                 (direction == "short" and 40 <= rsi <= 60)
+        rsi_ok = (direction == "long"  and 35 <= rsi <= 62) or \
+                 (direction == "short" and 38 <= rsi <= 70)
         if vol_ratio >= self.vol_mult and adx >= self.adx_min and rsi_ok:
             score += 1              # C5
         return score
@@ -175,7 +175,7 @@ class EMARibbonPullbackStrategy:
         sweep = detect_liquidity_sweep(entry_df)
 
         if htf_bull and ribbon_bull and touched_long and bounce_long:
-            if rsi > 60:                                    # overbought gate
+            if rsi > 65:                                    # overbought gate
                 return None
             if sweep == "buy_side":                         # whales just swept highs → dump risk
                 logger.debug(f"[EMA RIBBON] {symbol} LONG blocked — buy-side liquidity sweep detected")
@@ -220,7 +220,7 @@ class EMARibbonPullbackStrategy:
         bounce_short  = (price < ema9 and row["close"] < row["open"] and body >= self.min_body)
 
         if htf_bear and ribbon_bear and touched_short and bounce_short:
-            if rsi < 40:                                    # oversold gate
+            if rsi < 35:                                    # oversold gate
                 return None
             if sweep == "sell_side":                        # whales just swept lows → pump risk
                 logger.debug(f"[EMA RIBBON] {symbol} SHORT blocked — sell-side liquidity sweep detected")

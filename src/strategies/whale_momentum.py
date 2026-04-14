@@ -94,11 +94,6 @@ class WhaleMomentumStrategy:
         if pd.isna(atr) or atr == 0 or pd.isna(rsi):
             return None
 
-        # RSI guard — don't enter if already overheated
-        if rsi > self.rsi_max:
-            logger.debug(f"[WHALE] {symbol} LONG blocked — RSI {rsi:.0f} already overbought")
-            return None
-
         vol_ratio = row["volume"] / row["volume_sma"] if row.get("volume_sma", 0) > 0 else 0
 
         htf_row   = htf_df.iloc[-2]
@@ -122,7 +117,7 @@ class WhaleMomentumStrategy:
         sl_dist_short = max((_p_high + _sl_buf) - price, atr * 0.3)
 
         # ── LONG: institutions aggressively buying ─────────────────────────
-        if htf_bull and rsi <= self.rsi_max:
+        if htf_bull and rsi <= self.rsi_max:  # don't long if already overbought
             whale = detect_whale_entry(
                 entry_df,
                 vol_mult=self.vol_mult,

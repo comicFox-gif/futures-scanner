@@ -10,7 +10,7 @@ Env vars:
   MEXC_LEVERAGE — leverage per trade (default 10)
 
 Risk sizing (mirrors BybitExecutor):
-  risk_usdt     = $4 fixed
+  risk_usdt     = $3 fixed
   qty_coin      = risk_usdt / sl_dist
   vol           = floor(qty_coin / contract_size)   ← whole contracts
   notional_cap  = balance * leverage * 0.80
@@ -286,7 +286,7 @@ class MexcExecutor:
         scale         = spec["price_scale"]
 
         # Convert coin qty → contracts
-        risk_usdt = 4.0
+        risk_usdt = 3.0
         qty_coin  = risk_usdt / sl_dist
         vol       = math.floor(qty_coin / contract_size)
 

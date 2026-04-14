@@ -105,8 +105,8 @@ class MACDZeroCrossStrategy:
         if htf_ok:                                              score += 1  # C1
         if ema200_ok:                                           score += 1  # C2
         if vol_ratio >= self.vol_mult and adx >= self.adx_min: score += 1  # C3
-        rsi_ok = (direction == "long"  and 45 <= rsi <= 65) or \
-                 (direction == "short" and 45 <= rsi <= 65)  # min 45 avoids shorting oversold
+        rsi_ok = (direction == "long"  and 42 <= rsi <= 67) or \
+                 (direction == "short" and 33 <= rsi <= 60)   # shorts can be at lower RSI
         if rsi_ok and body >= self.min_body:                    score += 1  # C4
         if fresh_cross:                                         score += 1  # C5
         return score
