@@ -164,37 +164,25 @@ class Notifier:
                       reason: str, extra: str = "", fmt=None) -> str:
         """
         Single reusable signal block used by all confirmed signal methods.
-        extra: optional extra line between levels and footer (e.g. range pips for LB)
+        extra: optional extra line appended after qty (e.g. level touches for SR)
         fmt:   price formatter function (defaults to _fmt for crypto, _fmt_fx for forex)
         """
         if fmt is None:
             fmt = self._fmt
-        f   = fmt
-        d   = direction
-        sl_pct  = self._pct(price, sl,  d)
-        tp1_pct = self._pct(price, tp1, d)
-        tp2_pct = self._pct(price, tp2, d)
-        sl_abs  = abs(sl_pct)
-        rr      = round(abs(tp2_pct) / sl_abs, 1) if sl_abs else 0
+        f       = fmt
         stars   = self._stars(quality)
-        dir_tag = self._dir_tag(d)
+        dir_tag = self._dir_tag(direction)
         qty     = self._qty_for_risk(price, sl)
         base    = self._base_currency(symbol)
-        extra_line = f"\n{extra}" if extra else ""
+        extra_line = f"  ·  {extra}" if extra else ""
         return (
             f"{dir_tag}  •  <b>{symbol}</b>  #{no:03d}\n"
-            f"{LINE}\n"
-            f"{strategy}  {stars}\n"
-            f"{DLINE}\n"
+            f"{strategy}  {stars}\n\n"
             f"📌 Entry  <code>{f(price)}</code>\n"
-            f"🛑 SL     <code>{f(sl)}</code>   -{sl_abs:.2f}%\n"
-            f"{DLINE}\n"
-            f"🎯 TP1   <code>{f(tp1)}</code>   +{tp1_pct:.2f}%   <i>(→ move SL to BE)</i>\n"
-            f"🏆 TP2   <code>{f(tp2)}</code>   +{tp2_pct:.2f}%   <i>(close all)</i>\n"
-            f"{DLINE}\n"
-            f"R:R  1 : {rr}   📦 Qty  <code>{self._fmt_qty(qty)} {base}</code>  <i>(= $10 risk)</i>{extra_line}\n"
-            f"<i>{reason}</i>\n"
-            f"{self._footer()}"
+            f"🛑 SL       <code>{f(sl)}</code>\n"
+            f"🎯 TP1    <code>{f(tp1)}</code>\n"
+            f"🏆 TP2    <code>{f(tp2)}</code>\n\n"
+            f"📦 Qty  <code>{self._fmt_qty(qty)} {base}</code>{extra_line}"
         )
 
     # ------------------------------------------------------------------
@@ -282,22 +270,15 @@ class Notifier:
         vol       = signal.volume_ratio if hasattr(signal, "volume_ratio") else signal.get("vol_ratio", 0)
         reason    = signal.reason if hasattr(signal, "reason") else signal["reason"]
 
-        extra = f"RSI <code>{rsi:.0f}</code>  ·  Vol <code>{vol:.1f}x</code>"
         msg = self._signal_block(
             self._signal_no, strategy_name, quality,
             direction, symbol, price, sl, tp1, tp2, tp3, reason,
-            extra=extra,
         )
         forex_msg = self._signal_block(
             self._signal_no, strategy_name, quality,
             direction, symbol, price, sl, tp1, tp2, tp3, reason,
-            extra=f"RSI <code>{rsi:.0f}</code>",
             fmt=self._fmt_fx,
         )
-        if confluence:
-            conf_block = self._confluence_block(*confluence)
-            msg       += conf_block
-            forex_msg += conf_block
         self.send_signal(msg, forex_message=forex_msg, is_forex=self._is_forex_symbol(symbol))
 
     # ------------------------------------------------------------------
@@ -319,10 +300,7 @@ class Notifier:
         symbol    = sig["symbol"]
         lv_type   = "Support" if direction == "long" else "Resistance"
 
-        extra = (
-            f"{lv_type}: <code>{self._fmt(lv_price)}</code>  ({lv_touch} touches)\n"
-            f"RSI <code>{rsi:.0f}</code>  ·  Vol <code>{vol:.1f}x</code>"
-        )
+        extra = f"{lv_type}: <code>{self._fmt(lv_price)}</code>  ({lv_touch} touches)"
         msg = self._signal_block(
             self._signal_no, "S/R Bounce", quality,
             direction, symbol, price, sl, tp1, tp2, tp3, reason, extra=extra,
@@ -333,10 +311,6 @@ class Notifier:
             extra=f"{lv_type}: <code>{self._fmt_fx(lv_price)}</code>  ({lv_touch} touches)",
             fmt=self._fmt_fx,
         )
-        if confluence:
-            conf_block = self._confluence_block(*confluence)
-            msg       += conf_block
-            forex_msg += conf_block
         self.send_signal(msg, forex_message=forex_msg, is_forex=self._is_forex_symbol(symbol))
 
     def sr_warning_signal(self, sig: dict):
@@ -358,11 +332,10 @@ class Notifier:
         symbol    = sig["symbol"]
         reason    = sig["reason"]
 
-        extra = f"RSI <code>{rsi:.0f}</code>"
         msg = self._signal_block(
             self._signal_no, strategy_name, quality,
             direction, symbol, price, sl, tp1, tp2, tp3, reason,
-            extra=extra, fmt=self._fmt_fx,
+            fmt=self._fmt_fx,
         )
         is_forex = force_forex_channel or self._is_forex_symbol(symbol)
         self.send_signal(msg, forex_message=msg, is_forex=is_forex)
@@ -389,9 +362,8 @@ class Notifier:
         asian_low  = sig.get("asian_low", 0)
 
         extra = (
-            f"Asian range: <code>{range_pips:.0f} pips</code>  "
-            f"(<code>{self._fmt_fx(asian_low)}</code> – <code>{self._fmt_fx(asian_high)}</code>)\n"
-            f"RSI <code>{rsi:.0f}</code>"
+            f"Asian range <code>{range_pips:.0f} pips</code>  "
+            f"(<code>{self._fmt_fx(asian_low)}</code> – <code>{self._fmt_fx(asian_high)}</code>)"
         )
         msg = self._signal_block(
             self._signal_no, "London Breakout", quality,
@@ -411,12 +383,10 @@ class Notifier:
         session_line = f"  ·  Session <code>{session_count}/50</code>" if session_count else ""
         self.send(
             f"📄 <b>Paper Opened</b>  [{getattr(pos, 'strategy_name', '')}]\n"
-            f"{DLINE}\n"
             f"{dir_tag}  •  <b>{pos.symbol}</b>\n"
-            f"Entry  <code>{self._fmt(pos.entry_price)}</code>   SL  <code>{self._fmt(pos.stop_loss)}</code>  (-{sl_pct:.2f}%)\n"
+            f"Entry <code>{self._fmt(pos.entry_price)}</code>  ·  SL <code>{self._fmt(pos.stop_loss)}</code>  (-{sl_pct:.2f}%)\n"
             f"TP1 <code>{self._fmt(pos.tp1)}</code>  TP2 <code>{self._fmt(pos.tp2)}</code>\n"
-            f"{DLINE}\n"
-            f"Risk <code>${pos.margin_locked:.2f}</code>  ·  Avail <code>${available_balance:.2f}</code>  ·  Open <code>{open_count}</code>{session_line}"
+            f"Risk <code>${pos.margin_locked:.2f}</code>  ·  Avail <code>${available_balance:.2f}</code>"
         )
 
     def paper_tp1_alert(self, pos, price: float, tp_level: int = 1):
@@ -456,21 +426,10 @@ class Notifier:
             pct = -pct
 
         strat_tag = f"  [{pos.strategy_name}]" if getattr(pos, "strategy_name", "") else ""
-        stats_line = ""
-        if stats and stats["total"] > 0:
-            win_pct = stats["wins"] / stats["total"] * 100
-            stats_line = (
-                f"\n{DLINE}\n"
-                f"All-time  {stats['total']} trades  ·  Win <code>{win_pct:.0f}%</code>  ·  "
-                f"🏆 TP2 <code>{stats['tp2']}</code>  🐋 Whale <code>{stats['whale']}</code>  🛑 SL <code>{stats['sl']}</code>  🔒 BE <code>{stats['be_sl']}</code>"
-            )
-
         self.send(
             f"{emoji} <b>[PAPER] {pos.symbol}</b>{strat_tag}  {reason}\n"
-            f"{DLINE}\n"
             f"Entry <code>{self._fmt(pos.entry_price)}</code>  →  Exit <code>{self._fmt(exit_price)}</code>  ({pct:+.2f}%)\n"
             f"PnL <code>{total_pnl:+.2f} USDT</code>  ·  Balance <code>${balance:.2f}</code>"
-            f"{stats_line}"
         )
 
     # ------------------------------------------------------------------
