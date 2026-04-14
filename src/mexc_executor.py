@@ -334,7 +334,7 @@ class MexcExecutor:
                     "vol":             str(vol),
                     "leverage":        str(self.leverage),
                     "side":            str(side),
-                    "type":            "2",      # market (5=market on old API, 2=market on api.mexc.co)
+                    "type":            "5",      # 5=market order on MEXC futures
                     "openType":        "2",      # cross margin
                     "stopLossPrice":   format(Decimal(repr(sl_price)), 'f'),
                     "takeProfitPrice": format(Decimal(repr(tp_price)), 'f'),
@@ -391,7 +391,7 @@ class MexcExecutor:
                 "vol":      str(vol),
                 "leverage": str(self.leverage),
                 "side":     str(close_side),
-                "type":     "2",
+                "type":     "5",
                 "openType": "2",
             })
             logger.info(f"[MEXC] Position CLOSED {mexc_sym} vol={vol}")
