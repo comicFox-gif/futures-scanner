@@ -120,6 +120,9 @@ class Bot:
         # Paper positions: symbol -> Position
         self._paper_positions: dict[str, Position] = {}
 
+        # MEXC live position tracking (direction + entry for whale-exit detection)
+        self._mexc_positions: dict[str, dict] = {}
+
         # Forex paper trading — parallel tracker, sends to forex channel
         forex_cfg = cfg.get("forex_paper", {})
         self.forex_paper_balance: float = forex_cfg.get("balance", 1000.0)
@@ -376,34 +379,53 @@ class Bot:
         After the whale entry, watch for exit signs.
         Longs: detect_distribution fires when whales are selling into the crowd.
         Shorts: detect_short_covering fires when whales are buying back (covering shorts).
-        Sends a Telegram warning so subscribers can take profits. Fires once per position.
+        Works with both paper positions and MEXC live position tracking.
+        Fires once per position.
         """
         from src.indicators import detect_distribution, detect_short_covering
-        pos = self._paper_positions.get(symbol)
-        if not pos:
-            return
-        if getattr(pos, "_distribution_warned", False):
+
+        # Resolve position data — paper position takes priority; fall back to MEXC tracking
+        paper_pos   = self._paper_positions.get(symbol)
+        mexc_info   = self._mexc_positions.get(symbol)
+
+        if paper_pos:
+            direction   = paper_pos.direction
+            entry_price = paper_pos.entry_price
+            already_warned = getattr(paper_pos, "_distribution_warned", False)
+        elif mexc_info:
+            direction   = mexc_info["direction"]
+            entry_price = mexc_info["entry_price"]
+            already_warned = mexc_info.get("distribution_warned", False)
+        else:
             return
 
-        if pos.direction == "long":
-            if current_price <= pos.entry_price:
+        if already_warned:
+            return
+
+        if direction == "long":
+            if current_price <= entry_price:
                 return
             signal = detect_distribution(entry_df)
-            pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+            pnl_pct = (current_price - entry_price) / entry_price * 100
             exit_label = "distributing (selling into crowd)"
             direction_icon = "📉"
-        else:  # short
-            if current_price >= pos.entry_price:
+        else:
+            if current_price >= entry_price:
                 return
             signal = detect_short_covering(entry_df)
-            pnl_pct = (pos.entry_price - current_price) / pos.entry_price * 100
+            pnl_pct = (entry_price - current_price) / entry_price * 100
             exit_label = "covering shorts (buying back)"
             direction_icon = "📈"
 
         if signal:
-            pos._distribution_warned = True
+            # Mark warned so it doesn't fire again
+            if paper_pos:
+                paper_pos._distribution_warned = True
+            if mexc_info:
+                mexc_info["distribution_warned"] = True
+
             logger.info(
-                f"[WHALE EXIT] {pos.direction.upper()} exit signal on {symbol} | "
+                f"[WHALE EXIT] {direction.upper()} exit signal on {symbol} | "
                 f"PnL={pnl_pct:+.1f}% | {signal['reason_str']}"
             )
             self.notifier.send(
@@ -414,12 +436,14 @@ class Bot:
                 f"──────────────────────────────\n"
                 f"<i>{signal['reason_str']}</i>"
             )
-            # Auto-close paper position
+            # Close paper position
             if self.paper_enabled and symbol in self._paper_positions:
                 self._paper_close(symbol, current_price, "Whale exit")
-            # Auto-close MEXC live position
+            # Close MEXC live position
             if self.bybit.enabled:
-                self.bybit.close_position(symbol, pos.direction)
+                closed = self.bybit.close_position(symbol, direction)
+                if closed:
+                    self._mexc_positions.pop(symbol, None)
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""
@@ -582,12 +606,24 @@ class Bot:
         if not self.bybit.enabled:
             return
         if hasattr(sig, "entry_price"):   # Signal dataclass
-            d = {"symbol": sig.symbol, "direction": sig.direction,
-                 "entry": sig.entry_price, "sl": sig.stop_loss, "tp3": sig.tp3}
+            d         = {"symbol": sig.symbol, "direction": sig.direction,
+                         "entry": sig.entry_price, "sl": sig.stop_loss, "tp3": sig.tp3}
+            direction = sig.direction
+            sym       = sig.symbol
         else:
             # Dict signals don't include symbol — inject it from caller
-            d = {**sig, "symbol": symbol}
-        self.bybit.place_order(d)
+            d         = {**sig, "symbol": symbol}
+            direction = sig.get("direction", "")
+            sym       = symbol
+        result = self.bybit.place_order(d)
+        if result and result.get("order_id"):
+            # Track so whale-exit detection can close this position even without paper trading
+            self._mexc_positions[sym] = {
+                "direction":            direction,
+                "entry_price":          float(d.get("entry", 0)),
+                "distribution_warned":  False,
+            }
+            logger.info(f"[MEXC] Tracking live position: {sym} {direction} @ {d.get('entry')}")
 
     def _calc_pnl(self, pos: Position, exit_price: float, size: float) -> float:
         if pos.direction == "long":
@@ -827,7 +863,9 @@ class Bot:
                 # Paper position management (always runs if position is open)
                 if self.paper_enabled and symbol in self._paper_positions:
                     self._paper_tick(symbol, current_price)
-                    # Distribution detection — warn subscribers when whales appear to be exiting
+                    self._check_distribution(symbol, entry_df, current_price)
+                elif self.bybit.enabled and symbol in self._mexc_positions:
+                    # No paper position but MEXC is live — still run whale-exit detection
                     self._check_distribution(symbol, entry_df, current_price)
                 if symbol in self._forex_positions:
                     self._forex_paper_tick(symbol, current_price)
