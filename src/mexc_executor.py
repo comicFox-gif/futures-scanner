@@ -41,7 +41,7 @@ import requests
 
 logger = logging.getLogger("futures_bot.mexc")
 
-BASE = "https://contract.mexc.com"
+BASE = "https://api.mexc.co"
 
 
 def _no_sci(json_str: str) -> str:
@@ -221,9 +221,9 @@ class MexcExecutor:
         try:
             self._post("/api/v1/private/position/change_leverage", {
                 "symbol":       symbol,
-                "leverage":     self.leverage,
-                "openType":     2,
-                "positionType": position_type,
+                "leverage":     str(self.leverage),
+                "openType":     "2",
+                "positionType": str(position_type),
             })
             logger.info(f"[MEXC] Leverage set to {self.leverage}x for {symbol}")
             return True
@@ -327,14 +327,14 @@ class MexcExecutor:
             try:
                 body = {
                     "symbol":          symbol,
-                    "price":           0,
-                    "vol":             vol,
-                    "leverage":        self.leverage,
-                    "side":            side,
-                    "type":            5,     # market
-                    "openType":        2,     # cross margin
-                    "stopLossPrice":   sl_price,
-                    "takeProfitPrice": tp_price,
+                    "price":           "0",
+                    "vol":             str(vol),
+                    "leverage":        str(self.leverage),
+                    "side":            str(side),
+                    "type":            "5",      # market
+                    "openType":        "2",      # cross margin
+                    "stopLossPrice":   format(Decimal(repr(sl_price)), 'f'),
+                    "takeProfitPrice": format(Decimal(repr(tp_price)), 'f'),
                 }
                 resp     = self._post("/api/v1/private/order/submit", body)
                 order_id = str(resp.get("data", ""))
@@ -384,12 +384,12 @@ class MexcExecutor:
             close_side = 2 if direction == "long" else 4   # 2=close long, 4=close short
             self._post("/api/v1/private/order/submit", {
                 "symbol":   mexc_sym,
-                "price":    0,
-                "vol":      vol,
-                "leverage": self.leverage,
-                "side":     close_side,
-                "type":     5,
-                "openType": 2,
+                "price":    "0",
+                "vol":      str(vol),
+                "leverage": str(self.leverage),
+                "side":     str(close_side),
+                "type":     "5",
+                "openType": "2",
             })
             logger.info(f"[MEXC] Position CLOSED {mexc_sym} vol={vol}")
             return True
@@ -424,15 +424,16 @@ class MexcExecutor:
                 return False
 
             close_side = 2 if direction == "long" else 4
+            be_str = format(Decimal(repr(be_price)), 'f')
             self._post("/api/v1/private/planorder/place", {
                 "symbol":       mexc_sym,
-                "side":         close_side,
-                "vol":          vol,
-                "type":         2,           # limit trigger
-                "triggerPrice": be_price,
-                "executePrice": be_price,
-                "triggerType":  1,           # triggered by last price
-                "openType":     2,
+                "side":         str(close_side),
+                "vol":          str(vol),
+                "type":         "2",         # limit trigger
+                "triggerPrice": be_str,
+                "executePrice": be_str,
+                "triggerType":  "1",         # triggered by last price
+                "openType":     "2",
             })
             logger.info(f"[MEXC] BE stop placed at {be_price} for {mexc_sym}")
             return True
