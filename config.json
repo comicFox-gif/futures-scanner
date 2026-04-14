@@ -196,5 +196,17 @@
   "bot": {
     "poll_interval_seconds": 60,
     "daily_summary_utc_hour": 0
+  },
+
+  "elite": {
+    "swing_left": 5,
+    "swing_right": 2,
+    "lookback": 40,
+    "volume_multiplier": 1.5,
+    "adx_min": 25,
+    "min_body": 0.50,
+    "min_score": 6,
+    "daily_limit": 5,
+    "max_concurrent": 3
   }
 }

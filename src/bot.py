@@ -17,6 +17,7 @@ import requests
 from datetime import datetime, date, timedelta
 from typing import Optional
 
+import queue
 import ccxt
 import pandas as pd
 
@@ -38,6 +39,9 @@ from src.notifier import Notifier
 from src.mexc_executor import MexcExecutor
 from src.state_manager import save_state, load_state
 from src.confluence import score_confluence
+from src.regime import detect_regime
+from src.elite_strategy import EliteStrategy
+from src.webhook_server import WebhookServer
 
 logger = logging.getLogger("futures_bot")
 
@@ -147,6 +151,23 @@ class Bot:
         self._last_summary_date         = None
         self._last_positions_report: datetime = datetime.utcnow()
         self._running = False
+
+        # ── Elite 4H system ────────────────────────────────────────────────
+        self.elite_strategy   = EliteStrategy(cfg)
+        elite_cfg             = cfg.get("elite", {})
+        self._daily_sig_limit  = elite_cfg.get("daily_limit", 5)
+        self._max_concurrent   = elite_cfg.get("max_concurrent", 3)
+        self._pending_signals: dict[int, dict] = {}   # id → {symbol, signal, live_price, sent_at}
+        self._next_pending_id  = 0
+        self._daily_elite_count = 0
+        self._daily_elite_date  = None                # date when count was last reset
+        self._consecutive_sl    = 0                   # consecutive SLs hit (triggers elite pause)
+        self._elite_paused      = False
+        self._elite_resume_at: datetime | None = None
+
+        # TradingView webhook — signals arrive via Flask thread, consumed in tick
+        self._webhook_queue: queue.Queue = queue.Queue()
+        self._webhook_server = WebhookServer(self._webhook_queue)
 
         # Admin command polling — uses dedicated ADMIN_BOT_TOKEN (separate from signal bot)
         self._admin_token  = os.getenv("ADMIN_BOT_TOKEN", "").strip()
@@ -359,6 +380,22 @@ class Bot:
         self._session_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
         del self._paper_positions[symbol]
         open_count = len(self._paper_positions)
+
+        # Consecutive SL tracking — 2 in a row triggers 4H elite pause
+        if result == "sl":
+            self._consecutive_sl += 1
+            if self._consecutive_sl >= 2 and not self._elite_paused:
+                self._elite_paused    = True
+                self._elite_resume_at = datetime.utcnow() + timedelta(hours=4)
+                resume_str = self._elite_resume_at.strftime("%H:%M UTC")
+                logger.info(f"[ELITE] 2 consecutive SLs — elite scanning paused until {resume_str}")
+                self.notifier.send(
+                    f"⏸ <b>Elite Scanner Paused</b>\n"
+                    f"2 consecutive stop losses hit — new signals paused for 4 hours.\n"
+                    f"Resumes at <b>{resume_str}</b>"
+                )
+        else:
+            self._consecutive_sl = 0
 
 
         logger.info(
@@ -807,28 +844,32 @@ class Bot:
         paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
         paper_info = f" | Paper: {paper_bal} | Positions: {open_pos}" if self.paper_enabled else ""
 
-        # Market regime — informational only, does NOT block signals
-        market_bias = self._market_bias()
-        bias_icon   = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(market_bias, "⚪")
-        logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info} | Market: {bias_icon} {market_bias.upper()}")
+        # ── Elite regime detection (once per tick using BTC data) ────────────
+        # Reset daily signal count at UTC midnight
+        today = datetime.utcnow().date()
+        if self._daily_elite_date != today:
+            self._daily_elite_count = 0
+            self._daily_elite_date  = today
 
-        # Alert subscribers when bias flips to a directional regime
-        if market_bias != "neutral" and market_bias != getattr(self, "_last_bias_alerted", None):
-            self._last_bias_alerted = market_bias
-            label = "🟢 Bullish" if market_bias == "bullish" else "🔴 Bearish"
-            self.notifier.send(
-                f"📊 <b>Market Bias: {label}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"BTC structure shifted — market is leaning <b>{market_bias}</b>.\n"
-                f"<i>Signals fire in both directions regardless of bias.</i>"
-            )
-        elif market_bias == "neutral" and getattr(self, "_last_bias_alerted", None) not in (None, "neutral"):
-            self._last_bias_alerted = "neutral"
-            self.notifier.send(
-                f"⚪ <b>Market Bias: Neutral</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"BTC structure is ranging — no strong directional bias."
-            )
+        # Lift elite pause if cooldown expired
+        if self._elite_paused and self._elite_resume_at and datetime.utcnow() >= self._elite_resume_at:
+            self._elite_paused    = False
+            self._elite_resume_at = None
+            logger.info("[ELITE] Pause lifted — resuming signal scanning")
+
+        # BTC data for regime + enrich with elite strategy indicators
+        btc_4h_raw    = self._fetch_ohlcv("BTC/USDT:USDT", "4h")
+        btc_daily_raw = self._fetch_ohlcv("BTC/USDT:USDT", "1d")
+        btc_4h_df   = self.elite_strategy.enrich(btc_4h_raw.copy())    if btc_4h_raw    is not None and len(btc_4h_raw)    >= 10 else None
+        btc_daily_df = self.elite_strategy.enrich(btc_daily_raw.copy()) if btc_daily_raw is not None and len(btc_daily_raw) >= 10 else None
+        regime_info  = detect_regime(btc_4h_df, btc_daily_df)
+        regime_lbl   = {"bull": "🟢 Bull", "bear": "🔴 Bear", "neutral": "⚪ Neutral"}.get(
+            regime_info["regime"], "⚪ Neutral"
+        )
+        logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info} | Regime: {regime_lbl} | {regime_info['label']}")
+
+        # Process any signals queued from TradingView webhook thread
+        self._process_webhook_signals(regime_info)
 
         signals_found = 0
         for symbol in symbols:
@@ -839,24 +880,20 @@ class Bot:
                 if htf_raw is None or entry_raw is None:
                     continue
 
-                # Fetch 4H data for S/R strategy
-                sr_raw = self._fetch_ohlcv(symbol, self.tf_sr)
-
-                htf_df       = self.strategy.enrich(htf_raw.copy())
+                htf_df       = self.elite_strategy.enrich(htf_raw.copy())
                 entry_df     = self.strategy.enrich(entry_raw.copy())
                 precision_df = self.strategy.enrich(precision_raw.copy()) if precision_raw is not None else None
-                sr_df        = self.sr_strategy.enrich(sr_raw.copy()) if sr_raw is not None else None
 
-                # Skip symbols without enough candle history.
-                # OKX caps at 300 candles per call; after EMA200 dropna ~100 rows remain.
-                # 60 is enough for all indicators (MACD needs 35, RSI needs 14).
                 min_candles = 60
                 if len(htf_df) < min_candles or len(entry_df) < min_candles:
                     logger.debug(f"Skipping {symbol}: insufficient candle history ({len(htf_df)} htf, {len(entry_df)} entry)")
                     continue
 
+                # Weekly data for T1 scoring (best-effort; non-fatal if unavailable)
+                weekly_raw = self._fetch_ohlcv(symbol, "1w")
+                weekly_df  = self.elite_strategy.enrich(weekly_raw.copy()) if weekly_raw is not None and len(weekly_raw) >= 5 else None
+
                 # Use live MEXC price for paper trade monitoring and entry.
-                # Falls back to last closed candle only if ticker fetch fails.
                 live_price    = self._fetch_live_price(symbol)
                 current_price = live_price if live_price else float(entry_df.iloc[-2]["close"])
 
@@ -865,369 +902,22 @@ class Bot:
                     self._paper_tick(symbol, current_price)
                     self._check_distribution(symbol, entry_df, current_price)
                 elif self.bybit.enabled and symbol in self._mexc_positions:
-                    # No paper position but MEXC is live — still run whale-exit detection
                     self._check_distribution(symbol, entry_df, current_price)
                 if symbol in self._forex_positions:
                     self._forex_paper_tick(symbol, current_price)
 
                 in_paper = self.paper_enabled and symbol in self._paper_positions
 
-                # ── Strategy 1: EMA Momentum — DISABLED (too many SL hits) ──
-                # if not in_paper:
-                #     signal = self.strategy.generate_signal(symbol, htf_df, entry_df)
-                #     ...disabled...
-
-                # ── Strategy 2: S/R Bounce ────────────────────────────────
-                if sr_df is not None and not in_paper:
-                    sr_sig = self.sr_strategy.generate_signal(symbol, sr_df, entry_df, precision_df)
-
-                    if sr_sig and sr_sig["stage"] == 2 and not self._is_on_cooldown(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"]):
-                        q = sr_sig.get("quality", 3)
-                        logger.info(
-                            f"[SR CONFIRMED] {sr_sig['direction'].upper()} {symbol} "
-                            f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
-                        )
-                        if q >= 5 and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
-                            sr_trap = "Bull Trap" in sr_sig.get("reason", "")
-                            conf = self._confluence(htf_df, entry_df, sr_sig["direction"], sr_sig["entry"], sr_trap)
-                            if sr_trap:
-                                self.notifier.confirmed_signal(sr_sig, self._strategy_label("S/R Bounce", sr_sig), q, confluence=conf)
-                            else:
-                                self.notifier.sr_confirmed_signal(sr_sig, confluence=conf)
-                            self._bybit_order(sr_sig, symbol)
-                            if symbol not in self._forex_positions:
-                                self._forex_paper_open(sr_sig, "S/R Bounce", live_price=current_price)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(
-                                    stage=2, direction=sr_sig["direction"], symbol=symbol,
-                                    entry_price=sr_sig["entry"], stop_loss=sr_sig["sl"],
-                                    tp1=sr_sig["tp1"], tp2=sr_sig["tp2"], tp3=sr_sig["tp3"],
-                                    atr=sr_sig["atr"], rsi=sr_sig["rsi"],
-                                    volume_ratio=sr_sig.get("vol_ratio", 0),
-                                    reason=sr_sig.get("reason", ""),
-                                )
-                                self._paper_open(dummy, "S/R Bounce", live_price=current_price)
-                        else:
-                            logger.info(f"[SR] Skipped {symbol} — quality {q} < 5")
-
-                        self._mark_sent(symbol, sr_sig["direction"] + "_sr", sr_sig["stage"])
-                        self._daily_alerts.append({"stage": sr_sig["stage"], "direction": sr_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 3: BB Squeeze Breakout ───────────────────────
+                # ── Elite 4H strategy (replaces all previous strategies) ─────
                 if not in_paper:
-                    bb_sig = self.bb_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if bb_sig and bb_sig["stage"] == 2 and not self._is_on_cooldown(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"]):
-                        q = bb_sig.get("quality", 3)
-                        logger.info(
-                            f"[BB CONFIRMED] {bb_sig['direction'].upper()} {symbol} "
-                            f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
-                        )
-                        bb_trap = "Bull Trap" in bb_sig.get("reason", "")
-                        if q >= 5 and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
-                            conf = self._confluence(htf_df, entry_df, bb_sig["direction"], bb_sig["entry"], bb_trap)
-                            self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q, confluence=conf)
-                            self._bybit_order(bb_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=bb_sig["direction"], symbol=symbol,
-                                            entry_price=bb_sig["entry"], stop_loss=bb_sig["sl"],
-                                            tp1=bb_sig["tp1"], tp2=bb_sig["tp2"], tp3=bb_sig["tp3"],
-                                            atr=bb_sig["atr"], rsi=bb_sig["rsi"],
-                                            volume_ratio=bb_sig.get("vol_ratio", 0),
-                                            reason=bb_sig.get("reason", ""))
-                                self._paper_open(dummy, "BB Breakout", live_price=current_price)
-                        else:
-                            if self._session_paused:                               reason = "paused"
-                            elif q < 5:                                            reason = f"quality {q} < 5"
-                            else:                                                  reason = "MTF blocked"
-                            logger.info(f"[BB] Skipped {symbol} — {reason}")
-                        self._mark_sent(symbol, bb_sig["direction"] + "_bb", bb_sig["stage"])
-                        self._daily_alerts.append({"stage": bb_sig["stage"], "direction": bb_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 4: Break of Structure ────────────────────────
-                if not in_paper:
-                    vp_sig = self.vp_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if vp_sig and vp_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"]):
-                        q = vp_sig.get("quality", 3)
-                        logger.info(
-                            f"[BOS CONFIRMED] {vp_sig['direction'].upper()} {symbol} "
-                            f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
-                        )
-                        vp_trap = "Bull Trap" in vp_sig.get("reason", "")
-                        if q >= 5 and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
-                            conf = self._confluence(htf_df, entry_df, vp_sig["direction"], vp_sig["entry"], vp_trap)
-                            self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q, confluence=conf)
-                            self._bybit_order(vp_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=vp_sig["direction"], symbol=symbol,
-                                            entry_price=vp_sig["entry"], stop_loss=vp_sig["sl"],
-                                            tp1=vp_sig["tp1"], tp2=vp_sig["tp2"], tp3=vp_sig["tp3"],
-                                            atr=vp_sig["atr"], rsi=vp_sig["rsi"],
-                                            volume_ratio=vp_sig.get("vol_ratio", 0),
-                                            reason=vp_sig.get("reason", ""))
-                                self._paper_open(dummy, "Break of Structure", live_price=current_price)
-                        else:
-                            if self._session_paused:                               reason = "paused"
-                            elif q < 5:                                            reason = f"quality {q} < 5"
-                            else:                                                  reason = "MTF blocked"
-                            logger.info(f"[BOS] Skipped {symbol} — {reason}")
-                        self._mark_sent(symbol, vp_sig["direction"] + "_vp", vp_sig["stage"])
-                        self._daily_alerts.append({"stage": vp_sig["stage"], "direction": vp_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 5: RSI Divergence ────────────────────────────
-                if not in_paper:
-                    rd_sig = self.rd_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if rd_sig and rd_sig["stage"] == 2 and not self._is_on_cooldown(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"]):
-                        q = rd_sig.get("quality", 3)
-                        logger.info(
-                            f"[DIV CONFIRMED] {rd_sig['direction'].upper()} {symbol} "
-                            f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
-                        )
-                        if q >= 5 and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, rd_sig["direction"], rd_sig["entry"])
-                            self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q, confluence=conf)
-                            self._bybit_order(rd_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=rd_sig["direction"], symbol=symbol,
-                                            entry_price=rd_sig["entry"], stop_loss=rd_sig["sl"],
-                                            tp1=rd_sig["tp1"], tp2=rd_sig["tp2"], tp3=rd_sig["tp3"],
-                                            atr=rd_sig["atr"], rsi=rd_sig["rsi"],
-                                            volume_ratio=rd_sig.get("vol_ratio", 0),
-                                            reason=rd_sig.get("reason", ""))
-                                self._paper_open(dummy, "RSI Divergence", live_price=current_price)
-                        else:
-                            if self._session_paused:                              reason = "paused"
-                            elif q < 5:                                           reason = f"quality {q} < 5"
-                            else:                                                  reason = "MTF blocked"
-                            logger.info(f"[DIV] Skipped {symbol} — {reason}")
-                        self._mark_sent(symbol, rd_sig["direction"] + "_rd", rd_sig["stage"])
-                        self._daily_alerts.append({"stage": rd_sig["stage"], "direction": rd_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 6: MACD Zero Cross ───────────────────────────
-                if not in_paper:
-                    mz_sig = self.mz_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if mz_sig and mz_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"]):
-                        q = mz_sig.get("quality", 3)
-                        logger.info(
-                            f"[MACD0 CONFIRMED] {mz_sig['direction'].upper()} {symbol} "
-                            f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
-                        )
-                        if q >= 5 and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, mz_sig["direction"], mz_sig["entry"])
-                            self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q, confluence=conf)
-                            self._bybit_order(mz_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=mz_sig["direction"], symbol=symbol,
-                                            entry_price=mz_sig["entry"], stop_loss=mz_sig["sl"],
-                                            tp1=mz_sig["tp1"], tp2=mz_sig["tp2"], tp3=mz_sig["tp3"],
-                                            atr=mz_sig["atr"], rsi=mz_sig["rsi"],
-                                            volume_ratio=mz_sig.get("vol_ratio", 0),
-                                            reason=mz_sig.get("reason", ""))
-                                self._paper_open(dummy, "MACD Zero Cross", live_price=current_price)
-                        else:
-                            if self._session_paused:                              reason = "paused"
-                            elif q < 5:                                           reason = f"quality {q} < 5"
-                            else:                                                  reason = "MTF blocked"
-                            logger.info(f"[MACD0] Skipped {symbol} — {reason}")
-                        self._mark_sent(symbol, mz_sig["direction"] + "_mz", mz_sig["stage"])
-                        self._daily_alerts.append({"stage": mz_sig["stage"], "direction": mz_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 7: Whale Momentum ────────────────────────────
-                if not in_paper:
-                    wm_sig = self.wm_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if wm_sig and wm_sig["stage"] == 2 and not self._is_on_cooldown(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"]):
-                        q = wm_sig.get("quality", 5)
-                        logger.info(
-                            f"[WHALE CONFIRMED] {wm_sig['direction'].upper()} {symbol} "
-                            f"@ {wm_sig['entry']:.4f} | Q={q} | {wm_sig['reason']}"
-                        )
-                        if q >= 5 and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, wm_sig["direction"], wm_sig["entry"])
-                            self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q, confluence=conf)
-                            self._bybit_order(wm_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=wm_sig["direction"], symbol=symbol,
-                                            entry_price=wm_sig["entry"], stop_loss=wm_sig["sl"],
-                                            tp1=wm_sig["tp1"], tp2=wm_sig["tp2"], tp3=wm_sig["tp3"],
-                                            atr=wm_sig["atr"], rsi=wm_sig["rsi"],
-                                            volume_ratio=wm_sig.get("vol_ratio", 0),
-                                            reason=wm_sig.get("reason", ""))
-                                self._paper_open(dummy, "Whale Momentum", live_price=current_price)
-                        else:
-                            if self._session_paused:                              reason = "paused"
-                            elif q < 5:                                           reason = f"quality {q} < 5"
-                            else:                                                  reason = "MTF blocked"
-                            logger.info(f"[WHALE] Skipped {symbol} — {reason}")
-                        self._mark_sent(symbol, wm_sig["direction"] + "_wm", wm_sig["stage"])
-                        self._daily_alerts.append({"stage": wm_sig["stage"], "direction": wm_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 8: VWAP Pullback (swing only) ───────────────
-                if not in_paper and self.mode != "scalp":
-                    vwap_sig = self.vwap_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if vwap_sig and vwap_sig["stage"] == 2 and not self._is_on_cooldown(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"]):
-                        q = vwap_sig.get("quality", 3)
-                        logger.info(
-                            f"[VWAP CONFIRMED] {vwap_sig['direction'].upper()} {symbol} "
-                            f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
-                        )
-                        vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
-                        if q >= 5 and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
-                            conf = self._confluence(htf_df, entry_df, vwap_sig["direction"], vwap_sig["entry"], vwap_trap)
-                            self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q, confluence=conf)
-                            self._bybit_order(vwap_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=vwap_sig["direction"], symbol=symbol,
-                                            entry_price=vwap_sig["entry"], stop_loss=vwap_sig["sl"],
-                                            tp1=vwap_sig["tp1"], tp2=vwap_sig["tp2"], tp3=vwap_sig["tp3"],
-                                            atr=vwap_sig["atr"], rsi=vwap_sig["rsi"],
-                                            volume_ratio=vwap_sig.get("vol_ratio", 0),
-                                            reason=vwap_sig.get("reason", ""))
-                                self._paper_open(dummy, "VWAP Pullback", live_price=current_price)
-                        else:
-                            if self._session_paused:                                   reason = "paused"
-                            elif q < 5:                                                reason = f"quality {q} < 5"
-                            else:                                                      reason = "MTF blocked"
-                            logger.info(f"[VWAP] Skipped {symbol} — {reason}")
-                        self._mark_sent(symbol, vwap_sig["direction"] + "_vwap", vwap_sig["stage"])
-                        self._daily_alerts.append({"stage": vwap_sig["stage"], "direction": vwap_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 9: FVG Retest ────────────────────────────────
-                if not in_paper:
-                    fvg_sig = self.fvg_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if fvg_sig and fvg_sig["stage"] == 2 and not self._is_on_cooldown(symbol, fvg_sig["direction"] + "_fvg", fvg_sig["stage"]):
-                        q = fvg_sig.get("quality", 3)
-                        logger.info(f"[FVG CONFIRMED] {fvg_sig['direction'].upper()} {symbol} @ {fvg_sig['entry']:.4f} | Q={q} | {fvg_sig['reason']}")
-                        if q >= 4 and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, fvg_sig["direction"], fvg_sig["entry"])
-                            self.notifier.confirmed_signal(fvg_sig, self._strategy_label("FVG Retest", fvg_sig), q, confluence=conf)
-                            self._bybit_order(fvg_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=fvg_sig["direction"], symbol=symbol,
-                                            entry_price=fvg_sig["entry"], stop_loss=fvg_sig["sl"],
-                                            tp1=fvg_sig["tp1"], tp2=fvg_sig["tp2"], tp3=fvg_sig["tp3"],
-                                            atr=fvg_sig["atr"], rsi=fvg_sig["rsi"],
-                                            volume_ratio=fvg_sig.get("vol_ratio", 0),
-                                            reason=fvg_sig.get("reason", ""))
-                                self._paper_open(dummy, "FVG Retest", live_price=current_price)
-                        else:
-                            logger.info(f"[FVG] Skipped {symbol} — quality {q} < 4 or MTF blocked")
-                        self._mark_sent(symbol, fvg_sig["direction"] + "_fvg", fvg_sig["stage"])
-                        self._daily_alerts.append({"stage": fvg_sig["stage"], "direction": fvg_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 10: Liquidity Sweep Reversal ─────────────────
-                if not in_paper:
-                    sw_sig = self.sw_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if sw_sig and sw_sig["stage"] == 2 and not self._is_on_cooldown(symbol, sw_sig["direction"] + "_sw", sw_sig["stage"]):
-                        q = sw_sig.get("quality", 3)
-                        logger.info(f"[SWEEP CONFIRMED] {sw_sig['direction'].upper()} {symbol} @ {sw_sig['entry']:.4f} | Q={q} | {sw_sig['reason']}")
-                        if q >= 4 and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, sw_sig["direction"], sw_sig["entry"])
-                            self.notifier.confirmed_signal(sw_sig, self._strategy_label("Sweep Reversal", sw_sig), q, confluence=conf)
-                            self._bybit_order(sw_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=sw_sig["direction"], symbol=symbol,
-                                            entry_price=sw_sig["entry"], stop_loss=sw_sig["sl"],
-                                            tp1=sw_sig["tp1"], tp2=sw_sig["tp2"], tp3=sw_sig["tp3"],
-                                            atr=sw_sig["atr"], rsi=sw_sig["rsi"],
-                                            volume_ratio=sw_sig.get("vol_ratio", 0),
-                                            reason=sw_sig.get("reason", ""))
-                                self._paper_open(dummy, "Sweep Reversal", live_price=current_price)
-                        else:
-                            logger.info(f"[SWEEP] Skipped {symbol} — quality {q} < 4 or MTF blocked")
-                        self._mark_sent(symbol, sw_sig["direction"] + "_sw", sw_sig["stage"])
-                        self._daily_alerts.append({"stage": sw_sig["stage"], "direction": sw_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 11: Order Block Retest ───────────────────────
-                if not in_paper:
-                    ob_sig = self.ob_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if ob_sig and ob_sig["stage"] == 2 and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
-                        q = ob_sig.get("quality", 3)
-                        logger.info(f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} @ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}")
-                        if q >= 4 and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, ob_sig["direction"], ob_sig["entry"])
-                            self.notifier.confirmed_signal(ob_sig, self._strategy_label("OB Retest", ob_sig), q, confluence=conf)
-                            self._bybit_order(ob_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=ob_sig["direction"], symbol=symbol,
-                                            entry_price=ob_sig["entry"], stop_loss=ob_sig["sl"],
-                                            tp1=ob_sig["tp1"], tp2=ob_sig["tp2"], tp3=ob_sig["tp3"],
-                                            atr=ob_sig["atr"], rsi=ob_sig["rsi"],
-                                            volume_ratio=ob_sig.get("vol_ratio", 0),
-                                            reason=ob_sig.get("reason", ""))
-                                self._paper_open(dummy, "OB Retest", live_price=current_price)
-                        else:
-                            logger.info(f"[OB] Skipped {symbol} — quality {q} < 4 or MTF blocked")
-                        self._mark_sent(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"])
-                        self._daily_alerts.append({"stage": ob_sig["stage"], "direction": ob_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 12: MSS Pullback ─────────────────────────────
-                if not in_paper:
-                    mss_sig = self.mss_strategy.generate_signal(symbol, htf_df, entry_df, precision_df)
-                    if mss_sig and mss_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mss_sig["direction"] + "_mss", mss_sig["stage"]):
-                        q = mss_sig.get("quality", 3)
-                        logger.info(f"[MSS CONFIRMED] {mss_sig['direction'].upper()} {symbol} @ {mss_sig['entry']:.4f} | Q={q} | {mss_sig['reason']}")
-                        if q >= 4 and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
-                            conf = self._confluence(htf_df, entry_df, mss_sig["direction"], mss_sig["entry"])
-                            self.notifier.confirmed_signal(mss_sig, self._strategy_label("MSS Pullback", mss_sig), q, confluence=conf)
-                            self._bybit_order(mss_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=mss_sig["direction"], symbol=symbol,
-                                            entry_price=mss_sig["entry"], stop_loss=mss_sig["sl"],
-                                            tp1=mss_sig["tp1"], tp2=mss_sig["tp2"], tp3=mss_sig["tp3"],
-                                            atr=mss_sig["atr"], rsi=mss_sig["rsi"],
-                                            volume_ratio=mss_sig.get("vol_ratio", 0),
-                                            reason=mss_sig.get("reason", ""))
-                                self._paper_open(dummy, "MSS Pullback", live_price=current_price)
-                        else:
-                            logger.info(f"[MSS] Skipped {symbol} — quality {q} < 4 or MTF blocked")
-                        self._mark_sent(symbol, mss_sig["direction"] + "_mss", mss_sig["stage"])
-                        self._daily_alerts.append({"stage": mss_sig["stage"], "direction": mss_sig["direction"], "symbol": symbol})
-                        signals_found += 1
-
-                # ── Strategy 13: EMA Ribbon Pullback ──────────────────────
-                if not in_paper:
-                    erp_sig = self.erp_strategy.generate_signal(symbol, htf_df, entry_df)
-                    if erp_sig and erp_sig["stage"] == 2 and not self._is_on_cooldown(symbol, erp_sig["direction"] + "_erp", erp_sig["stage"]):
-                        q = erp_sig.get("quality", 3)
-                        logger.info(f"[ERP CONFIRMED] {erp_sig['direction'].upper()} {symbol} @ {erp_sig['entry']:.4f} | Q={q} | {erp_sig['reason']}")
-                        erp_trap = "Bull Trap" in erp_sig.get("reason", "")
-                        if q >= 5 and self._mtf_confirm(symbol, erp_sig["direction"], precision_df, is_bull_trap=erp_trap):
-                            conf = self._confluence(htf_df, entry_df, erp_sig["direction"], erp_sig["entry"], erp_trap)
-                            self.notifier.confirmed_signal(erp_sig, self._strategy_label("EMA Ribbon Pullback", erp_sig), q, confluence=conf)
-                            self._bybit_order(erp_sig, symbol)
-                            if self.paper_enabled and symbol not in self._paper_positions:
-                                from src.strategy import Signal as Sig
-                                dummy = Sig(stage=2, direction=erp_sig["direction"], symbol=symbol,
-                                            entry_price=erp_sig["entry"], stop_loss=erp_sig["sl"],
-                                            tp1=erp_sig["tp1"], tp2=erp_sig["tp2"], tp3=erp_sig["tp3"],
-                                            atr=erp_sig["atr"], rsi=erp_sig["rsi"],
-                                            volume_ratio=erp_sig.get("vol_ratio", 0),
-                                            reason=erp_sig.get("reason", ""))
-                                self._paper_open(dummy, "EMA Ribbon Pullback", live_price=current_price)
-                        else:
-                            logger.info(f"[ERP] Skipped {symbol} — quality {q} < 5 or MTF blocked")
-                        self._mark_sent(symbol, erp_sig["direction"] + "_erp", erp_sig["stage"])
-                        self._daily_alerts.append({"stage": erp_sig["stage"], "direction": erp_sig["direction"], "symbol": symbol})
+                    if self._elite_tick(
+                        symbol=symbol,
+                        weekly_df=weekly_df,
+                        h4_df=htf_df,
+                        regime=regime_info,
+                        current_price=current_price,
+                        live_price=live_price,
+                    ):
                         signals_found += 1
 
             except Exception as e:
@@ -1240,6 +930,224 @@ class Bot:
 
         self._maybe_send_daily_summary()
         self._maybe_send_positions_report()
+
+    # ------------------------------------------------------------------
+    # Elite 4H system methods
+    # ------------------------------------------------------------------
+
+    def _elite_tick(
+        self,
+        symbol: str,
+        weekly_df,
+        h4_df,
+        regime: dict,
+        current_price: float,
+        live_price: float = None,
+    ) -> bool:
+        """
+        Run the Elite 4H strategy for one symbol.
+        Returns True if a signal was queued for admin approval.
+        """
+        # Daily signal cap
+        if self._daily_elite_count >= self._daily_sig_limit:
+            return False
+
+        # Consecutive-SL cooldown
+        if self._elite_paused:
+            return False
+
+        # Max concurrent positions
+        concurrent = len(self._paper_positions) + len(self._mexc_positions)
+        if concurrent >= self._max_concurrent:
+            return False
+
+        # Already pending approval for this symbol — don't spam admin
+        if any(v["symbol"] == symbol for v in self._pending_signals.values()):
+            return False
+
+        # Standard signal cooldown
+        if self._is_on_cooldown(symbol, "elite", 2):
+            return False
+
+        try:
+            sig = self.elite_strategy.generate_signal(
+                symbol=symbol,
+                weekly_df=weekly_df,
+                h4_df=h4_df,
+                regime=regime,
+                exchange=self.exchange if self.bybit.enabled else None,
+            )
+        except Exception as e:
+            logger.warning(f"[ELITE] {symbol} generate_signal error: {e}")
+            return False
+
+        if not sig:
+            return False
+
+        # Queue for admin approval
+        pid = self._next_pending_id
+        self._next_pending_id += 1
+        self._pending_signals[pid] = {
+            "id":         pid,
+            "symbol":     symbol,
+            "signal":     sig,
+            "live_price": live_price or current_price,
+            "sent_at":    datetime.utcnow(),
+        }
+        self._send_signal_approval(pid, sig, regime)
+        self._mark_sent(symbol, "elite", 2)
+        self._daily_alerts.append({"stage": 2, "direction": sig["direction"], "symbol": symbol})
+
+        logger.info(
+            f"[ELITE] {sig['direction'].upper()} {symbol} "
+            f"@ {sig['entry']:.6g} | Score={sig['score']}/10 | Pending #{pid}"
+        )
+        return True
+
+    def _send_signal_approval(self, pid: int, sig: dict, regime: dict):
+        """Send signal to admin bot with Approve / Skip / Wait buttons."""
+        def f(v):
+            if v is None:   return "N/A"
+            if abs(v) >= 1000: return f"{v:.2f}"
+            if abs(v) >= 10:   return f"{v:.4f}"
+            return f"{v:.6f}"
+
+        direction  = sig["direction"]
+        symbol     = sig["symbol"]
+        score      = sig.get("score", 0)
+        t_score    = sig.get("tech_score", 0)
+        s_score    = sig.get("sent_score", 0)
+        dir_icon   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+        regime_lbl = {"bull": "🟢 Bull", "bear": "🔴 Bear", "neutral": "⚪ Neutral"}.get(
+            regime.get("regime", "neutral"), "⚪ Neutral"
+        )
+        bar_t = "█" * t_score + "░" * (5 - t_score)
+        bar_s = "█" * s_score + "░" * (5 - s_score)
+
+        text = (
+            f"🔔 <b>Signal #{pid:03d} — Pending Approval</b>\n\n"
+            f"{dir_icon}  •  <b>{symbol}</b>\n"
+            f"Elite 4H BOS\n\n"
+            f"📌 Entry  <code>{f(sig['entry'])}</code>\n"
+            f"🛑 SL       <code>{f(sig['sl'])}</code>\n"
+            f"🎯 TP1    <code>{f(sig['tp1'])}</code>\n"
+            f"🏆 TP2    <code>{f(sig['tp2'])}</code>\n"
+            f"💰 TP3    <code>{f(sig['tp3'])}</code>\n\n"
+            f"📊 Score  <b>{score}/10</b>  "
+            f"Tech {bar_t} ({t_score}/5)  Sent {bar_s} ({s_score}/5)\n"
+            f"🌍 Regime  {regime_lbl}\n\n"
+            f"<i>{sig.get('reason', '')[:150]}</i>"
+        )
+        markup = {
+            "inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"elite_approve_{pid}"},
+                {"text": "⏭ Skip",    "callback_data": f"elite_skip_{pid}"},
+                {"text": "⏳ Wait",   "callback_data": f"elite_wait_{pid}"},
+            ]]
+        }
+        self._admin_send(text, markup=markup)
+
+    def _handle_signal_approve(self, pid: int):
+        """
+        Execute an approved elite signal:
+          1. Post to public Telegram channel
+          2. Place MEXC order
+          3. Open paper position
+        """
+        entry_data = self._pending_signals.pop(pid, None)
+        if not entry_data:
+            logger.warning(f"[ELITE] Approved #{pid} not found in pending dict")
+            return
+
+        sig    = entry_data["signal"]
+        symbol = entry_data["symbol"]
+        live_p = entry_data.get("live_price", sig.get("entry", 0))
+        self._daily_elite_count += 1
+
+        direction = sig["direction"]
+        score     = sig.get("score", 0)
+        stars     = "⭐" * min(score // 2, 5)
+        dir_tag   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+        base      = symbol.split("/")[0]
+
+        def f(v):
+            if v is None:      return "N/A"
+            if abs(v) >= 1000: return f"{v:.2f}"
+            if abs(v) >= 10:   return f"{v:.4f}"
+            return f"{v:.6f}"
+
+        # Compute qty from notifier helper (risk = $10 default)
+        try:
+            from src.notifier import Notifier as _N
+            qty = _N._qty_for_risk(sig["entry"], sig["sl"])
+            qty_line = f"\n📦 Qty  <code>{_N._fmt_qty(qty)} {base}</code>"
+        except Exception:
+            qty_line = ""
+
+        pub_text = (
+            f"{dir_tag}  •  <b>{symbol}</b>\n"
+            f"Elite 4H BOS  {stars}\n\n"
+            f"📌 Entry  <code>{f(sig['entry'])}</code>\n"
+            f"🛑 SL       <code>{f(sig['sl'])}</code>\n"
+            f"🎯 TP1    <code>{f(sig['tp1'])}</code>\n"
+            f"🏆 TP2    <code>{f(sig['tp2'])}</code>{qty_line}"
+        )
+        self.notifier.send(pub_text)
+
+        # MEXC live order
+        self._bybit_order(sig, symbol)
+
+        # Paper position
+        if self.paper_enabled and symbol not in self._paper_positions:
+            from src.strategy import Signal as Sig
+            dummy = Sig(
+                stage=2, direction=direction, symbol=symbol,
+                entry_price=sig["entry"], stop_loss=sig["sl"],
+                tp1=sig["tp1"], tp2=sig["tp2"], tp3=sig["tp3"],
+                atr=sig.get("atr", 0), rsi=sig.get("rsi", 50),
+                volume_ratio=sig.get("vol_ratio", 0),
+                reason=sig.get("reason", ""),
+            )
+            self._paper_open(dummy, "Elite 4H BOS", live_price=live_p)
+
+        logger.info(
+            f"[ELITE] #{pid} approved — {direction.upper()} {symbol} "
+            f"posted to channel + MEXC order placed"
+        )
+
+    def _process_webhook_signals(self, regime: dict):
+        """Drain the TradingView webhook queue and send each signal for admin approval."""
+        while not self._webhook_queue.empty():
+            try:
+                sig    = self._webhook_queue.get_nowait()
+                symbol = sig["symbol"]
+
+                if self._daily_elite_count >= self._daily_sig_limit:
+                    logger.info(f"[WEBHOOK] {symbol} dropped — daily limit reached")
+                    continue
+                if self._elite_paused:
+                    logger.info(f"[WEBHOOK] {symbol} dropped — elite paused")
+                    continue
+                if self._is_on_cooldown(symbol, "elite", 2):
+                    logger.info(f"[WEBHOOK] {symbol} dropped — on cooldown")
+                    continue
+                if any(v["symbol"] == symbol for v in self._pending_signals.values()):
+                    logger.info(f"[WEBHOOK] {symbol} dropped — already pending")
+                    continue
+
+                pid = self._next_pending_id
+                self._next_pending_id += 1
+                self._pending_signals[pid] = {
+                    "id": pid, "symbol": symbol,
+                    "signal": sig, "live_price": sig.get("entry", 0),
+                    "sent_at": datetime.utcnow(),
+                }
+                self._send_signal_approval(pid, sig, regime)
+                self._mark_sent(symbol, "elite", 2)
+                self._daily_alerts.append({"stage": 2, "direction": sig["direction"], "symbol": symbol})
+                logger.info(f"[WEBHOOK] TV signal #{pid} queued for approval: {symbol} {sig['direction']}")
+            except Exception as e:
+                logger.warning(f"[WEBHOOK] Process error: {e}")
 
     def _send_session_summary(self):
         trades = self._session_trades
@@ -1370,29 +1278,33 @@ class Bot:
 
     def _control_panel_markup(self) -> dict:
         """Inline keyboard for the admin control panel."""
-        bybit_btn  = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
-        bybit_cb   = "cmd_stop" if self.bybit.enabled else "cmd_start"
-        scalp_btn  = "⚡ Scalp ✓" if self.mode == "scalp" else "⚡ Scalp"
-        swing_btn  = "📈 Swing ✓" if self.mode == "swing" else "📈 Swing"
-        c    = self._confluence_min
-        conf_toggle = "🎯 Confluence: ON ✅" if self._confluence_enabled else "🎯 Confluence: OFF ❌"
+        bybit_btn    = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
+        bybit_cb     = "cmd_stop"        if self.bybit.enabled else "cmd_start"
+        scalp_btn    = "⚡ Scalp ✓"     if self.mode == "scalp" else "⚡ Scalp"
+        swing_btn    = "📈 Swing ✓"     if self.mode == "swing" else "📈 Swing"
+        elite_pause_btn = "▶️ Resume Elite" if self._elite_paused else "⏸ Pause Elite"
+        elite_pause_cb  = "cmd_resume_elite" if self._elite_paused else "cmd_pause_elite"
+        pending_n    = len(self._pending_signals)
         return {
             "inline_keyboard": [
+                # Row 1: MEXC toggle
                 [{"text": bybit_btn, "callback_data": bybit_cb}],
+                # Row 2: Mode switch
                 [
                     {"text": scalp_btn, "callback_data": "cmd_scalp"},
                     {"text": swing_btn, "callback_data": "cmd_swing"},
                 ],
-                [{"text": conf_toggle, "callback_data": "cmd_conf_toggle"}],
+                # Row 3: Elite controls
                 [
-                    {"text": f"{'✅' if c==1 else '·'} Min 1", "callback_data": "cmd_conf_1"},
-                    {"text": f"{'✅' if c==2 else '·'} Min 2", "callback_data": "cmd_conf_2"},
-                    {"text": f"{'✅' if c==3 else '·'} Min 3", "callback_data": "cmd_conf_3"},
+                    {"text": elite_pause_btn, "callback_data": elite_pause_cb},
+                    {"text": "🔄 Reset Daily", "callback_data": "cmd_reset_daily"},
                 ],
+                # Row 4: Pending signals
                 [
-                    {"text": f"{'✅' if c==4 else '·'} Min 4", "callback_data": "cmd_conf_4"},
-                    {"text": f"{'✅' if c==5 else '·'} Min 5", "callback_data": "cmd_conf_5"},
+                    {"text": f"⏳ Pending: {pending_n}", "callback_data": "cmd_status"},
+                    {"text": f"📊 Today: {self._daily_elite_count}/{self._daily_sig_limit}", "callback_data": "cmd_status"},
                 ],
+                # Row 5: Status
                 [{"text": "📊 Status", "callback_data": "cmd_status"}],
             ]
         }
@@ -1416,18 +1328,25 @@ class Bot:
 
     def _send_control_panel(self, *_):
         """Send the control panel with current state and action buttons."""
-        bybit_state = "🟢 ON" if self.bybit.enabled else "🔴 OFF"  # self.bybit is MexcExecutor
-        paper_state = "🟢 ON" if self.paper_enabled else "🔴 OFF"
-        open_pos    = len(self._paper_positions)
-        balance     = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
+        bybit_state  = "🟢 ON"   if self.bybit.enabled  else "🔴 OFF"
+        paper_state  = "🟢 ON"   if self.paper_enabled  else "🔴 OFF"
+        elite_state  = "🔴 PAUSED" if self._elite_paused else "🟢 ACTIVE"
+        resume_note  = ""
+        if self._elite_paused and self._elite_resume_at:
+            resume_note = f" (resumes {self._elite_resume_at.strftime('%H:%M UTC')})"
+        open_pos     = len(self._paper_positions)
+        balance      = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
+        pending_n    = len(self._pending_signals)
         text = (
             f"🤖 <b>Bot Control Panel</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"MEXC execution:  {bybit_state}\n"
-            f"Paper trading:   {paper_state} ({balance})\n"
-            f"Open positions:  {open_pos}\n"
-            f"Mode: {self.mode.upper()}\n"
-            f"Confluence: {'ON — min ' + str(self._confluence_min) + '/5' if self._confluence_enabled else 'OFF (all signals pass)'}"
+            f"MEXC execution:   {bybit_state}\n"
+            f"Paper trading:    {paper_state} ({balance})\n"
+            f"Open positions:   {open_pos}\n"
+            f"Mode:             {self.mode.upper()}\n"
+            f"Elite scanning:   {elite_state}{resume_note}\n"
+            f"Signals today:    {self._daily_elite_count}/{self._daily_sig_limit}\n"
+            f"Pending approval: {pending_n}"
         )
         self._admin_send(text, markup=self._control_panel_markup())
 
@@ -1513,6 +1432,57 @@ class Bot:
                                 self._send_control_panel()
                         except (ValueError, IndexError):
                             pass
+
+                    # ── Elite signal approval buttons ────────────────────
+                    elif cb_data.startswith("elite_approve_"):
+                        try:
+                            pid = int(cb_data.split("elite_approve_")[1])
+                            self._handle_signal_approve(pid)
+                            self._answer_callback(cb_id, "✅ Signal approved & posted")
+                        except (ValueError, IndexError, Exception) as e:
+                            logger.warning(f"[CMD] elite_approve error: {e}")
+                            self._answer_callback(cb_id, "Error approving signal")
+
+                    elif cb_data.startswith("elite_skip_"):
+                        try:
+                            pid  = int(cb_data.split("elite_skip_")[1])
+                            item = self._pending_signals.pop(pid, None)
+                            sym  = item["symbol"] if item else "unknown"
+                            self._answer_callback(cb_id, "⏭ Signal skipped")
+                            logger.info(f"[ELITE] Signal #{pid} ({sym}) skipped by admin")
+                        except (ValueError, IndexError):
+                            pass
+
+                    elif cb_data.startswith("elite_wait_"):
+                        try:
+                            pid = int(cb_data.split("elite_wait_")[1])
+                            self._answer_callback(cb_id, "⏳ Signal held for re-evaluation")
+                            logger.info(f"[ELITE] Signal #{pid} held by admin")
+                        except (ValueError, IndexError):
+                            pass
+
+                    # ── Elite control buttons ─────────────────────────────
+                    elif cb_data == "cmd_pause_elite":
+                        self._elite_paused    = True
+                        self._elite_resume_at = None
+                        logger.info("[CMD] Elite scanning PAUSED by admin")
+                        self._answer_callback(cb_id, "⏸ Elite scanning paused")
+                        self._send_control_panel()
+
+                    elif cb_data == "cmd_resume_elite":
+                        self._elite_paused    = False
+                        self._elite_resume_at = None
+                        self._consecutive_sl  = 0
+                        logger.info("[CMD] Elite scanning RESUMED by admin")
+                        self._answer_callback(cb_id, "▶️ Elite scanning resumed")
+                        self._send_control_panel()
+
+                    elif cb_data == "cmd_reset_daily":
+                        self._daily_elite_count = 0
+                        logger.info("[CMD] Daily signal count reset")
+                        self._answer_callback(cb_id, "🔄 Daily count reset to 0")
+                        self._send_control_panel()
+
                     continue
 
                 # ── Text command ─────────────────────────────────────────
@@ -1548,7 +1518,11 @@ class Bot:
         logger.info(f"Scanner started — {dp_note}{paper_note} | Mode: {self.mode.upper()}")
         logger.info(f"Trend TF: {self.tf_trend} | Structure TF: {self.tf_entry} | Precision TF: {self.tf_precision} | SR TF: {self.tf_sr}")
         logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
+        logger.info(f"Elite 4H system: daily_limit={self._daily_sig_limit} | max_concurrent={self._max_concurrent}")
         logger.info("=" * 60)
+
+        # Start TradingView webhook server (daemon thread — only if WEBHOOK_SECRET set)
+        self._webhook_server.start()
 
         try:
             symbols = self.pair_selector.get_symbols()
@@ -1557,18 +1531,11 @@ class Bot:
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
         bybit_note = f" | MEXC: {'ON' if self.bybit.enabled else 'OFF'}"
-        strat_list = [
-            "S/R Bounce", "BB Breakout", "BOS", "RSI Divergence",
-            "MACD Zero Cross", "🐋 Whale Momentum",
-            "FVG Retest", "Sweep Reversal", "OB Retest", "MSS Pullback",
-        ]
-        if self.mode != "scalp":
-            strat_list.append("VWAP Pullback")
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=strat_list,
-            label=f"Crypto Futures Scanner{bybit_note}",
+            strategies=["Elite 4H BOS (10-point confluence scoring)"],
+            label=f"Elite Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
             confluence_min=self._confluence_min,
             tf_precision=self.tf_precision,
