@@ -370,31 +370,25 @@ class MexcExecutor:
                    sl_price: float, tp_price: float) -> None:
         """Attach SL and TP to an open position via /stoporder/place (best-effort)."""
         import time as _time
-        _time.sleep(1)   # brief pause to let the fill register
+        _time.sleep(2)   # wait for fill to register on MEXC side before attaching stop
         try:
-            # position_type: 1=long, 2=short
-            pos_type  = 1 if side == 1 else 2
-            # trend for SL: long→2 (price falls below), short→1 (price rises above)
-            sl_trend  = 2 if side == 1 else 1
-            # trend for TP: long→1 (price rises above), short→2 (price falls below)
-            tp_trend  = 1 if side == 1 else 2
+            pos_type = 1 if side == 1 else 2   # 1=long position, 2=short position
+            sl_str   = format(Decimal(repr(sl_price)), 'f')
+            tp_str   = format(Decimal(repr(tp_price)), 'f')
 
-            sl_str = format(Decimal(repr(sl_price)), 'f')
-            tp_str = format(Decimal(repr(tp_price)), 'f')
-
-            self._post("/api/v1/private/stoporder/place", {
-                "symbol":              symbol,
-                "positionType":        str(pos_type),
-                "stopLossType":        "1",      # 1=last price trigger
-                "stopLossPrice":       sl_str,
-                "stopLossOrderPrice":  sl_str,
-                "takeProfitType":      "1",
-                "takeProfitPrice":     tp_str,
-                "takeProfitOrderPrice": tp_str,
-            })
-            logger.info(f"[MEXC] SL/TP set | SL={sl_price} TP={tp_price} for {symbol}")
+            body = {
+                "symbol":            symbol,
+                "positionType":      str(pos_type),
+                "vol":               str(vol),        # quantity to protect
+                "stopLossType":      "1",             # 1 = last price trigger
+                "stopLossPrice":     sl_str,
+                "takeProfitType":    "1",
+                "takeProfitPrice":   tp_str,
+            }
+            resp = self._post("/api/v1/private/stoporder/place", body)
+            logger.info(f"[MEXC] SL/TP set | SL={sl_price} TP={tp_price} for {symbol} | resp={resp.get('data')}")
         except Exception as e:
-            logger.warning(f"[MEXC] SL/TP stop-order failed for {symbol}: {e}")
+            logger.warning(f"[MEXC] SL/TP stop-order FAILED for {symbol}: {e}")
 
     # ------------------------------------------------------------------
     # Close position (market)
