@@ -368,27 +368,57 @@ class MexcExecutor:
 
     def _set_sl_tp(self, symbol: str, side: int, vol: int,
                    sl_price: float, tp_price: float) -> None:
-        """Attach SL and TP to an open position via /stoporder/place (best-effort)."""
+        """
+        Attach SL and TP to an open position via /stoporder/place.
+        MEXC error 2009 = position not yet registered — retries with increasing
+        delays until the position is visible, then attaches the stop.
+        """
         import time as _time
-        _time.sleep(2)   # wait for fill to register on MEXC side before attaching stop
-        try:
-            pos_type = 1 if side == 1 else 2   # 1=long position, 2=short position
-            sl_str   = format(Decimal(repr(sl_price)), 'f')
-            tp_str   = format(Decimal(repr(tp_price)), 'f')
 
-            body = {
-                "symbol":            symbol,
-                "positionType":      str(pos_type),
-                "vol":               str(vol),        # quantity to protect
-                "stopLossType":      "1",             # 1 = last price trigger
-                "stopLossPrice":     sl_str,
-                "takeProfitType":    "1",
-                "takeProfitPrice":   tp_str,
-            }
-            resp = self._post("/api/v1/private/stoporder/place", body)
-            logger.info(f"[MEXC] SL/TP set | SL={sl_price} TP={tp_price} for {symbol} | resp={resp.get('data')}")
-        except Exception as e:
-            logger.warning(f"[MEXC] SL/TP stop-order FAILED for {symbol}: {e}")
+        pos_type = 1 if side == 1 else 2
+        sl_str   = format(Decimal(repr(sl_price)), 'f')
+        tp_str   = format(Decimal(repr(tp_price)), 'f')
+        body = {
+            "symbol":          symbol,
+            "positionType":    str(pos_type),
+            "vol":             str(vol),
+            "stopLossType":    "1",     # last price trigger
+            "stopLossPrice":   sl_str,
+            "takeProfitType":  "1",
+            "takeProfitPrice": tp_str,
+        }
+
+        delays = [3, 5, 8, 12]   # seconds between attempts
+        for attempt, delay in enumerate(delays, start=1):
+            _time.sleep(delay)
+            try:
+                # Confirm position is visible before placing stop
+                if not self.has_open_position(symbol):
+                    logger.warning(
+                        f"[MEXC] SL/TP attempt {attempt}/{len(delays)}: "
+                        f"position not yet visible for {symbol} — retrying in {delays[attempt - 1] if attempt < len(delays) else '—'}s"
+                    )
+                    continue
+
+                resp = self._post("/api/v1/private/stoporder/place", body)
+                logger.info(
+                    f"[MEXC] SL/TP set (attempt {attempt}) | "
+                    f"SL={sl_price} TP={tp_price} for {symbol} | resp={resp.get('data')}"
+                )
+                return   # success
+
+            except Exception as e:
+                err = str(e)
+                if "2009" in err:
+                    logger.warning(
+                        f"[MEXC] SL/TP attempt {attempt}/{len(delays)} error 2009 "
+                        f"(position not ready yet) for {symbol} — retrying"
+                    )
+                else:
+                    logger.error(f"[MEXC] SL/TP stop-order FAILED for {symbol}: {e}")
+                    return   # non-retryable
+
+        logger.error(f"[MEXC] SL/TP failed after {len(delays)} attempts for {symbol} — no stop set")
 
     # ------------------------------------------------------------------
     # Close position (market)
