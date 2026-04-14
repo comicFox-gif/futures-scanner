@@ -255,17 +255,9 @@ class Bot:
         live_price: live MEXC ticker price — used as the actual entry price.
                     Falls back to signal.entry_price if not provided.
         """
-        self._check_session_resume()
-
-        if self._session_paused:
-            return
-
         symbol = signal.symbol if hasattr(signal, "symbol") else signal["symbol"]
         if symbol in self._paper_positions:
             logger.debug(f"[PAPER] Already in position for {symbol}, skipping")
-            return
-
-        if self._session_count >= 50:
             return
 
         sig_entry = signal.entry_price if hasattr(signal, "entry_price") else signal["entry"]
@@ -288,8 +280,8 @@ class Bot:
         tp2 = sig_tp2 + offset
         tp3 = sig_tp3 + offset
 
-        # Hard cap: max $5 SL exposure per paper trade
-        risk_amount = round(min(self.paper_balance * self.risk_pct, 5.0), 2)
+        # Hard cap: max $10 SL exposure per paper trade
+        risk_amount = round(min(self.paper_balance * self.risk_pct, 10.0), 2)
         size = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -323,9 +315,6 @@ class Bot:
         self.notifier.paper_opened(pos, self.paper_balance, open_count, self._session_count)
         save_state(self)
 
-        # Stop opening new trades once 20 have been opened
-        if self._session_count >= 20:
-            self._session_paused = True  # no new entries — wait for all to close
 
     def _paper_close(self, symbol: str, exit_price: float, reason: str, tp_level: int = 0):
         """Close a paper position and send the closed alert. Used by tick and distribution exit."""
@@ -366,10 +355,6 @@ class Bot:
         del self._paper_positions[symbol]
         open_count = len(self._paper_positions)
 
-        if self._session_count >= 20 and open_count == 0:
-            self._send_session_summary()
-            self._resume_at = datetime.utcnow() + timedelta(hours=3)
-            logger.info("[PAPER] Session complete — 5h pause started")
 
         logger.info(
             f"[PAPER] CLOSED {symbol} | {reason} "
@@ -529,7 +514,7 @@ class Bot:
         tp2 = sig_tp2 + offset
         tp3 = sig_tp3 + offset
 
-        risk_amount = round(min(self.forex_paper_balance * self.risk_pct, 5.0), 2)
+        risk_amount = round(min(self.forex_paper_balance * self.risk_pct, 10.0), 2)
         size        = round(risk_amount / sl_dist, 6)
         if size <= 0:
             return
@@ -592,7 +577,7 @@ class Bot:
 
     def _bybit_order(self, sig, symbol: str = ""):
         """Place order on MEXC. Accepts Signal dataclass or dict."""
-        if not self.bybit.enabled or self._session_paused:
+        if not self.bybit.enabled:
             return
         if hasattr(sig, "entry_price"):   # Signal dataclass
             d = {"symbol": sig.symbol, "direction": sig.direction,
@@ -867,7 +852,7 @@ class Bot:
                             f"[SR CONFIRMED] {sr_sig['direction'].upper()} {symbol} "
                             f"@ {sr_sig['entry']:.4f} | Q={q} | {sr_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, sr_sig["direction"], precision_df):
                             sr_trap = "Bull Trap" in sr_sig.get("reason", "")
                             conf = self._confluence(htf_df, entry_df, sr_sig["direction"], sr_sig["entry"], sr_trap)
                             if sr_trap:
@@ -905,7 +890,7 @@ class Bot:
                             f"@ {bb_sig['entry']:.4f} | Q={q} | {bb_sig['reason']}"
                         )
                         bb_trap = "Bull Trap" in bb_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
+                        if q >= 5 and self._mtf_confirm(symbol, bb_sig["direction"], precision_df, is_bull_trap=bb_trap):
                             conf = self._confluence(htf_df, entry_df, bb_sig["direction"], bb_sig["entry"], bb_trap)
                             self.notifier.confirmed_signal(bb_sig, self._strategy_label("BB Breakout", bb_sig), q, confluence=conf)
                             self._bybit_order(bb_sig, symbol)
@@ -937,7 +922,7 @@ class Bot:
                             f"@ {vp_sig['entry']:.4f} | Q={q} | {vp_sig['reason']}"
                         )
                         vp_trap = "Bull Trap" in vp_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
+                        if q >= 5 and self._mtf_confirm(symbol, vp_sig["direction"], precision_df, is_bull_trap=vp_trap):
                             conf = self._confluence(htf_df, entry_df, vp_sig["direction"], vp_sig["entry"], vp_trap)
                             self.notifier.confirmed_signal(vp_sig, self._strategy_label("Break of Structure", vp_sig), q, confluence=conf)
                             self._bybit_order(vp_sig, symbol)
@@ -968,7 +953,7 @@ class Bot:
                             f"[DIV CONFIRMED] {rd_sig['direction'].upper()} {symbol} "
                             f"@ {rd_sig['entry']:.4f} | Q={q} | {rd_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, rd_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, rd_sig["direction"], rd_sig["entry"])
                             self.notifier.confirmed_signal(rd_sig, self._strategy_label("RSI Divergence", rd_sig), q, confluence=conf)
                             self._bybit_order(rd_sig, symbol)
@@ -999,7 +984,7 @@ class Bot:
                             f"[MACD0 CONFIRMED] {mz_sig['direction'].upper()} {symbol} "
                             f"@ {mz_sig['entry']:.4f} | Q={q} | {mz_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, mz_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mz_sig["direction"], mz_sig["entry"])
                             self.notifier.confirmed_signal(mz_sig, self._strategy_label("MACD Zero Cross", mz_sig), q, confluence=conf)
                             self._bybit_order(mz_sig, symbol)
@@ -1030,7 +1015,7 @@ class Bot:
                             f"[WHALE CONFIRMED] {wm_sig['direction'].upper()} {symbol} "
                             f"@ {wm_sig['entry']:.4f} | Q={q} | {wm_sig['reason']}"
                         )
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, wm_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, wm_sig["direction"], wm_sig["entry"])
                             self.notifier.confirmed_signal(wm_sig, "🐋 Whale Momentum", q, confluence=conf)
                             self._bybit_order(wm_sig, symbol)
@@ -1062,7 +1047,7 @@ class Bot:
                             f"@ {vwap_sig['entry']:.4f} | Q={q} | {vwap_sig['reason']}"
                         )
                         vwap_trap = "Bull Trap" in vwap_sig.get("reason", "")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
+                        if q >= 5 and self._mtf_confirm(symbol, vwap_sig["direction"], precision_df, is_bull_trap=vwap_trap):
                             conf = self._confluence(htf_df, entry_df, vwap_sig["direction"], vwap_sig["entry"], vwap_trap)
                             self.notifier.confirmed_signal(vwap_sig, self._strategy_label("VWAP Pullback", vwap_sig), q, confluence=conf)
                             self._bybit_order(vwap_sig, symbol)
@@ -1090,7 +1075,7 @@ class Bot:
                     if fvg_sig and fvg_sig["stage"] == 2 and not self._is_on_cooldown(symbol, fvg_sig["direction"] + "_fvg", fvg_sig["stage"]):
                         q = fvg_sig.get("quality", 3)
                         logger.info(f"[FVG CONFIRMED] {fvg_sig['direction'].upper()} {symbol} @ {fvg_sig['entry']:.4f} | Q={q} | {fvg_sig['reason']}")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, fvg_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, fvg_sig["direction"], fvg_sig["entry"])
                             if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(fvg_sig, self._strategy_label("FVG Retest", fvg_sig), q, confluence=conf)
@@ -1121,7 +1106,7 @@ class Bot:
                     if sw_sig and sw_sig["stage"] == 2 and not self._is_on_cooldown(symbol, sw_sig["direction"] + "_sw", sw_sig["stage"]):
                         q = sw_sig.get("quality", 3)
                         logger.info(f"[SWEEP CONFIRMED] {sw_sig['direction'].upper()} {symbol} @ {sw_sig['entry']:.4f} | Q={q} | {sw_sig['reason']}")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, sw_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, sw_sig["direction"], sw_sig["entry"])
                             if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(sw_sig, self._strategy_label("Sweep Reversal", sw_sig), q, confluence=conf)
@@ -1152,7 +1137,7 @@ class Bot:
                     if ob_sig and ob_sig["stage"] == 2 and not self._is_on_cooldown(symbol, ob_sig["direction"] + "_ob", ob_sig["stage"]):
                         q = ob_sig.get("quality", 3)
                         logger.info(f"[OB CONFIRMED] {ob_sig['direction'].upper()} {symbol} @ {ob_sig['entry']:.4f} | Q={q} | {ob_sig['reason']}")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, ob_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, ob_sig["direction"], ob_sig["entry"])
                             if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(ob_sig, self._strategy_label("OB Retest", ob_sig), q, confluence=conf)
@@ -1183,7 +1168,7 @@ class Bot:
                     if mss_sig and mss_sig["stage"] == 2 and not self._is_on_cooldown(symbol, mss_sig["direction"] + "_mss", mss_sig["stage"]):
                         q = mss_sig.get("quality", 3)
                         logger.info(f"[MSS CONFIRMED] {mss_sig['direction'].upper()} {symbol} @ {mss_sig['entry']:.4f} | Q={q} | {mss_sig['reason']}")
-                        if not self._session_paused and q >= 5 and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
+                        if q >= 5 and self._mtf_confirm(symbol, mss_sig["direction"], precision_df):
                             conf = self._confluence(htf_df, entry_df, mss_sig["direction"], mss_sig["entry"])
                             if not self._confluence_enabled or conf[0] >= self._confluence_min:
                                 self.notifier.confirmed_signal(mss_sig, self._strategy_label("MSS Pullback", mss_sig), q, confluence=conf)
