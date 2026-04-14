@@ -325,19 +325,18 @@ class MexcExecutor:
 
     def _submit_order(self, symbol: str, side: int, vol: int,
                       sl_price: float, tp_price: float, spec: dict) -> dict:
-        """Submit market order; on margin error halve vol and retry once."""
+        """Submit market order then set SL/TP via stop-order endpoint."""
         for attempt in range(2):
             try:
+                # Step 1 — place market entry (no inline SL/TP, MEXC rejects code 5003)
                 body = {
-                    "symbol":          symbol,
-                    "price":           "0",
-                    "vol":             str(vol),
-                    "leverage":        str(self.leverage),
-                    "side":            str(side),
-                    "type":            "5",      # 5=market order on MEXC futures
-                    "openType":        "2",      # cross margin
-                    "stopLossPrice":   format(Decimal(repr(sl_price)), 'f'),
-                    "takeProfitPrice": format(Decimal(repr(tp_price)), 'f'),
+                    "symbol":   symbol,
+                    "price":    "0",
+                    "vol":      str(vol),
+                    "leverage": str(self.leverage),
+                    "side":     str(side),
+                    "type":     "5",    # market
+                    "openType": "2",    # cross margin
                 }
                 resp     = self._post("/api/v1/private/order/submit", body)
                 order_id = str(resp.get("data", ""))
@@ -347,6 +346,10 @@ class MexcExecutor:
                     f"[MEXC] MARKET ORDER {side_label} {symbol} vol={vol} "
                     f"| SL={sl_price} | TP={tp_price} | id={order_id}"
                 )
+
+                # Step 2 — attach SL/TP via stop-order (best-effort, non-blocking)
+                self._set_sl_tp(symbol, side, vol, sl_price, tp_price)
+
                 return {"order_id": order_id}
 
             except Exception as e:
@@ -362,6 +365,36 @@ class MexcExecutor:
                 )
                 return {}
         return {}
+
+    def _set_sl_tp(self, symbol: str, side: int, vol: int,
+                   sl_price: float, tp_price: float) -> None:
+        """Attach SL and TP to an open position via /stoporder/place (best-effort)."""
+        import time as _time
+        _time.sleep(1)   # brief pause to let the fill register
+        try:
+            # position_type: 1=long, 2=short
+            pos_type  = 1 if side == 1 else 2
+            # trend for SL: long→2 (price falls below), short→1 (price rises above)
+            sl_trend  = 2 if side == 1 else 1
+            # trend for TP: long→1 (price rises above), short→2 (price falls below)
+            tp_trend  = 1 if side == 1 else 2
+
+            sl_str = format(Decimal(repr(sl_price)), 'f')
+            tp_str = format(Decimal(repr(tp_price)), 'f')
+
+            self._post("/api/v1/private/stoporder/place", {
+                "symbol":              symbol,
+                "positionType":        str(pos_type),
+                "stopLossType":        "1",      # 1=last price trigger
+                "stopLossPrice":       sl_str,
+                "stopLossOrderPrice":  sl_str,
+                "takeProfitType":      "1",
+                "takeProfitPrice":     tp_str,
+                "takeProfitOrderPrice": tp_str,
+            })
+            logger.info(f"[MEXC] SL/TP set | SL={sl_price} TP={tp_price} for {symbol}")
+        except Exception as e:
+            logger.warning(f"[MEXC] SL/TP stop-order failed for {symbol}: {e}")
 
     # ------------------------------------------------------------------
     # Close position (market)
