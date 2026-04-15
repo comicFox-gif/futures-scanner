@@ -3,8 +3,8 @@ Sentiment Data Fetcher  —  free endpoints only, no API keys required
 ----------------------------------------------------------------------
 Sources:
   Fear & Greed    alternative.me/fng/                    (free, no auth)
-  Funding rate    MEXC REST /api/v1/contract/funding_rate (free, no auth)
-  Open Interest   MEXC REST /api/v1/contract/open_interest(free, no auth)
+  Funding rate    Bybit REST /v5/market/tickers           (free, no auth)
+  Open Interest   Bybit REST /v5/market/tickers           (free, no auth)
   Long/Short ratio Bybit REST /v5/market/account-ratio    (free, no auth)
   BTC Dominance   CoinGecko /api/v3/global                (free, no auth)
 
@@ -22,7 +22,6 @@ logger = logging.getLogger("futures_bot.sentiment")
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "futures-bot/2.0"})
 
-MEXC_BASE  = "https://contract.mexc.com"
 BYBIT_BASE = "https://api.bybit.com"
 
 
@@ -77,86 +76,75 @@ def get_fear_greed() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2.  Funding Rate  (MEXC REST — no auth)
+# 2 & 3.  Funding Rate + Open Interest  (Bybit /v5/market/tickers — no auth)
 # ══════════════════════════════════════════════════════════════════════════════
+# Both values come from the same ticker call, so we share one cache.
 
-_fr_cache: dict = {}
-_FR_TTL = 300.0   # 5 minutes (funding settles every 8h, but rate updates frequently)
+_ticker_cache: dict = {}
+_TICKER_TTL = 300.0   # 5 minutes
+
+
+def _get_bybit_ticker(symbol: str) -> dict:
+    """
+    Fetch linear ticker for `symbol` from Bybit and return the first list entry.
+    `symbol` format: 'BTC/USDT:USDT'  →  'BTCUSDT'.
+    Returns {} on any error.
+    """
+    bybit_sym = _to_bybit_sym(symbol)
+    cache_key = f"ticker|{bybit_sym}"
+    cached = _cache_get(_ticker_cache, cache_key, _TICKER_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _SESSION.get(
+            f"{BYBIT_BASE}/v5/market/tickers",
+            params={"category": "linear", "symbol": bybit_sym},
+            timeout=8,
+        )
+        body = resp.json()
+        if body.get("retCode") == 0:
+            rows = body.get("result", {}).get("list", [])
+            if rows:
+                result = rows[0]
+                _cache_set(_ticker_cache, cache_key, result)
+                return result
+    except Exception as e:
+        logger.debug(f"[SENTIMENT] Bybit ticker {bybit_sym}: {e}")
+    return {}
 
 
 def get_funding_rate(exchange=None, symbol: str = "") -> float | None:
     """
-    Return latest funding rate for symbol via MEXC public REST.
+    Return latest funding rate for symbol via Bybit public REST.
     Negative = longs paying shorts (bearish positioning → contrarian bullish).
     Positive = shorts paying longs (bullish positioning → contrarian bearish).
 
     `exchange` param kept for API compatibility but not used.
-    `symbol` format: 'BTC/USDT:USDT'  →  internally converted to 'BTC_USDT'.
+    `symbol` format: 'BTC/USDT:USDT'  →  internally converted to 'BTCUSDT'.
     """
-    mexc_sym = _to_mexc_sym(symbol)
-    cache_key = f"fr|{mexc_sym}"
-    cached = _cache_get(_fr_cache, cache_key, _FR_TTL)
-    if cached is not None:
-        return cached
-
-    try:
-        resp = _SESSION.get(
-            f"{MEXC_BASE}/api/v1/contract/funding_rate",
-            params={"symbol": mexc_sym},
-            timeout=8,
-        )
-        body = resp.json()
-        if body.get("success"):
-            rate = body.get("data", {}).get("fundingRate")
-            if rate is not None:
-                result = float(rate)
-                _cache_set(_fr_cache, cache_key, result)
-                logger.debug(f"[SENTIMENT] Funding rate {mexc_sym}: {result:.6f}")
-                return result
-    except Exception as e:
-        logger.debug(f"[SENTIMENT] Funding rate {mexc_sym}: {e}")
+    ticker = _get_bybit_ticker(symbol)
+    rate = ticker.get("fundingRate")
+    if rate is not None:
+        result = float(rate)
+        logger.debug(f"[SENTIMENT] Funding rate {symbol}: {result:.6f}")
+        return result
     return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 3.  Open Interest  (MEXC REST — no auth)
-# ══════════════════════════════════════════════════════════════════════════════
-
-_oi_cache: dict = {}
-_OI_TTL = 300.0   # 5 minutes
 
 
 def get_open_interest(exchange=None, symbol: str = "") -> float | None:
     """
-    Return current open interest in USD via MEXC public REST.
+    Return current open interest in USD via Bybit public REST.
     Used to confirm trend: rising OI + rising price = genuine directional move.
 
     `exchange` param kept for API compatibility but not used.
     """
-    mexc_sym = _to_mexc_sym(symbol)
-    cache_key = f"oi|{mexc_sym}"
-    cached = _cache_get(_oi_cache, cache_key, _OI_TTL)
-    if cached is not None:
-        return cached
-
-    try:
-        resp = _SESSION.get(
-            f"{MEXC_BASE}/api/v1/contract/open_interest",
-            params={"symbol": mexc_sym},
-            timeout=8,
-        )
-        body = resp.json()
-        if body.get("success"):
-            data = body.get("data", {})
-            # MEXC returns holdVol (contracts) and openInterestUSD
-            oi = data.get("openInterestUSD") or data.get("holdVol")
-            if oi is not None:
-                result = float(oi)
-                _cache_set(_oi_cache, cache_key, result)
-                logger.debug(f"[SENTIMENT] OI {mexc_sym}: {result:,.0f}")
-                return result
-    except Exception as e:
-        logger.debug(f"[SENTIMENT] OI {mexc_sym}: {e}")
+    ticker = _get_bybit_ticker(symbol)
+    oi = ticker.get("openInterestValue")   # USD-denominated OI
+    if oi is not None:
+        result = float(oi)
+        logger.debug(f"[SENTIMENT] OI {symbol}: {result:,.0f}")
+        return result
     return None
 
 
@@ -259,6 +247,6 @@ def get_liquidation_pressure(symbol_base: str) -> dict | None:
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def _to_mexc_sym(symbol: str) -> str:
-    """'BTC/USDT:USDT' → 'BTC_USDT'"""
-    return symbol.split(":")[0].replace("/", "_")
+def _to_bybit_sym(symbol: str) -> str:
+    """'BTC/USDT:USDT' → 'BTCUSDT'"""
+    return symbol.split(":")[0].replace("/", "")
