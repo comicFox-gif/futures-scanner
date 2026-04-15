@@ -513,11 +513,19 @@ class EliteStrategy:
             sc = self._score_all_categories(h4_df, weekly_df, symbol, direction, exchange, kz)
             total = sc["total"]
 
-            # ── Category gates — ≥1pt from each of: Wyckoff, Liq, MMM, VSA ─
-            if not (sc["wyck_score"] > 0 and sc["liq_score"] > 0
-                    and sc["mmm_score"] > 0 and sc["vsa_score"] > 0):
+            # ── Category gates — at least 3 of 4 must score (Wyckoff, Liq, MMM, VSA)
+            # Requiring all 4 simultaneously is too restrictive — Wyckoff (needs volume
+            # climax) and VSA (needs specific bar patterns) won't always be present together.
+            cat_scores = [
+                sc["wyck_score"] > 0,
+                sc["liq_score"]  > 0,
+                sc["mmm_score"]  > 0,
+                sc["vsa_score"]  > 0,
+            ]
+            if sum(cat_scores) < 3:
                 logger.debug(
-                    f"[ELITE] {symbol} {direction.upper()} — category gates failed: "
+                    f"[ELITE] {symbol} {direction.upper()} — category gates failed "
+                    f"({sum(cat_scores)}/4): "
                     f"W={sc['wyck_score']} L={sc['liq_score']} "
                     f"M={sc['mmm_score']} V={sc['vsa_score']}"
                 )

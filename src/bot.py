@@ -127,11 +127,13 @@ class Bot:
         self._elite_paused      = False
         self._elite_resume_at: datetime | None = None
 
-        # Daily P&L limits — block new signals when hit
-        self._daily_pnl:          float = 0.0
-        self._daily_loss_limit:   float = -20.0   # stop trading at -$20/day
-        self._daily_profit_limit: float =  50.0   # stop trading at +$50/day
-        self._daily_pnl_date      = None           # date when _daily_pnl was last reset
+        # Daily P&L — block new signals only on loss limit
+        self._daily_pnl:        float = 0.0
+        self._daily_loss_limit: float = -20.0   # stop trading at -$20/day
+        self._daily_pnl_date    = None           # date when _daily_pnl was last reset
+
+        # No-signal channel broadcast tracking
+        self._last_channel_msg_time: datetime | None = None  # last signal OR no-setup msg
 
         # Elite trailing stop state: symbol → {direction, entry, sl_dist,
         #   trail_activate, current_sl, tp, atr, activated}
@@ -772,6 +774,34 @@ class Bot:
             f"<<< Scan complete{signal_note} | Next: {self._next_4h_close_str()} | "
             f"Pairs: {' '.join(s.split('/')[0] for s in symbols)}"
         )
+
+        # ── No-signal broadcast ────────────────────────────────────────────
+        # If the public channel has been silent for ≥4H, let subscribers know
+        # the bot is alive and just hasn't found a clean setup yet.
+        if signals_found == 0:
+            silent_since = self._last_channel_msg_time
+            channel_silent_4h = (
+                silent_since is None or
+                (datetime.utcnow() - silent_since).total_seconds() >= 4 * 3600
+            )
+            if channel_silent_4h:
+                next_scan = self._next_4h_close_str()
+                no_sig_text = (
+                    f"⏳ <b>No Signal This Cycle</b>\n\n"
+                    f"Scanned {len(symbols)} pairs — no clean setup found.\n"
+                    f"All entry gates must be met:\n"
+                    f"  • Kill Zone active\n"
+                    f"  • 4H BOS on closed candle\n"
+                    f"  • Regime clear (Bull/Bear)\n"
+                    f"  • 1H confirmation\n"
+                    f"  • Score ≥5/18 with 3/4 categories\n\n"
+                    f"Bot is running normally.\n"
+                    f"Next scan: <b>{next_scan}</b>"
+                )
+                self.notifier.send(no_sig_text)
+                self._last_channel_msg_time = datetime.utcnow()
+                logger.info("[BOT] No-signal broadcast sent to channel")
+
         self._maybe_send_daily_summary()
         self._maybe_send_positions_report()
 
@@ -798,12 +828,9 @@ class Bot:
         if self._daily_elite_count >= self._daily_sig_limit:
             return False
 
-        # Daily P&L limits — stop new signals if loss or profit limit hit
+        # Daily loss limit — stop new signals if -$20 reached
         if self._daily_pnl <= self._daily_loss_limit:
             logger.info(f"[ELITE] {symbol} skipped — daily loss limit hit (${self._daily_pnl:.2f})")
-            return False
-        if self._daily_pnl >= self._daily_profit_limit:
-            logger.info(f"[ELITE] {symbol} skipped — daily profit limit hit (${self._daily_pnl:.2f})")
             return False
 
         # Consecutive-SL cooldown
@@ -1000,6 +1027,7 @@ class Bot:
             + (f"\n{cat_block}" if cat_block else "")
         )
         self.notifier.send(pub_text)
+        self._last_channel_msg_time = datetime.utcnow()   # reset silence timer
 
         # Bybit live order
         self._bybit_order(sig, symbol)
