@@ -65,6 +65,6 @@
     "min_rr": 5.0,
     "tp_rr": 5.0,
     "trail_rr": 3.0,
-    "kill_zone_only": true
+    "kill_zone_only": false
   }
 }
