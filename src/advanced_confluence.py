@@ -801,3 +801,147 @@ def tp_rr_for_score(score: int) -> float:
     if score >= 12:  return 5.0
     if score >= 8:   return 3.0
     return 2.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10.  Liquidation Map  (price-action based, no external API)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calculate_liquidation_map(
+    df: pd.DataFrame,
+    lookback: int = 60,
+    threshold_pct: float = 0.003,
+) -> dict:
+    """
+    Estimate where stop/liquidation clusters sit using pure price action.
+
+    Method:
+      - Scan the last `lookback` confirmed candles for highs and lows.
+      - Group them into clusters within `threshold_pct` of each other.
+      - Strength of each cluster = number of candles that touched that level.
+        More touches → more traders had stops there → bigger liquidation when swept.
+      - Split into above-price (buy-side stops) and below-price (sell-side stops).
+
+    Returns:
+      {
+        "above": [(level, strength), ...],   # buy-side liquidity above price
+        "below": [(level, strength), ...],   # sell-side liquidity below price
+        "nearest_above": float | None,
+        "nearest_below": float | None,
+        "nearest_above_strength": int,
+        "nearest_below_strength": int,
+        "unswept_between_entry_sl": bool,    # set later by caller
+      }
+    Sorted: above ascending (nearest first), below descending (nearest first).
+    """
+    NONE = dict(
+        above=[], below=[],
+        nearest_above=None, nearest_below=None,
+        nearest_above_strength=0, nearest_below_strength=0,
+    )
+    try:
+        if len(df) < lookback + 5:
+            return NONE
+
+        win      = df.iloc[-(lookback + 5):-2]
+        price    = float(df.iloc[-2]["close"])
+        highs    = win["high"].values
+        lows     = win["low"].values
+
+        def _cluster(values):
+            """Group values into clusters; return list of (avg_level, touch_count)."""
+            seen   = [False] * len(values)
+            groups = []
+            for i, v in enumerate(values):
+                if seen[i]:
+                    continue
+                cluster = [v]
+                seen[i] = True
+                for j in range(i + 1, len(values)):
+                    if not seen[j] and abs(values[j] - v) / max(v, 1e-10) < threshold_pct:
+                        cluster.append(values[j])
+                        seen[j] = True
+                if len(cluster) >= 2:  # need ≥2 touches to be a real cluster
+                    groups.append((sum(cluster) / len(cluster), len(cluster)))
+            return groups
+
+        high_clusters = _cluster(highs)   # buy-side stops (above price)
+        low_clusters  = _cluster(lows)    # sell-side stops (below price)
+
+        above = sorted(
+            [(lvl, cnt) for lvl, cnt in high_clusters if lvl > price],
+            key=lambda x: x[0],
+        )
+        below = sorted(
+            [(lvl, cnt) for lvl, cnt in low_clusters if lvl < price],
+            key=lambda x: x[0], reverse=True,
+        )
+
+        nearest_above          = above[0][0] if above else None
+        nearest_above_strength = above[0][1] if above else 0
+        nearest_below          = below[0][0] if below else None
+        nearest_below_strength = below[0][1] if below else 0
+
+        logger.debug(
+            f"[LIQ MAP] price={price:.5g} | "
+            f"above={len(above)} clusters (nearest={nearest_above:.5g} str={nearest_above_strength}) | "
+            f"below={len(below)} clusters (nearest={nearest_below:.5g} str={nearest_below_strength})"
+            if nearest_above and nearest_below else
+            f"[LIQ MAP] price={price:.5g} | above={len(above)} | below={len(below)}"
+        )
+
+        return dict(
+            above=above, below=below,
+            nearest_above=nearest_above,
+            nearest_below=nearest_below,
+            nearest_above_strength=nearest_above_strength,
+            nearest_below_strength=nearest_below_strength,
+        )
+
+    except Exception as e:
+        logger.debug(f"[LIQ MAP] {e}")
+        return NONE
+
+
+def liq_map_clear_to_entry(
+    liq_map: dict,
+    entry: float,
+    sl_price: float,
+    direction: str,
+) -> tuple[bool, str]:
+    """
+    Return (clear, reason).
+
+    Blocks entry if an unswept stop cluster sits between entry and SL.
+    That cluster is a magnet — price will likely dip to grab it, triggering
+    our SL before the real move begins.
+
+    Long:  SL < entry — dangerous levels are BELOW entry, ABOVE SL.
+    Short: SL > entry — dangerous levels are ABOVE entry, BELOW SL.
+    """
+    if direction == "long":
+        # Sell-side clusters between SL and entry
+        danger = [
+            (lvl, cnt) for lvl, cnt in liq_map.get("below", [])
+            if sl_price < lvl < entry
+        ]
+        if danger:
+            worst = max(danger, key=lambda x: x[0])  # closest to entry
+            return False, (
+                f"Unswept sell-side liquidity at {worst[0]:.5g} "
+                f"(strength {worst[1]}) between SL and entry — skip"
+            )
+    else:
+        # Buy-side clusters between entry and SL
+        danger = [
+            (lvl, cnt) for lvl, cnt in liq_map.get("above", [])
+            if entry < lvl < sl_price
+        ]
+        if danger:
+            worst = min(danger, key=lambda x: x[0])  # closest to entry
+            return False, (
+                f"Unswept buy-side liquidity at {worst[0]:.5g} "
+                f"(strength {worst[1]}) between entry and SL — skip"
+            )
+
+    return True, "clear"

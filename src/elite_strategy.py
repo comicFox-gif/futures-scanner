@@ -51,6 +51,8 @@ from src.advanced_confluence import (
     confirm_1h_alignment,
     risk_usdt_for_score,
     tp_rr_for_score,
+    calculate_liquidation_map,
+    liq_map_clear_to_entry,
 )
 
 logger = logging.getLogger("futures_bot.elite")
@@ -502,6 +504,17 @@ class EliteStrategy:
                 sl_dist   = max((float(row["high"]) + _sl_buf) - price, atr * 0.5)
                 swing_ref = swing_low
 
+            # ── Liquidation map — block if unswept cluster between entry & SL ─
+            # Equal highs/lows between entry and SL are stop magnets.
+            # Price will sweep them first, triggering our SL before the real
+            # move begins. Skip the trade until that liquidity is cleared.
+            sl_price_check = price - sl_dist if direction == "long" else price + sl_dist
+            liq_map = calculate_liquidation_map(h4_df)
+            clear, liq_reason = liq_map_clear_to_entry(liq_map, price, sl_price_check, direction)
+            if not clear:
+                logger.debug(f"[ELITE] {symbol} {direction.upper()} — {liq_reason}")
+                continue
+
             # ── Fast 2:1 clearance gate (minimum possible RR) ─────────────
             if not self._check_rr_clearance(h4_df, price, sl_dist, direction, min_rr=2.0):
                 logger.debug(f"[ELITE] {symbol} {direction.upper()} — no 2:1 RR clearance")
@@ -621,6 +634,11 @@ class EliteStrategy:
                 "h1_label":    h1_lbl,
                 "adv_detail":  adv_detail,
                 "reason":      reason,
+                # Liquidation map — nearest clusters above/below entry
+                "liq_nearest_above":          liq_map.get("nearest_above"),
+                "liq_nearest_above_strength": liq_map.get("nearest_above_strength", 0),
+                "liq_nearest_below":          liq_map.get("nearest_below"),
+                "liq_nearest_below_strength": liq_map.get("nearest_below_strength", 0),
             }
 
         return None
