@@ -23,7 +23,7 @@ import pandas as pd
 from src.strategy import Strategy, Signal, Position
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
-from src.mexc_executor import MexcExecutor
+from src.bybit_executor import BybitExecutor
 from src.state_manager import save_state, load_state
 from src.regime import detect_regime
 from src.elite_strategy import EliteStrategy
@@ -70,13 +70,13 @@ class Bot:
             forex_symbols=set(cfg.get("forex_symbols", [])),
         )
         self.exchange    = self._init_exchange(cfg, env)
-        self.bybit       = MexcExecutor(
-            api_key       = env.get("MEXC_KEY", ""),
-            api_secret    = env.get("MEXC_SECRET", ""),
-            leverage      = int(env.get("MEXC_LEVERAGE", "10")),
+        self.bybit       = BybitExecutor(
+            api_key       = env.get("BYBIT_KEY", ""),
+            api_secret    = env.get("BYBIT_SECRET", ""),
+            leverage      = int(env.get("BYBIT_LEVERAGE", "10")),
             risk_pct      = self.risk_pct,
             max_positions = 10,
-            max_risk_usdt = float(env.get("MEXC_MAX_RISK", "10")),
+            max_risk_usdt = float(env.get("BYBIT_MAX_RISK", "10")),
         )
         self.pair_selector = PairSelector(self.exchange, cfg)
 
@@ -86,7 +86,7 @@ class Bot:
         # Paper positions: symbol -> Position
         self._paper_positions: dict[str, Position] = {}
 
-        # MEXC live position tracking (direction + entry for whale-exit detection)
+        # Bybit live position tracking (direction + entry for trail management)
         self._mexc_positions: dict[str, dict] = {}
 
         # Forex paper trading — parallel tracker, sends to forex channel
@@ -529,7 +529,7 @@ class Bot:
             # TP hits — tracked silently, no forex channel notification
 
     def _bybit_order(self, sig, symbol: str = ""):
-        """Place order on MEXC. Accepts Signal dataclass or dict."""
+        """Place order on Bybit. Accepts Signal dataclass or dict."""
         if not self.bybit.enabled:
             return
         if hasattr(sig, "entry_price"):   # Signal dataclass
@@ -548,7 +548,7 @@ class Bot:
                 "direction":   direction,
                 "entry_price": float(d.get("entry", 0)),
             }
-            logger.info(f"[MEXC] Tracking live position: {sym} {direction} @ {d.get('entry')}")
+            logger.info(f"[BYBIT] Tracking live position: {sym} {direction} @ {d.get('entry')}")
 
     def _calc_pnl(self, pos: Position, exit_price: float, size: float) -> float:
         if pos.direction == "long":
@@ -1215,14 +1215,14 @@ class Bot:
 
     def _control_panel_markup(self) -> dict:
         """Inline keyboard for the admin control panel."""
-        bybit_btn       = "⏹ Stop MEXC"   if self.bybit.enabled else "▶️ Start MEXC"
+        bybit_btn       = "⏹ Stop Bybit"  if self.bybit.enabled else "▶️ Start Bybit"
         bybit_cb        = "cmd_stop"        if self.bybit.enabled else "cmd_start"
         elite_pause_btn = "▶️ Resume Scan" if self._elite_paused  else "⏸ Pause Scan"
         elite_pause_cb  = "cmd_resume_elite" if self._elite_paused else "cmd_pause_elite"
         pending_n       = len(self._pending_signals)
         return {
             "inline_keyboard": [
-                # Row 1: MEXC execution toggle
+                # Row 1: Bybit execution toggle
                 [{"text": bybit_btn, "callback_data": bybit_cb}],
                 # Row 2: Elite scan controls
                 [
@@ -1270,7 +1270,7 @@ class Bot:
         text = (
             f"🤖 <b>Bot Control Panel</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"MEXC execution:   {bybit_state}\n"
+            f"Bybit execution:  {bybit_state}\n"
             f"Paper trading:    {paper_state} ({balance})\n"
             f"Open positions:   {open_pos}\n"
             f"─────────────────────────\n"
@@ -1418,7 +1418,7 @@ class Bot:
             logger.error(f"Pair selector failed: {e} — using fallback")
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
-        mexc_note = f" | MEXC: {'ON' if self.bybit.enabled else 'OFF'}"
+        bybit_note = f" | Bybit: {'ON' if self.bybit.enabled else 'OFF'}"
         self.notifier.scanner_started(
             symbols,
             paper_enabled=self.paper_enabled,
