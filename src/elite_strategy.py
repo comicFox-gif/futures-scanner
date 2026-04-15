@@ -1,57 +1,34 @@
 """
-Elite 4H Confluence Strategy  —  20-point scoring
+Elite 4H Confluence Strategy  —  18-point scoring
 ---------------------------------------------------
-Fires on 4H Break of Structure (BOS) when score >= min_score (default 5/20).
+Fires on 4H Break of Structure (BOS) when score >= min_score (default 5/18).
 
-Entry gate (ALL required):
+Hard requirements (ALL must be true — score irrelevant):
   1. Kill zone active — London 07:00-09:00 UTC OR NY 12:00-14:00 UTC only
-  2. 4H candle CLOSED (signals only on confirmed closed candles, never open)
+  2. 4H candle CLOSED (never on open candle)
   3. Market regime clear — Bull=longs only, Bear=shorts only, Neutral=no signals
   4. 4H BOS: close breaks above last swing high (long) / below swing low (short)
-  5. Previous candle was NOT already beyond the swing level (fresh break only)
-  6. RSI in valid momentum zone: 40–75 (long), 25–60 (short)
-  7. Minimum 2:1 RR available — no known 4H structure blocking the 2:1 target
-  8. At least 1pt from EACH category: Wyckoff, Liquidity, MMM, VSA
+  5. RSI in valid momentum zone: 40–75 (long), 25–60 (short)
+  6. 1H must confirm direction (FVG / MSS / sweep)
+  7. Not Friday after 17:00 UTC / Not Sunday before 22:00 UTC
 
---- Existing scoring (0–10) ---
-Technical (0–5):
-  T1. Weekly candle bullish/bearish              → 1pt
-  T2. Volume ≥ 1.5× 20-period SMA               → 1pt
-  T3. MACD histogram confirms direction          → 1pt
-  T4. ADX ≥ 25                                   → 1pt
-  T5. Candle body ≥ 50% of range                → 1pt
+Category scoring (per-category caps, total capped at 18):
+  WYCKOFF         (max 5): Spring/Upthrust=3, SOS/SOW=2, Phase=1
+  LIQUIDITY       (max 4): EQL/EQH swept=2, Stop hunt=2, Clear target=1, Swing swept=1
+  MARKET MAKER    (max 4): Manipulation=3, AMD NY=2, Consolidation=1
+  VSA             (max 3): No Supply/Demand/Stopping Vol/Climactic=2, Test=1
+  INTERMARKET     (max 2): 3-4/5 aligned=1, 5/5=2
+  FREE DATA       (max 4): Funding=1, OI=1, L/S ratio=1, Fear/Greed=1
+  KILL ZONE BONUS (max 1): Active=1
 
-Sentiment (0–5):
-  S1. Fear & Greed aligned                       → 1pt
-  S2. Funding rate aligned                       → 1pt
-  S3. Open interest present                      → 1pt
-  S4. Long/short ratio not extreme               → 1pt
-  S5. Liquidation pressure aligned               → 1pt
+Category gates (≥1pt required from EACH of: Wyckoff, Liquidity, MMM, VSA)
 
---- New advanced scoring (capped at 10 extra) ---
-  Wyckoff Spring / Upthrust                      → 3pt
-  Wyckoff SOS / SOW                              → 2pt
-  EQH / EQL sweep                                → 2pt
-  Stop Hunt detected                             → 2pt
-  MMM Manipulation phase                         → 3pt
-  VSA No Supply / No Demand                      → 2pt
-  VSA Stopping Volume                            → 2pt
-  VSA Effort/No Result (penalty)                → -1pt
-  Intermarket 3+/5 aligned                       → 1pt
-  Intermarket 5/5 aligned                        → 2pt
-  Kill Zone active                               → 1pt
-  AMD NY confirmation                            → 2pt
+RR by score:
+  5–7   → 2:1 min RR, $5 risk
+  8–11  → 3:1 min RR, $7/$10 risk
+  12+   → 5:1 min RR, $10/$12/$15 risk
 
-Maximum score: 20  |  Min to execute: 5/20
-
---- RR by score ---
-  5–7   → 2:1 TP, $5 risk
-  8–11  → 3:1 TP, $7 risk
-  12–14 → 5:1 TP, $10 risk
-  15–17 → 5:1 TP, $12 risk
-  18–20 → 5:1 TP, $15 risk
-
-Trailing stop activates at 3:1 profit, trails by 1 ATR on 4H.
+Trailing stop activates at 3:1, trails by 1 ATR on 4H.
 """
 from __future__ import annotations
 import logging
@@ -63,7 +40,6 @@ from src.sentiment import (
     get_funding_rate,
     get_open_interest,
     get_long_short_ratio,
-    get_liquidation_pressure,
 )
 from src.advanced_confluence import (
     get_kill_zone,
@@ -71,7 +47,6 @@ from src.advanced_confluence import (
     detect_liquidity,
     detect_mmm,
     detect_vsa,
-    detect_delta_divergence,
     get_intermarket_score,
     confirm_1h_alignment,
     risk_usdt_for_score,
@@ -80,8 +55,7 @@ from src.advanced_confluence import (
 
 logger = logging.getLogger("futures_bot.elite")
 
-_MAX_SCORE   = 20
-_ADV_CAP     = 10   # advanced points are capped before adding to base 10
+_MAX_SCORE = 18
 
 
 class EliteStrategy:
@@ -137,11 +111,13 @@ class EliteStrategy:
 
     # ── RR helpers ────────────────────────────────────────────────────────────
 
-    def _check_rr_clearance(self, h4_df, entry, sl_dist, direction) -> bool:
-        """Return True if no 4H structure blocks the minimum 2:1 target."""
+    def _check_rr_clearance(self, h4_df, entry, sl_dist, direction,
+                             min_rr: float | None = None) -> bool:
+        """Return True if no 4H structure blocks the required RR target."""
+        required = min_rr if min_rr is not None else self.min_rr
         min_tp = (
-            entry + self.min_rr * sl_dist if direction == "long"
-            else entry - self.min_rr * sl_dist
+            entry + required * sl_dist if direction == "long"
+            else entry - required * sl_dist
         )
         window = h4_df.iloc[-(self.lookback + self.swing_right + 2):-2]
 
@@ -209,100 +185,79 @@ class EliteStrategy:
 
         return None, ""
 
-    # ── Technical scoring (0–5, unchanged) ───────────────────────────────────
+    # ── Free data scoring (max 4pts) ─────────────────────────────────────────
 
-    def _score_technical(self, row, weekly_df, direction) -> tuple[int, list[str]]:
+    def _score_free_data(self, symbol: str, direction: str) -> tuple[int, list[str]]:
+        """Funding rate, OI, L/S ratio, Fear/Greed — 1pt each, max 4."""
         score = 0
-        notes: list[str] = []
-
-        # T1: Weekly candle direction
-        if weekly_df is not None and len(weekly_df) >= 3:
-            w   = weekly_df.iloc[-2]
-            bull = float(w["close"]) > float(w["open"])
-            if   direction == "long"  and bull:      score += 1; notes.append("W↑")
-            elif direction == "short" and not bull:  score += 1; notes.append("W↓")
-
-        # T2: Volume spike
-        vol     = float(row.get("volume",     0))
-        vol_sma = float(row.get("volume_sma", 0))
-        if vol_sma > 0 and vol >= vol_sma * self.vol_mult:
-            score += 1; notes.append(f"Vol{vol / vol_sma:.1f}x")
-
-        # T3: MACD histogram
-        hist = float(row.get("macd_hist", float("nan")))
-        if not pd.isna(hist):
-            if   direction == "long"  and hist > 0: score += 1; notes.append("MACD↑")
-            elif direction == "short" and hist < 0: score += 1; notes.append("MACD↓")
-
-        # T4: ADX
-        adx = float(row.get("adx", 0))
-        if adx >= self.adx_min:
-            score += 1; notes.append(f"ADX{adx:.0f}")
-
-        # T5: Decisive candle body
-        rng  = float(row["high"]) - float(row["low"])
-        body = abs(float(row["close"]) - float(row["open"])) / rng if rng > 0 else 0
-        if body >= self.min_body:
-            score += 1; notes.append(f"Body{body:.0%}")
-
-        return score, notes
-
-    # ── Sentiment scoring (0–5, unchanged) ───────────────────────────────────
-
-    def _score_sentiment(self, symbol, direction, exchange=None) -> tuple[int, list[str]]:
-        score = 0
-        notes: list[str] = []
+        lines: list[str] = []
         base  = symbol.split("/")[0]
 
-        # S1: Fear & Greed
-        fng = get_fear_greed()
-        fv  = fng["value"]
-        if   direction == "long"  and fv <= 45: score += 1; notes.append(f"F&G{fv}≤45")
-        elif direction == "short" and fv >= 55: score += 1; notes.append(f"F&G{fv}≥55")
-        else: notes.append(f"F&G{fv}✗")
-
-        # S2: Funding rate
-        if exchange is not None:
-            rate = get_funding_rate(exchange, symbol)
-            if rate is None:
-                score += 1; notes.append("FR-N/A")
-            elif direction == "long"  and rate <= 0: score += 1; notes.append(f"FR{rate:.4f}")
-            elif direction == "short" and rate >  0: score += 1; notes.append(f"FR+{rate:.4f}")
-            else: notes.append(f"FR{rate:.4f}✗")
+        # Funding rate
+        rate = get_funding_rate(None, symbol)
+        if rate is None:
+            score += 1; lines.append(f"✅ Funding Rate N/A   +1")
+        elif direction == "long"  and rate <= 0:
+            score += 1; lines.append(f"✅ Funding Rate {rate:.4f}%   +1")
+        elif direction == "short" and rate >  0:
+            score += 1; lines.append(f"✅ Funding Rate +{rate:.4f}%   +1")
         else:
-            score += 1; notes.append("FR-skip")
+            lines.append(f"⬜ Funding Rate {rate:.4f}%   +0")
 
-        # S3: Open interest (proxy — award if data present)
-        if exchange is not None:
-            oi = get_open_interest(exchange, symbol)
-            score += 1
-            notes.append(f"OI{oi:.0f}" if oi else "OI-N/A")
+        # Open interest — award if data present (confirms activity)
+        oi = get_open_interest(None, symbol)
+        if oi is not None:
+            score += 1; lines.append(f"✅ OI ${oi:,.0f}   +1")
         else:
-            score += 1; notes.append("OI-skip")
+            lines.append(f"⬜ Open Interest N/A   +0")
 
-        # S4: Long/short ratio
+        # Long/short ratio
         ls = get_long_short_ratio(base)
         if ls is None:
-            score += 1; notes.append("L/S-N/A")
-        elif direction == "long"  and ls <= 2.5: score += 1; notes.append(f"L/S{ls:.2f}")
-        elif direction == "short" and ls >= 0.4: score += 1; notes.append(f"L/S{ls:.2f}")
-        else: notes.append(f"L/S{ls:.2f}✗")
+            score += 1; lines.append(f"✅ Long/Short Ratio N/A   +1")
+        elif direction == "long"  and ls <= 2.5:
+            score += 1; lines.append(f"✅ Long/Short Ratio {ls:.2f}   +1")
+        elif direction == "short" and ls >= 0.4:
+            score += 1; lines.append(f"✅ Long/Short Ratio {ls:.2f}   +1")
+        else:
+            lines.append(f"⬜ Long/Short Ratio {ls:.2f}   +0")
 
-        # S5: Liquidation pressure
-        liq = get_liquidation_pressure(base)
-        if liq is None:
-            score += 1; notes.append("Liq-N/A")
-        elif direction == "long"  and liq["sell_liq"] >= liq["buy_liq"]:
-            score += 1; notes.append("Liq↑")
-        elif direction == "short" and liq["buy_liq"]  >= liq["sell_liq"]:
-            score += 1; notes.append("Liq↓")
-        else: notes.append("Liq✗")
+        # Fear & Greed: below 50 = fear = good for longs; above 50 = greed = good for shorts
+        fng = get_fear_greed()
+        fv  = fng["value"]
+        if   direction == "long"  and fv < 50:
+            score += 1; lines.append(f"✅ Fear/Greed {fv} (Fear)   +1")
+        elif direction == "short" and fv >= 50:
+            score += 1; lines.append(f"✅ Fear/Greed {fv} (Greed)   +1")
+        else:
+            lines.append(f"⬜ Fear/Greed {fv}   +0")
 
-        return score, notes
+        return min(4, score), lines
 
-    # ── Advanced scoring (new, capped at _ADV_CAP) ───────────────────────────
+    # ── Swing swept helper ────────────────────────────────────────────────────
 
-    def _score_advanced(
+    def _detect_swing_swept(self, h4_df: pd.DataFrame, direction: str) -> bool:
+        """True if the last closed candle swept a recent structural swing and closed back."""
+        try:
+            cur    = h4_df.iloc[-2]
+            window = h4_df.iloc[-(self.lookback + self.swing_right + 2):-3]
+            if direction == "long":
+                swings = find_swing_lows_idx(window, self.swing_left, self.swing_right)
+                for _, lvl in swings[-3:]:
+                    if float(cur["low"]) < lvl and float(cur["close"]) > lvl:
+                        return True
+            else:
+                swings = find_swing_highs_idx(window, self.swing_left, self.swing_right)
+                for _, lvl in swings[-3:]:
+                    if float(cur["high"]) > lvl and float(cur["close"]) < lvl:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    # ── Category scoring (18-point system) ───────────────────────────────────
+
+    def _score_all_categories(
         self,
         h4_df: pd.DataFrame,
         weekly_df,
@@ -310,129 +265,171 @@ class EliteStrategy:
         direction: str,
         exchange=None,
         kz: dict | None = None,
-    ) -> tuple[int, list[str], dict]:
+    ) -> dict:
         """
-        Run all 8 advanced detectors and return (raw_score, note_lines, detail_dict).
-        raw_score is NOT capped here — caller caps at _ADV_CAP.
+        Score all 7 categories with per-category caps.  Total capped at 18.
+        Returns a dict with per-category scores, line lists, and detail objects.
         """
-        score = 0
-        notes: list[str] = []
-        detail: dict = {}
-
-        # ── Kill Zone ─────────────────────────────────────────────────────
         kz = kz or get_kill_zone()
-        detail["kz"] = kz
-        if kz["score"]:
-            score += kz["score"]
-            notes.append(kz["label"])
-        # AMD NY session bonus
-        if kz["amd_score"]:
-            score += kz["amd_score"]
-            notes.append(f"AMD: {kz['amd_phase'].title()} +{kz['amd_score']}")
+        detail: dict = {"kz": kz}
 
-        # ── Wyckoff ───────────────────────────────────────────────────────
+        # ── WYCKOFF (cap 5) ───────────────────────────────────────────────
         wyck = detect_wyckoff(h4_df)
         detail["wyckoff"] = wyck
-        # Only award Wyckoff points when phase matches direction
+        wyck_raw   = 0
+        wyck_lines = []
         if wyck["score"] > 0:
             aligned = (
                 (direction == "long"  and wyck["phase"] == "accumulation") or
                 (direction == "short" and wyck["phase"] == "distribution")
             )
             if aligned:
-                score += wyck["score"]
-                notes.append(wyck["label"])
+                wyck_raw = wyck["score"]
+                wyck_lines.append(f"✅ {wyck['label'].split(': ', 1)[-1].split(' +')[0]}   +{wyck['score']}")
             else:
-                notes.append(f"Wyckoff: {wyck['phase']} (direction mismatch)")
-        elif wyck["event"]:
-            notes.append(wyck["label"])
+                wyck_lines.append(f"⬜ Wyckoff {wyck['phase'].title()} (mismatch)   +0")
+        elif wyck["event"] in ("sc_detected", "bc_detected"):
+            phase_aligned = (
+                (direction == "long"  and wyck["phase"] == "accumulation") or
+                (direction == "short" and wyck["phase"] == "distribution")
+            )
+            if phase_aligned:
+                wyck_raw = 1
+                wyck_lines.append(f"✅ {'Accumulation' if direction == 'long' else 'Distribution'} Phase   +1")
+            else:
+                wyck_lines.append(f"⬜ Wyckoff {wyck['phase'].title()} (mismatch)   +0")
+        else:
+            wyck_lines.append("⬜ Wyckoff: N/A   +0")
+        wyck_score = min(5, wyck_raw)
 
-        # ── Liquidity (EQH/EQL + Stop Hunt) ──────────────────────────────
+        # ── LIQUIDITY (cap 4) ─────────────────────────────────────────────
         liq = detect_liquidity(h4_df)
         detail["liquidity"] = liq
-        # Award EQH sweep for shorts, EQL sweep for longs
-        liq_score = 0
-        if direction == "long"  and liq["eql_swept"]:   liq_score += 2
-        if direction == "short" and liq["eqh_swept"]:   liq_score += 2
-        if liq["stop_hunt"]:                             liq_score += 2
-        if liq_score:
-            score += liq_score
-            for lbl in liq["label"]:
-                notes.append(lbl)
-        # "Clear target visible" (+1) — EQH above for longs, EQL below for shorts
-        # Counts toward category gate even when nothing has been swept yet
-        if liq_score == 0:
-            price_now = float(h4_df.iloc[-2]["close"])
-            if direction == "long":
-                above = [lvl for lvl in liq["eqh_levels"] if lvl > price_now]
-                if above:
-                    liq_score += 1
-                    score += 1
-                    notes.append(f"Liquidity: Clear EQH target ${min(above):,.4g} +1")
-            else:
-                below = [lvl for lvl in liq["eql_levels"] if lvl < price_now]
-                if below:
-                    liq_score += 1
-                    score += 1
-                    notes.append(f"Liquidity: Clear EQL target ${max(below):,.4g} +1")
-        # Store per-category score for gate checks
-        detail["liquidity"]["liq_scored"] = liq_score
-        # Informational: next liquidity target
-        if direction == "long" and liq["eqh_levels"]:
-            nearest = min(liq["eqh_levels"])
-            if not any("EQH target" in n for n in notes):
-                notes.append(f"Next EQH target: ${nearest:,.4g}")
-        elif direction == "short" and liq["eql_levels"]:
-            nearest = max(liq["eql_levels"])
-            if not any("EQL target" in n for n in notes):
-                notes.append(f"Next EQL target: ${nearest:,.4g}")
+        liq_raw   = 0
+        liq_lines = []
+        price_now = float(h4_df.iloc[-2]["close"])
 
-        # ── Market Maker Model ────────────────────────────────────────────
+        if direction == "long"  and liq["eql_swept"]:
+            liq_raw += 2
+            liq_lines.append(f"✅ EQL Swept + Closed Above   +2")
+        if direction == "short" and liq["eqh_swept"]:
+            liq_raw += 2
+            liq_lines.append(f"✅ EQH Swept + Closed Below   +2")
+        if liq["stop_hunt"]:
+            liq_raw += 2
+            hunt_lbl = next((l for l in liq["label"] if "Hunt" in l or "hunt" in l), "Stop Hunt Detected")
+            liq_lines.append(f"✅ {hunt_lbl.split(': ')[-1].split(' +')[0]}   +2")
+        # Clear liquidity target
+        if direction == "long":
+            above = [lvl for lvl in liq["eqh_levels"] if lvl > price_now]
+            if above:
+                liq_raw += 1
+                liq_lines.append(f"✅ Clear EQH Target ${min(above):,.4g}   +1")
+        else:
+            below = [lvl for lvl in liq["eql_levels"] if lvl < price_now]
+            if below:
+                liq_raw += 1
+                liq_lines.append(f"✅ Clear EQL Target ${max(below):,.4g}   +1")
+        # Swing level swept
+        if self._detect_swing_swept(h4_df, direction):
+            liq_raw += 1
+            liq_lines.append(f"✅ Swing Level Swept   +1")
+        if not liq_lines:
+            liq_lines.append("⬜ Liquidity: N/A   +0")
+        detail["liquidity"]["liq_scored"] = liq_raw
+        liq_score = min(4, liq_raw)
+
+        # ── MMM (cap 4) ───────────────────────────────────────────────────
         mmm = detect_mmm(h4_df)
         detail["mmm"] = mmm
-        if mmm["score"] > 0:
+        mmm_raw   = 0
+        mmm_lines = []
+        if mmm["phase"] == "manipulation":
             mmm_aligned = (
-                mmm.get("phase") == "consolidation" or    # direction-neutral, always award
                 (direction == "long"  and mmm.get("direction") == "long") or
                 (direction == "short" and mmm.get("direction") == "short")
             )
             if mmm_aligned:
-                score += mmm["score"]
-                notes.append(mmm["label"])
+                mmm_raw += 3
+                mmm_lines.append(f"✅ Manipulation Confirmed   +3")
             else:
-                notes.append(f"MMM: {mmm['label']} (mismatch)")
+                mmm_lines.append(f"⬜ MMM Manipulation (mismatch)   +0")
+        elif mmm["phase"] == "consolidation":
+            mmm_raw += 1
+            mmm_lines.append(f"✅ Consolidation Detected   +1")
+        # AMD NY bonus — distribution phase during NY open
+        if kz["amd_score"] >= 2:
+            mmm_raw += 2
+            mmm_lines.append(f"✅ AMD NY Confirmation   +2")
+        if not mmm_lines:
+            mmm_lines.append("⬜ MMM: N/A   +0")
+        mmm_score = min(4, mmm_raw)
 
-        # ── VSA ───────────────────────────────────────────────────────────
+        # ── VSA (cap 3) ───────────────────────────────────────────────────
         vsa = detect_vsa(h4_df)
         detail["vsa"] = vsa
-        if vsa["score"] != 0:
+        vsa_raw   = 0
+        vsa_lines = []
+        if vsa["score"] > 0:   # no penalties in new system
             vsa_aligned = (
                 (direction == "long"  and vsa.get("bullish") is True) or
                 (direction == "short" and vsa.get("bullish") is False)
             )
-            if vsa_aligned or vsa["score"] < 0:   # penalties always apply
-                score += vsa["score"]
-                notes.append(vsa["label"])
+            if vsa_aligned:
+                vsa_raw = vsa["score"]
+                clean = vsa["label"].split(": ", 1)[-1].split(" +")[0].split(" ⚠")[0]
+                vsa_lines.append(f"✅ {clean}   +{vsa_raw}")
             else:
-                notes.append(f"VSA: {vsa['signal']} (direction mismatch)")
+                vsa_lines.append(f"⬜ VSA {vsa.get('signal', '')} (mismatch)   +0")
+        if not vsa_lines:
+            vsa_lines.append("⬜ VSA: N/A   +0")
+        vsa_score = min(3, vsa_raw)
 
-        # ── Delta Divergence ──────────────────────────────────────────────
-        delta = detect_delta_divergence(h4_df)
-        detail["delta"] = delta
-        notes.append(delta["label"])
-        # Divergence against trade direction is a soft warning (no penalty applied)
-
-        # ── Intermarket ───────────────────────────────────────────────────
+        # ── INTERMARKET (cap 2) ───────────────────────────────────────────
         try:
             im = get_intermarket_score(exchange=exchange, direction=direction)
         except Exception:
-            im = {"score": 0, "label": "Intermarket: N/A"}
+            im = {"score": 0, "label": "Intermarket: N/A", "n_align": 0, "n_total": 5}
         detail["intermarket"] = im
-        if im["score"]:
-            score += im["score"]
-        notes.append(im["label"])
+        im_score  = min(2, im["score"])
+        n_align   = im.get("n_align", 0)
+        n_total   = im.get("n_total", 5)
+        if im_score > 0:
+            im_lines = [f"✅ {n_align}/{n_total} Factors Aligned   +{im_score}"]
+        else:
+            im_lines = [f"⬜ Intermarket {n_align}/{n_total}   +0"]
 
-        return score, notes, detail
+        # ── FREE DATA (cap 4) ─────────────────────────────────────────────
+        free_score, free_lines = self._score_free_data(symbol, direction)
+        free_score = min(4, free_score)
+
+        # ── KILL ZONE BONUS (cap 1) ───────────────────────────────────────
+        kz_bonus  = 1 if kz["active"] else 0
+        kz_name   = kz.get("name", "").upper().replace("_", " ")
+        kz_line   = (f"✅ {kz_name} Active   +1" if kz_bonus
+                     else f"⬜ Kill Zone   +0")
+
+        total = min(_MAX_SCORE,
+                    wyck_score + liq_score + mmm_score + vsa_score
+                    + im_score + free_score + kz_bonus)
+
+        return {
+            "total":      total,
+            "wyck_score": wyck_score, "liq_score":  liq_score,
+            "mmm_score":  mmm_score,  "vsa_score":  vsa_score,
+            "im_score":   im_score,   "free_score": free_score,
+            "kz_bonus":   kz_bonus,
+            "wyck_lines": wyck_lines, "liq_lines":  liq_lines,
+            "mmm_lines":  mmm_lines,  "vsa_lines":  vsa_lines,
+            "im_lines":   im_lines,   "free_lines": free_lines,
+            "kz_line":    kz_line,
+            "detail":     detail,
+            # Legacy label fields used by bot.py for public channel message
+            "wyck_label": wyck.get("label", ""),
+            "mmm_label":  mmm.get("label", ""),
+            "vsa_label":  vsa.get("label", ""),
+            "im_label":   im.get("label",  ""),
+        }
 
     # ── Main signal generator ─────────────────────────────────────────────────
 
@@ -447,7 +444,7 @@ class EliteStrategy:
         exchange=None,
     ) -> dict | None:
         """
-        Scan for a 4H BOS signal with 20-point confluence scoring.
+        Scan for a 4H BOS signal with 18-point confluence scoring.
 
         Timeframe stack:
           weekly_df  — bias + major levels (20 candles)
@@ -461,7 +458,7 @@ class EliteStrategy:
         if len(h4_df) < min_len:
             return None
 
-        # ── Kill Zone gate ────────────────────────────────────────────────
+        # ── Kill Zone gate (hard requirement) ─────────────────────────────
         kz = get_kill_zone()
         if self.kill_zone_only and not kz["active"]:
             logger.debug(f"[ELITE] {symbol} skipped — {kz['label']}")
@@ -492,105 +489,57 @@ class EliteStrategy:
                     continue
                 if rsi < 40 or rsi > 75:
                     continue
-                # Neutral = no signals; Bear = no longs
                 if mregime in ("bear", "neutral"):
                     continue
-                sl_dist = max(price - (float(row["low"]) - _sl_buf), atr * 0.5)
+                sl_dist   = max(price - (float(row["low"]) - _sl_buf), atr * 0.5)
                 swing_ref = swing_high
-
-            else:  # short
+            else:
                 bos = price < swing_low and float(prev["close"]) >= swing_low
                 if not bos:
                     continue
                 if rsi > 60 or rsi < 25:
                     continue
-                # Neutral = no signals; Bull = no shorts
                 if mregime in ("bull", "neutral"):
                     continue
-                sl_dist = max((float(row["high"]) + _sl_buf) - price, atr * 0.5)
+                sl_dist   = max((float(row["high"]) + _sl_buf) - price, atr * 0.5)
                 swing_ref = swing_low
 
-            # ── 2:1 RR clearance gate ─────────────────────────────────────
-            if not self._check_rr_clearance(h4_df, price, sl_dist, direction):
+            # ── Fast 2:1 clearance gate (minimum possible RR) ─────────────
+            if not self._check_rr_clearance(h4_df, price, sl_dist, direction, min_rr=2.0):
                 logger.debug(f"[ELITE] {symbol} {direction.upper()} — no 2:1 RR clearance")
                 continue
 
-            # ── Score existing factors ─────────────────────────────────────
-            t_score, t_notes = self._score_technical(row, weekly_df, direction)
-            s_score, s_notes = self._score_sentiment(symbol, direction, exchange)
-            base_score = t_score + s_score   # 0–10
+            # ── Score all 7 categories (18-point system) ───────────────────
+            sc = self._score_all_categories(h4_df, weekly_df, symbol, direction, exchange, kz)
+            total = sc["total"]
 
-            # ── Score advanced factors ─────────────────────────────────────
-            adv_raw, adv_notes, adv_detail = self._score_advanced(
-                h4_df, weekly_df, symbol, direction, exchange, kz
-            )
-            adv_score = max(0, min(_ADV_CAP, adv_raw))   # cap at 10
-            total     = min(_MAX_SCORE, base_score + adv_score)
-
-            # ── Category gates — at least 1pt from each of 4 categories ──────
-            wyck_d = adv_detail.get("wyckoff",   {})
-            liq_d  = adv_detail.get("liquidity", {})
-            mmm_d  = adv_detail.get("mmm",       {})
-            vsa_d  = adv_detail.get("vsa",       {})
-            kz_d   = adv_detail.get("kz",        {})
-
-            # Wyckoff: spring/upthrust/sos/sow aligned with direction
-            wyck_gate = (
-                wyck_d.get("score", 0) > 0 and (
-                    (direction == "long"  and wyck_d.get("phase") == "accumulation") or
-                    (direction == "short" and wyck_d.get("phase") == "distribution")
-                )
-            )
-
-            # Liquidity: EQL/EQH swept, stop hunt, OR clear target visible
-            if direction == "long":
-                liq_gate = bool(
-                    liq_d.get("eql_swept") or
-                    liq_d.get("stop_hunt") or
-                    liq_d.get("liq_scored", 0) > 0
-                )
-            else:
-                liq_gate = bool(
-                    liq_d.get("eqh_swept") or
-                    liq_d.get("stop_hunt") or
-                    liq_d.get("liq_scored", 0) > 0
-                )
-
-            # MMM: manipulation aligned, OR consolidation, OR AMD NY (+2)
-            mmm_manip_aligned = (
-                mmm_d.get("phase") == "manipulation" and (
-                    (direction == "long"  and mmm_d.get("direction") == "long") or
-                    (direction == "short" and mmm_d.get("direction") == "short")
-                )
-            )
-            mmm_gate = (
-                mmm_manip_aligned or
-                mmm_d.get("phase") == "consolidation" or
-                kz_d.get("amd_score", 0) >= 2
-            )
-
-            # VSA: any positive aligned signal
-            vsa_gate = (
-                vsa_d.get("score", 0) > 0 and (
-                    (direction == "long"  and vsa_d.get("bullish") is True) or
-                    (direction == "short" and vsa_d.get("bullish") is False)
-                )
-            )
-
-            if not (wyck_gate and liq_gate and mmm_gate and vsa_gate):
+            # ── Category gates — ≥1pt from each of: Wyckoff, Liq, MMM, VSA ─
+            if not (sc["wyck_score"] > 0 and sc["liq_score"] > 0
+                    and sc["mmm_score"] > 0 and sc["vsa_score"] > 0):
                 logger.debug(
                     f"[ELITE] {symbol} {direction.upper()} — category gates failed: "
-                    f"Wyckoff={wyck_gate} Liq={liq_gate} MMM={mmm_gate} VSA={vsa_gate}"
+                    f"W={sc['wyck_score']} L={sc['liq_score']} "
+                    f"M={sc['mmm_score']} V={sc['vsa_score']}"
                 )
                 continue
 
             # ── Minimum score gate ─────────────────────────────────────────
             if total < self.min_score:
                 logger.debug(
-                    f"[ELITE] {symbol} {direction.upper()} score={total}/20 "
+                    f"[ELITE] {symbol} {direction.upper()} score={total}/{_MAX_SCORE} "
                     f"< {self.min_score} — skipped"
                 )
                 continue
+
+            # ── Score-based RR clearance (2:1 / 3:1 / 5:1) ───────────────
+            required_rr = tp_rr_for_score(total)
+            if required_rr > 2.0:
+                if not self._check_rr_clearance(h4_df, price, sl_dist, direction,
+                                                 min_rr=required_rr):
+                    logger.debug(
+                        f"[ELITE] {symbol} {direction.upper()} — no {required_rr:.0f}:1 clearance"
+                    )
+                    continue
 
             # ── 1H confirmation gate ───────────────────────────────────────
             h1_conf = confirm_1h_alignment(h1_df, direction)
@@ -601,21 +550,20 @@ class EliteStrategy:
                 )
                 continue
 
-            # ── Determine TP — Weekly/Daily structural level, min 5:1 ──────
-            score_tp_rr = tp_rr_for_score(total)   # always >= 5.0
+            # ── TP — Weekly/Daily structural level at required RR ──────────
             struct_tp, struct_label = self._find_structural_tp(
                 weekly_df, daily_df, price, sl_dist, direction,
-                required_rr=score_tp_rr,
+                required_rr=required_rr,
             )
             if struct_tp:
                 tp_price  = struct_tp
                 tp_reason = struct_label
             else:
                 tp_price  = (
-                    price + score_tp_rr * sl_dist if direction == "long"
-                    else price - score_tp_rr * sl_dist
+                    price + required_rr * sl_dist if direction == "long"
+                    else price - required_rr * sl_dist
                 )
-                tp_reason = f"Fixed {score_tp_rr:.0f}:1 RR (no structural level)"
+                tp_reason = f"Fixed {required_rr:.0f}:1 RR (no structural level)"
 
             actual_rr      = abs(tp_price - price) / sl_dist
             trail_activate = (
@@ -623,63 +571,65 @@ class EliteStrategy:
                 else price - self.trail_rr * sl_dist
             )
             risk_usdt = risk_usdt_for_score(total)
-
             sl_price  = price - sl_dist if direction == "long" else price + sl_dist
             vol_ratio = float(row.get("volume", 0)) / max(float(row.get("volume_sma", 1)), 1)
 
-            # ── Build reason string ────────────────────────────────────────
             conf_label = (
                 "ELITE 🏆" if total >= 15 else
-                "Strong"   if total >= 12 else
+                "Strong ⚡" if total >= 12 else
                 "Medium"   if total >= 8  else "Base"
             )
-            kz_lbl    = adv_detail.get("kz", {}).get("label", "")
-            wyck_lbl  = adv_detail.get("wyckoff", {}).get("label", "")
-            mmm_lbl   = adv_detail.get("mmm", {}).get("label", "")
-            vsa_lbl   = adv_detail.get("vsa", {}).get("label", "")
-            im_lbl    = adv_detail.get("intermarket", {}).get("label", "")[:60]
-            delta_lbl = adv_detail.get("delta", {}).get("label", "")
-
             h1_lbl = h1_conf["reason"]
+            adv_detail = sc["detail"]
+
             reason = (
                 f"4H BOS {'↑' if direction == 'long' else '↓'} {swing_ref:.5g} | "
-                f"Score {total}/20 [{conf_label}] | "
+                f"Score {total}/{_MAX_SCORE} [{conf_label}] | "
                 f"TP {tp_reason} | Trail @{self.trail_rr:.0f}:1 | "
-                f"1H: {h1_lbl} | "
-                f"Tech [{', '.join(t_notes)}] | "
-                f"Sent [{', '.join(s_notes)}] | "
-                f"{kz_lbl} | {wyck_lbl} | {mmm_lbl} | {vsa_lbl} | "
-                f"{delta_lbl} | {im_lbl} | "
-                f"RSI={rsi:.0f}"
+                f"1H: {h1_lbl} | RSI={rsi:.0f}"
             )
 
             return {
                 "stage": 2, "direction": direction, "symbol": symbol,
-                "entry":   price,
-                "sl":      sl_price,
-                "tp1":     tp_price,
-                "tp2":     tp_price,
-                "tp3":     tp_price,
-                "sl_dist": sl_dist,
-                "tp_rr":   round(actual_rr, 2),
+                "entry":          price,
+                "sl":             sl_price,
+                "tp1":            tp_price,
+                "tp2":            tp_price,
+                "tp3":            tp_price,
+                "sl_dist":        sl_dist,
+                "tp_rr":          round(actual_rr, 2),
                 "trail_activate": trail_activate,
-                "risk_usdt":   risk_usdt,
-                "rsi":         rsi,
-                "vol_ratio":   vol_ratio,
-                "atr":         atr,
-                "quality":     total,
-                "score":       total,
-                "tech_score":  t_score,
-                "sent_score":  s_score,
-                "adv_score":   adv_score,
+                "risk_usdt":      risk_usdt,
+                "rsi":            rsi,
+                "vol_ratio":      vol_ratio,
+                "atr":            atr,
+                "quality":        total,
+                "score":          total,
+                # Per-category scores
+                "wyck_score":  sc["wyck_score"],
+                "liq_score":   sc["liq_score"],
+                "mmm_score":   sc["mmm_score"],
+                "vsa_score":   sc["vsa_score"],
+                "im_score":    sc["im_score"],
+                "free_score":  sc["free_score"],
+                "kz_bonus":    sc["kz_bonus"],
+                # Per-category display lines
+                "wyck_lines":  sc["wyck_lines"],
+                "liq_lines":   sc["liq_lines"],
+                "mmm_lines":   sc["mmm_lines"],
+                "vsa_lines":   sc["vsa_lines"],
+                "im_lines":    sc["im_lines"],
+                "free_lines":  sc["free_lines"],
+                "kz_line":     sc["kz_line"],
+                # Legacy label fields
+                "kz_label":    kz.get("label", ""),
+                "wyck_label":  sc["wyck_label"],
+                "mmm_label":   sc["mmm_label"],
+                "vsa_label":   sc["vsa_label"],
+                "im_label":    sc["im_label"],
+                "h1_label":    h1_lbl,
                 "adv_detail":  adv_detail,
                 "reason":      reason,
-                "kz_label":    kz.get("label", ""),
-                "wyck_label":  wyck_lbl,
-                "mmm_label":   mmm_lbl,
-                "vsa_label":   vsa_lbl,
-                "im_label":    im_lbl,
-                "h1_label":    h1_lbl,
             }
 
         return None

@@ -127,6 +127,12 @@ class Bot:
         self._elite_paused      = False
         self._elite_resume_at: datetime | None = None
 
+        # Daily P&L limits — block new signals when hit
+        self._daily_pnl:          float = 0.0
+        self._daily_loss_limit:   float = -20.0   # stop trading at -$20/day
+        self._daily_profit_limit: float =  50.0   # stop trading at +$50/day
+        self._daily_pnl_date      = None           # date when _daily_pnl was last reset
+
         # Elite trailing stop state: symbol → {direction, entry, sl_dist,
         #   trail_activate, current_sl, tp, atr, activated}
         self._elite_trail_state: dict[str, dict] = {}
@@ -308,6 +314,7 @@ class Bot:
         pnl = self._calc_pnl(pos, exit_price, pos.size_remaining)
         pos.closed_pnl += pnl
         self.paper_balance += pos.margin_locked + pnl
+        self._daily_pnl    += pnl    # track for daily limits
 
         if reason == "SL hit" and pos.be_activated:
             result = "be_sl";  self._trade_stats["be_sl"]  += 1
@@ -684,11 +691,14 @@ class Bot:
         paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
         paper_info = f" | Paper: {paper_bal} | Pos: {open_pos}" if self.paper_enabled else ""
 
-        # Reset daily count at UTC midnight
+        # Reset daily count + daily P&L at UTC midnight
         today = datetime.utcnow().date()
         if self._daily_elite_date != today:
             self._daily_elite_count = 0
             self._daily_elite_date  = today
+        if self._daily_pnl_date != today:
+            self._daily_pnl      = 0.0
+            self._daily_pnl_date = today
 
         # Lift elite pause if cooldown expired
         if self._elite_paused and self._elite_resume_at and datetime.utcnow() >= self._elite_resume_at:
@@ -788,6 +798,14 @@ class Bot:
         if self._daily_elite_count >= self._daily_sig_limit:
             return False
 
+        # Daily P&L limits — stop new signals if loss or profit limit hit
+        if self._daily_pnl <= self._daily_loss_limit:
+            logger.info(f"[ELITE] {symbol} skipped — daily loss limit hit (${self._daily_pnl:.2f})")
+            return False
+        if self._daily_pnl >= self._daily_profit_limit:
+            logger.info(f"[ELITE] {symbol} skipped — daily profit limit hit (${self._daily_pnl:.2f})")
+            return False
+
         # Consecutive-SL cooldown
         if self._elite_paused:
             return False
@@ -843,78 +861,79 @@ class Bot:
         return True
 
     def _send_signal_approval(self, pid: int, sig: dict, regime: dict):
-        """Send signal to admin bot with Approve / Skip / Wait buttons (20-point format)."""
+        """Send signal to admin bot with Approve / Skip / Wait buttons (18-point format)."""
         def f(v):
             if v is None:      return "N/A"
-            if abs(v) >= 1000: return f"{v:,.2f}"
-            if abs(v) >= 10:   return f"{v:.4f}"
-            return f"{v:.6f}"
+            if abs(v) >= 1000: return f"${v:,.2f}"
+            if abs(v) >= 10:   return f"${v:.4f}"
+            return f"${v:.6f}"
 
-        direction  = sig["direction"]
-        symbol     = sig["symbol"]
-        score      = sig.get("score", 0)
-        t_score    = sig.get("tech_score", 0)
-        s_score    = sig.get("sent_score", 0)
-        adv_score  = sig.get("adv_score",  0)
-        tp_rr      = sig.get("tp_rr", 0)
-        risk_usdt  = sig.get("risk_usdt", 5.0)
-        reward     = risk_usdt * tp_rr
+        direction = sig["direction"]
+        symbol    = sig["symbol"]
+        base      = symbol.split("/")[0]
+        score     = sig.get("score", 0)
+        tp_rr     = sig.get("tp_rr", 0)
+        risk_usdt = sig.get("risk_usdt", 5.0)
+        reward    = risk_usdt * tp_rr
 
-        dir_icon   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
-        regime_lbl = {"bull": "🟢 Bull", "bear": "🔴 Bear", "neutral": "⚪ Neutral"}.get(
-            regime.get("regime", "neutral"), "⚪ Neutral"
+        dir_icon   = "LONG 🟢"  if direction == "long" else "SHORT 🔴"
+        regime_str = {"bull": "BULL ✅", "bear": "BEAR ✅", "neutral": "NEUTRAL ⚠️"}.get(
+            regime.get("regime", "neutral"), "NEUTRAL ⚠️"
         )
-        conf_label = (
-            "ELITE 🏆" if score >= 15 else
-            "Strong ⚡" if score >= 12 else
-            "Medium"   if score >= 8  else "Base"
+        kz_label   = sig.get("kz_label", "")
+        h1_lbl     = sig.get("h1_label", "")
+        conf_bolts = (
+            "⚡⚡⚡⚡" if score >= 15 else
+            "⚡⚡⚡"   if score >= 12 else
+            "⚡⚡"     if score >= 8  else "⚡"
         )
 
-        # Score bars (out of 5 each for tech/sent, out of 10 for adv)
-        bar_t   = "█" * t_score  + "░" * (5  - t_score)
-        bar_s   = "█" * s_score  + "░" * (5  - s_score)
-        bar_adv = "█" * min(adv_score, 10) + "░" * (10 - min(adv_score, 10))
+        # Per-category line blocks
+        def _block(lines: list) -> str:
+            return "\n".join(lines) if lines else "⬜ N/A"
 
-        # Advanced factor lines (pull from adv_detail if present)
-        adv   = sig.get("adv_detail", {})
-        lines = []
-        kz_lbl   = sig.get("kz_label",   "")
-        wyck_lbl = sig.get("wyck_label",  "")
-        mmm_lbl  = sig.get("mmm_label",   "")
-        vsa_lbl  = sig.get("vsa_label",   "")
-        im_lbl   = (sig.get("im_label",   "") or "").split("\n")[0]
-        h1_lbl   = sig.get("h1_label",    "")
-
-        if kz_lbl:   lines.append(kz_lbl)
-        if h1_lbl:   lines.append(f"1H: {h1_lbl}")
-        if wyck_lbl: lines.append(wyck_lbl)
-        if mmm_lbl:  lines.append(mmm_lbl)
-        if vsa_lbl:  lines.append(vsa_lbl)
-        if im_lbl:   lines.append(im_lbl)
-
-        adv_block = "\n".join(f"  {l}" for l in lines) if lines else "  N/A"
+        wyck_block = _block(sig.get("wyck_lines", []))
+        liq_block  = _block(sig.get("liq_lines",  []))
+        mmm_block  = _block(sig.get("mmm_lines",  []))
+        vsa_block  = _block(sig.get("vsa_lines",  []))
+        im_block   = _block(sig.get("im_lines",   []))
+        free_block = _block(sig.get("free_lines",  []))
+        kz_block   = sig.get("kz_line", "⬜ Kill Zone +0")
 
         text = (
-            f"🚨 <b>Signal #{pid:03d} — Pending Approval</b>\n\n"
-            f"{dir_icon}  •  <b>{symbol}</b>\n"
-            f"Timeframe: 4H  |  {regime_lbl}\n\n"
-            f"📌 Entry   <code>{f(sig['entry'])}</code>\n"
-            f"🛑 SL      <code>{f(sig['sl'])}</code>\n"
-            f"🎯 TP      <code>{f(sig['tp1'])}</code>  ({tp_rr:.1f}:1 RR)\n"
-            f"💵 Risk    <b>${risk_usdt:.0f}</b>  →  Reward <b>${reward:.0f}</b>\n"
-            f"🔁 Trail   activates at <code>{f(sig.get('trail_activate', 0))}</code>\n\n"
-            f"📊 Score  <b>{score}/20</b>  [{conf_label}]\n"
-            f"  Tech [{bar_t}] {t_score}/5\n"
-            f"  Sent [{bar_s}] {s_score}/5\n"
-            f"  Adv  [{bar_adv}] {adv_score}/10\n\n"
-            f"<b>Advanced Confluence:</b>\n{adv_block}\n\n"
-            f"<i>{sig.get('reason', '')[:180]}</i>"
+            f"🚨 <b>ELITE SIGNAL — #{pid:03d}</b>\n\n"
+            f"Pair:      <b>{base}USDT</b>\n"
+            f"Direction: <b>{dir_icon}</b>\n"
+            f"Regime:    <b>{regime_str}</b>\n"
+            f"Kill Zone: <b>{kz_label or 'N/A'}</b>\n"
+            f"Score:     <b>{score}/18 {conf_bolts}</b>\n\n"
+            f"Entry:  <code>{f(sig['entry'])}</code>\n"
+            f"SL:     <code>{f(sig['sl'])}</code>\n"
+            f"TP:     <code>{f(sig['tp1'])}</code>\n"
+            f"Risk:   <b>${risk_usdt:.0f}</b>\n"
+            f"Reward: <b>${reward:.0f}</b>\n"
+            f"RR:     <b>{tp_rr:.1f}:1</b>\n"
+            f"Trail:  Activates at <code>{f(sig.get('trail_activate', 0))}</code>\n"
+        )
+        if h1_lbl:
+            text += f"1H:     {h1_lbl}\n"
+        text += (
+            f"\n<b>WYCKOFF ({sig.get('wyck_score', 0)}/5):</b>\n{wyck_block}\n"
+            f"\n<b>LIQUIDITY ({sig.get('liq_score', 0)}/4):</b>\n{liq_block}\n"
+            f"\n<b>MMM ({sig.get('mmm_score', 0)}/4):</b>\n{mmm_block}\n"
+            f"\n<b>VSA ({sig.get('vsa_score', 0)}/3):</b>\n{vsa_block}\n"
+            f"\n<b>INTERMARKET ({sig.get('im_score', 0)}/2):</b>\n{im_block}\n"
+            f"\n<b>FREE DATA ({sig.get('free_score', 0)}/4):</b>\n{free_block}\n"
+            f"\n<b>KILL ZONE ({sig.get('kz_bonus', 0)}/1):</b>\n{kz_block}\n"
+            f"\nTotal: <b>{score}/18 {conf_bolts}</b>\n"
+            f"Size:  <b>${risk_usdt:.0f} risk</b>\n"
+            f"RR:    <b>{tp_rr:.1f}:1 minimum</b>"
         )
         markup = {
             "inline_keyboard": [[
                 {"text": "✅ Approve", "callback_data": f"elite_approve_{pid}"},
-                {"text": "⏭ Skip",    "callback_data": f"elite_skip_{pid}"},
-                {"text": "⏳ Wait",   "callback_data": f"elite_wait_{pid}"},
+                {"text": "❌ Skip",    "callback_data": f"elite_skip_{pid}"},
+                {"text": "⏰ Wait",   "callback_data": f"elite_wait_{pid}"},
             ]]
         }
         self._admin_send(text, markup=markup)
@@ -938,19 +957,18 @@ class Bot:
 
         direction  = sig["direction"]
         score      = sig.get("score", 0)
-        dir_tag    = "🟢 LONG" if direction == "long" else "🔴 SHORT"
-        base       = symbol.split("/")[0]
-        tp_rr      = sig.get("tp_rr", 0)
-        risk_usdt  = sig.get("risk_usdt", 5.0)
-        reward     = risk_usdt * tp_rr
-        conf_label = (
-            "ELITE 🏆" if score >= 15 else
-            "Strong ⚡" if score >= 12 else
-            "Medium"   if score >= 8  else "Base"
+        dir_tag   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+        base      = symbol.split("/")[0]
+        tp_rr     = sig.get("tp_rr", 0)
+        risk_usdt = sig.get("risk_usdt", 5.0)
+        reward    = risk_usdt * tp_rr
+        conf_bolts = (
+            "⚡⚡⚡⚡" if score >= 15 else
+            "⚡⚡⚡"   if score >= 12 else
+            "⚡⚡"     if score >= 8  else "⚡"
         )
-        from datetime import datetime as _dt
-        now_utc = _dt.utcnow()
         kz_line = sig.get("kz_label", "")
+        h1_line = sig.get("h1_label", "")
 
         def f(v):
             if v is None:      return "N/A"
@@ -958,35 +976,32 @@ class Bot:
             if abs(v) >= 10:   return f"${v:.4f}"
             return f"${v:.6f}"
 
-        # Advanced factor summary for channel
-        adv_lines = []
-        for lbl_key in ("kz_label", "wyck_label", "mmm_label", "vsa_label"):
-            lbl = sig.get(lbl_key, "")
-            if lbl:
-                adv_lines.append(lbl)
-        im_line = (sig.get("im_label", "") or "").split("\n")[0]
-        if im_line:
-            adv_lines.append(im_line)
-        h1_line = sig.get("h1_label", "")
-        if h1_line:
-            adv_lines.insert(0, f"1H: {h1_line}")
-        adv_block = "\n".join(adv_lines) if adv_lines else ""
+        # Collect only confirmed (✅) factor lines for public channel
+        cat_lines = []
+        for lines_key in ("wyck_lines", "liq_lines", "mmm_lines", "vsa_lines",
+                          "im_lines", "free_lines"):
+            for ln in sig.get(lines_key, []):
+                if ln.startswith("✅"):
+                    cat_lines.append(ln)
+        cat_block = "\n".join(cat_lines) if cat_lines else ""
 
         pub_text = (
             f"🚨 <b>ELITE SIGNAL</b>\n\n"
             f"{dir_tag}  •  <b>{base}</b>  |  4H\n"
-            f"{kz_line}\n\n"
+            f"{kz_line}\n"
+            + (f"1H: {h1_line}\n" if h1_line else "")
+            + f"\n"
             f"📌 Entry   <code>{f(sig['entry'])}</code>\n"
             f"🛑 SL      <code>{f(sig['sl'])}</code>\n"
             f"🎯 TP      <code>{f(sig['tp1'])}</code>  ({tp_rr:.1f}:1)\n"
             f"💵 Risk ${risk_usdt:.0f}  →  Reward ${reward:.0f}\n"
             f"🔁 Trail   <code>{f(sig.get('trail_activate', 0))}</code>\n\n"
-            f"Score: <b>{score}/20</b>  [{conf_label}]\n"
-            + (f"\n{adv_block}\n" if adv_block else "")
+            f"Score: <b>{score}/18</b>  {conf_bolts}\n"
+            + (f"\n{cat_block}" if cat_block else "")
         )
         self.notifier.send(pub_text)
 
-        # MEXC live order
+        # Bybit live order
         self._bybit_order(sig, symbol)
 
         # Paper position
@@ -1027,7 +1042,7 @@ class Bot:
 
         logger.info(
             f"[ELITE] #{pid} approved — {direction.upper()} {symbol} "
-            f"posted to channel + MEXC order placed"
+            f"posted to channel + Bybit order placed"
         )
 
     # ------------------------------------------------------------------

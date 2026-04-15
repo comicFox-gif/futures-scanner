@@ -186,8 +186,8 @@ def detect_wyckoff(df: pd.DataFrame, lookback: int = 80) -> dict:
                 return dict(phase="accumulation", event="sos", score=2,
                             label="Wyckoff: ACCUMULATION - Sign of Strength ✅ +2")
 
-            return dict(phase="accumulation", event="sc_detected", score=0,
-                        label="Wyckoff: ACCUMULATION phase")
+            return dict(phase="accumulation", event="sc_detected", score=1,
+                        label="Wyckoff: Accumulation Phase +1")
 
         # ── DISTRIBUTION events ───────────────────────────────────────────
         if is_bc:
@@ -204,8 +204,8 @@ def detect_wyckoff(df: pd.DataFrame, lookback: int = 80) -> dict:
                 return dict(phase="distribution", event="sow", score=2,
                             label="Wyckoff: DISTRIBUTION - Sign of Weakness ✅ +2")
 
-            return dict(phase="distribution", event="bc_detected", score=0,
-                        label="Wyckoff: DISTRIBUTION phase")
+            return dict(phase="distribution", event="bc_detected", score=1,
+                        label="Wyckoff: Distribution Phase +1")
 
     except Exception as e:
         logger.debug(f"[WYCKOFF] {e}")
@@ -476,12 +476,6 @@ def detect_vsa(df: pd.DataFrame) -> dict:
         if not is_bull and c_vol > vol_avg * 1.5 and close_pos < 0.35 and spread > spread_avg:
             return dict(signal="upthrust_bar", score=2,
                         label="VSA: Upthrust Bar — distribution ⚠️ +2", bullish=False)
-
-        # ── Warning ───────────────────────────────────────────────────────
-
-        if c_vol > vol_avg * 1.8 and body < spread * 0.3 and is_bull:
-            return dict(signal="effort_no_result", score=-1,
-                        label="VSA: Effort/No Result — selling into move ⚠️ -1", bullish=False)
 
     except Exception as e:
         logger.debug(f"[VSA] {e}")
@@ -781,27 +775,29 @@ def confirm_1h_alignment(h1_df: pd.DataFrame, direction: str) -> dict:
 
 def risk_usdt_for_score(score: int) -> float:
     """
-    Return the dollar risk amount based on the 20-point confluence score.
+    Return the dollar risk amount based on the 18-point confluence score.
 
     5–7   → $5
-    8–11  → $7
-    12–14 → $10
-    15–17 → $12
-    18–20 → $15
+    8–10  → $7
+    11–13 → $10
+    14–16 → $12
+    17–18 → $15
     """
-    if score >= 18:  return 15.0
-    if score >= 15:  return 12.0
-    if score >= 12:  return 10.0
+    if score >= 17:  return 15.0
+    if score >= 14:  return 12.0
+    if score >= 11:  return 10.0
     if score >= 8:   return 7.0
     return 5.0
 
 
 def tp_rr_for_score(score: int) -> float:
     """
-    Minimum TP RR based on confluence score.
-    Floor is always 5:1 per execution rules.
+    Minimum TP RR based on 18-point confluence score.
 
-    5–14  → 5:1
-    15–20 → 5:1 (targeting deeper weekly/daily levels)
+    5–7   → 2:1  (minimum viable signal)
+    8–11  → 3:1  (medium confidence)
+    12+   → 5:1  (strong / elite)
     """
-    return 5.0
+    if score >= 12:  return 5.0
+    if score >= 8:   return 3.0
+    return 2.0
