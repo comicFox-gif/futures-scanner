@@ -194,20 +194,18 @@ class Notifier:
                         strategies=None, label: str = "Signal Scanner", mode: str = "swing",
                         confluence_min: int = 2, tf_precision: str = "15m"):
         mode_label = "SCALP ⚡" if mode == "scalp" else "SWING 📈"
-        strats = strategies or ["EMA Trend", "S/R Bounce", "BB Breakout", "EMA Ribbon", "RSI Div"]
+        strats = strategies or ["Wyckoff", "Liquidity/EQH-EQL", "MMM", "VSA", "Intermarket", "Kill Zone"]
         strat_str = "  •  ".join(strats)
         paper_line = (
             f"Paper: <b>ON</b>  (<code>${paper_balance:.0f}</code>)"
             if paper_enabled else "Paper: OFF"
         )
-        from src.confluence import confluence_strength_label
-        conf_label = confluence_strength_label(confluence_min)
         self.send(
             f"🟢 <b>{label} Online</b>\n"
             f"{LINE}\n"
             f"<b>{len(symbols)} pairs</b>  ·  {mode_label}\n"
             f"Trend: <b>{tf_trend}</b>  →  Structure: <b>{tf_entry}</b>  →  Precision: <b>{tf_precision}</b>\n"
-            f"Cooldown: {cooldown_min}min  ·  Confluence min: <b>{confluence_min}/5</b>  {conf_label}\n"
+            f"Cooldown: {cooldown_min}min  ·  Scoring: <b>20-point</b> (Tech + Sentiment + Advanced)\n"
             f"{DLINE}\n"
             f"{strat_str}\n"
             f"{DLINE}\n"
@@ -247,12 +245,10 @@ class Notifier:
 
     def _confluence_block(self, conf_score: int, conf_labels: list) -> str:
         """Format the confluence section appended to signal messages."""
-        from src.confluence import confluence_strength_label
-        strength   = confluence_strength_label(conf_score)
         labels_str = "\n".join(conf_labels) if conf_labels else "—"
         return (
             f"\n{DLINE}\n"
-            f"<b>Confluence  {conf_score}/5  {strength}</b>\n"
+            f"<b>Confluence  {conf_score}/5</b>\n"
             f"{labels_str}"
         )
 

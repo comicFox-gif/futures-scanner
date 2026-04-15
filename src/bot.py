@@ -1496,7 +1496,7 @@ class Bot:
         self.notifier.scanner_started(
             symbols, self.tf_trend, self.tf_entry,
             self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["Elite 4H BOS (10-point confluence scoring)"],
+            strategies=["Wyckoff", "Liquidity/EQH-EQL", "MMM", "VSA", "Intermarket", "Kill Zone"],
             label=f"Elite Crypto Futures Scanner{bybit_note}",
             mode=self.mode,
             confluence_min=self._confluence_min,
