@@ -8,4 +8,3 @@ requests>=2.31.0
 schedule>=1.2.0
 colorama>=0.4.6
 yfinance>=0.2.40
-flask>=3.0.0

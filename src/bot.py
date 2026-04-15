@@ -17,31 +17,16 @@ import requests
 from datetime import datetime, date, timedelta
 from typing import Optional
 
-import queue
 import ccxt
 import pandas as pd
 
 from src.strategy import Strategy, Signal, Position
-from src.strategies.sr_bounce import SRBounceStrategy
-from src.strategies.bollinger_breakout import BollingerBreakoutStrategy
-from src.strategies.structure_break import StructureBreakStrategy
-from src.strategies.macd_zero_cross import MACDZeroCrossStrategy
-from src.strategies.rsi_divergence import RSIDivergenceStrategy
-from src.strategies.whale_momentum import WhaleMomentumStrategy
-from src.strategies.vwap_pullback import VWAPPullbackStrategy
-from src.strategies.fvg_retest import FVGRetestStrategy
-from src.strategies.liquidity_sweep_reversal import LiquiditySweepReversalStrategy
-from src.strategies.ob_retest import OBRetestStrategy
-from src.strategies.mss_pullback import MSSPullbackStrategy
-from src.strategies.ema_ribbon_pullback import EMARibbonPullbackStrategy
 from src.pair_selector import PairSelector
 from src.notifier import Notifier
 from src.mexc_executor import MexcExecutor
 from src.state_manager import save_state, load_state
-from src.confluence import score_confluence
 from src.regime import detect_regime
 from src.elite_strategy import EliteStrategy
-from src.webhook_server import WebhookServer
 
 logger = logging.getLogger("futures_bot")
 
@@ -90,19 +75,8 @@ class Bot:
 
         self.tf_sr: str = cfg.get("timeframe_sr", "4h")
 
+        # Strategy kept for paper-position management (check_position / Position dataclass)
         self.strategy    = Strategy(cfg)
-        self.sr_strategy = SRBounceStrategy(cfg)
-        self.bb_strategy = BollingerBreakoutStrategy(cfg)
-        self.vp_strategy  = StructureBreakStrategy(cfg)
-        self.mz_strategy  = MACDZeroCrossStrategy(cfg)
-        self.rd_strategy = RSIDivergenceStrategy(cfg)
-        self.wm_strategy   = WhaleMomentumStrategy(cfg)
-        self.vwap_strategy = VWAPPullbackStrategy(cfg)
-        self.fvg_strategy  = FVGRetestStrategy(cfg)
-        self.sw_strategy   = LiquiditySweepReversalStrategy(cfg)
-        self.ob_strategy   = OBRetestStrategy(cfg)
-        self.mss_strategy  = MSSPullbackStrategy(cfg)
-        self.erp_strategy  = EMARibbonPullbackStrategy(cfg)
         self.notifier    = Notifier(
             channel_name=cfg.get("channel_name", ""),
             forex_symbols=set(cfg.get("forex_symbols", [])),
@@ -165,9 +139,9 @@ class Bot:
         self._elite_paused      = False
         self._elite_resume_at: datetime | None = None
 
-        # TradingView webhook — signals arrive via Flask thread, consumed in tick
-        self._webhook_queue: queue.Queue = queue.Queue()
-        self._webhook_server = WebhookServer(self._webhook_queue)
+        # Elite trailing stop state: symbol → {direction, entry, sl_dist,
+        #   trail_activate, current_sl, tp, atr, activated}
+        self._elite_trail_state: dict[str, dict] = {}
 
         # Admin command polling — uses dedicated ADMIN_BOT_TOKEN (separate from signal bot)
         self._admin_token  = os.getenv("ADMIN_BOT_TOKEN", "").strip()
@@ -379,6 +353,19 @@ class Bot:
 
         self._session_trades.append({"pnl": pos.closed_pnl, "result": result, "strategy": sn})
         del self._paper_positions[symbol]
+
+        # Log actual RR achieved and clean up trail state
+        trail = self._elite_trail_state.pop(symbol, None)
+        if trail:
+            entry   = trail["entry"]
+            sl_dist = trail["sl_dist"]
+            if sl_dist > 0:
+                actual_rr = abs(exit_price - entry) / sl_dist
+                logger.info(
+                    f"[ELITE] {symbol} closed @ {exit_price:.6g} | "
+                    f"Actual RR achieved: {actual_rr:.2f}:1 | reason={reason}"
+                )
+
         open_count = len(self._paper_positions)
 
         # Consecutive SL tracking — 2 in a row triggers 4H elite pause
@@ -410,77 +397,6 @@ class Bot:
             "pnl": pos.closed_pnl, "result": result, "tp_level": tp_level,
         })
         save_state(self)
-
-    def _check_distribution(self, symbol: str, entry_df: pd.DataFrame, current_price: float):
-        """
-        After the whale entry, watch for exit signs.
-        Longs: detect_distribution fires when whales are selling into the crowd.
-        Shorts: detect_short_covering fires when whales are buying back (covering shorts).
-        Works with both paper positions and MEXC live position tracking.
-        Fires once per position.
-        """
-        from src.indicators import detect_distribution, detect_short_covering
-
-        # Resolve position data — paper position takes priority; fall back to MEXC tracking
-        paper_pos   = self._paper_positions.get(symbol)
-        mexc_info   = self._mexc_positions.get(symbol)
-
-        if paper_pos:
-            direction   = paper_pos.direction
-            entry_price = paper_pos.entry_price
-            already_warned = getattr(paper_pos, "_distribution_warned", False)
-        elif mexc_info:
-            direction   = mexc_info["direction"]
-            entry_price = mexc_info["entry_price"]
-            already_warned = mexc_info.get("distribution_warned", False)
-        else:
-            return
-
-        if already_warned:
-            return
-
-        if direction == "long":
-            if current_price <= entry_price:
-                return
-            signal = detect_distribution(entry_df)
-            pnl_pct = (current_price - entry_price) / entry_price * 100
-            exit_label = "distributing (selling into crowd)"
-            direction_icon = "📉"
-        else:
-            if current_price >= entry_price:
-                return
-            signal = detect_short_covering(entry_df)
-            pnl_pct = (entry_price - current_price) / entry_price * 100
-            exit_label = "covering shorts (buying back)"
-            direction_icon = "📈"
-
-        if signal:
-            # Mark warned so it doesn't fire again
-            if paper_pos:
-                paper_pos._distribution_warned = True
-            if mexc_info:
-                mexc_info["distribution_warned"] = True
-
-            logger.info(
-                f"[WHALE EXIT] {direction.upper()} exit signal on {symbol} | "
-                f"PnL={pnl_pct:+.1f}% | {signal['reason_str']}"
-            )
-            self.notifier.send(
-                f"⚠️ <b>Whale Exit — {symbol}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{direction_icon} Institutions appear to be <b>{exit_label}</b>\n"
-                f"💰 Closing at: <b>{pnl_pct:+.1f}%</b>\n"
-                f"──────────────────────────────\n"
-                f"<i>{signal['reason_str']}</i>"
-            )
-            # Close paper position
-            if self.paper_enabled and symbol in self._paper_positions:
-                self._paper_close(symbol, current_price, "Whale exit")
-            # Close MEXC live position
-            if self.bybit.enabled:
-                closed = self.bybit.close_position(symbol, direction)
-                if closed:
-                    self._mexc_positions.pop(symbol, None)
 
     def _paper_tick(self, symbol: str, current_price: float):
         """Check open paper position and act on TP/SL hits."""
@@ -629,15 +545,6 @@ class Bot:
 
             # TP hits — tracked silently, no forex channel notification
 
-    def _confluence(self, htf_df, entry_df, direction: str, price: float,
-                    is_bull_trap: bool = False) -> tuple[int, list]:
-        """Score confluence factors. Returns (score, labels)."""
-        try:
-            return score_confluence(htf_df, entry_df, direction, price, is_bull_trap)
-        except Exception as e:
-            logger.warning(f"[CONF] score_confluence error: {e}")
-            return 0, []
-
     def _bybit_order(self, sig, symbol: str = ""):
         """Place order on MEXC. Accepts Signal dataclass or dict."""
         if not self.bybit.enabled:
@@ -654,11 +561,9 @@ class Bot:
             sym       = symbol
         result = self.bybit.place_order(d)
         if result and result.get("order_id"):
-            # Track so whale-exit detection can close this position even without paper trading
             self._mexc_positions[sym] = {
-                "direction":            direction,
-                "entry_price":          float(d.get("entry", 0)),
-                "distribution_warned":  False,
+                "direction":   direction,
+                "entry_price": float(d.get("entry", 0)),
             }
             logger.info(f"[MEXC] Tracking live position: {sym} {direction} @ {d.get('entry')}")
 
@@ -723,119 +628,6 @@ class Bot:
     # Main tick
     # ------------------------------------------------------------------
 
-    def _strategy_label(self, base_name: str, signal) -> str:
-        """
-        If the signal reason contains 'Bull Trap', prefix the label so Telegram
-        subscribers know it's a trap fade, not a normal signal.
-        """
-        reason = signal.get("reason", "") if isinstance(signal, dict) else getattr(signal, "reason", "")
-        if "Bull Trap" in reason:
-            return f"🪤 Bull Trap Fade ({base_name})"
-        return base_name
-
-    def _bias_blocks(self, direction: str, bias: str, is_bull_trap: bool = False) -> bool:
-        """
-        Returns True if the market bias is strongly against this trade direction.
-        Bearish market → block longs. Bullish market → block shorts.
-        Neutral → allow both.
-        Bull trap shorts are never blocked — fading a pump in a bullish market is the point.
-        """
-        if is_bull_trap:
-            return False
-        if bias == "bearish" and direction == "long":
-            return True
-        if bias == "bullish" and direction == "short":
-            return True
-        return False
-
-    def _market_bias(self) -> str:
-        """
-        Determine overall crypto market direction using BTC as the benchmark.
-        Returns 'bearish', 'bullish', or 'neutral'.
-
-        Logic (3 votes — majority wins):
-          Vote 1: BTC price vs EMA50 on HTF
-          Vote 2: BTC price vs EMA200 on HTF
-          Vote 3: BTC MACD line vs zero
-        """
-        try:
-            btc_raw = self._fetch_ohlcv("BTC/USDT:USDT", self.tf_trend)
-            if btc_raw is None or len(btc_raw) < 60:
-                return "neutral"
-            btc_df  = self.strategy.enrich(btc_raw.copy())
-            if len(btc_df) < 5:
-                return "neutral"
-            row      = btc_df.iloc[-2]
-            price    = float(row["close"])
-            ema50    = float(row.get(f"ema_{self.cfg['strategy']['ema_slow']}", float("nan")))
-            ema200   = float(row.get(f"ema_{self.cfg['strategy']['ema_trend']}", float("nan")))
-            macd     = float(row.get("macd", float("nan")))
-            if any(pd.isna(v) for v in [ema50, ema200, macd]):
-                return "neutral"
-            bull_votes = sum([price > ema50, price > ema200, macd > 0])
-            bear_votes = sum([price < ema50, price < ema200, macd < 0])
-            if bull_votes >= 2:
-                return "bullish"
-            if bear_votes >= 2:
-                return "bearish"
-            return "neutral"
-        except Exception:
-            return "neutral"
-
-    def _mtf_confirm(self, symbol: str, direction: str,
-                     precision_df: pd.DataFrame | None = None,
-                     is_bull_trap: bool = False) -> bool:
-        """
-        Precision entry confirmation on the 3rd (lowest) timeframe.
-        Swing: 15m  |  Scalp: 5m
-
-        Checks three things on the precision candle:
-          1. Candle direction aligns with trade (bullish close for long, bearish for short)
-          2. Clean body — no heavy wick against the trade (bounce_candle_clean)
-          3. Price side of EMA50 on precision TF (trend alignment)
-             Bull trap shorts skip #3 — they fade a pump already above EMA50.
-
-        precision_df: pre-enriched precision TF dataframe (fetched once per symbol in _tick).
-                      If None, falls back to fetching it here so callers never need to guard.
-        Returns True if confirmed, False to skip.
-        """
-        from src.indicators import bounce_candle_clean
-        tf_label = self.tf_precision
-        try:
-            if precision_df is None or len(precision_df) < 5:
-                # Fallback fetch (should only happen if tick loop didn't provide it)
-                raw = self._fetch_ohlcv(symbol, tf_label)
-                if raw is None or len(raw) < 20:
-                    return True
-                precision_df = self.strategy.enrich(raw.copy())
-                if len(precision_df) < 5:
-                    return True
-
-            row       = precision_df.iloc[-2]
-            close     = float(row["close"])
-            open_     = float(row["open"])
-            ema50_col = f"ema_{self.cfg['strategy']['ema_slow']}"
-            ema50     = float(row.get(ema50_col, float("nan")))
-
-            if direction == "short":
-                candle_ok = close < open_                        # bearish precision candle
-                clean_ok  = bounce_candle_clean(row, "short")
-                confirmed = candle_ok and clean_ok
-            else:
-                candle_ok = close > open_                        # bullish precision candle
-                clean_ok  = bounce_candle_clean(row, "long")
-                confirmed = candle_ok and clean_ok
-
-            if not confirmed:
-                logger.info(
-                    f"[PREC] {symbol} {direction.upper()} blocked on {tf_label} "
-                    f"candle={'✓' if candle_ok else '✗'} clean={'✓' if clean_ok else '✗'}"
-                )
-            return confirmed
-        except Exception as e:
-            logger.warning(f"[PREC] {symbol} confirm error: {e} — allowing signal")
-            return True
-
     def _tick(self):
         self._check_session_resume()
         symbols   = self.pair_selector.get_symbols()
@@ -868,47 +660,44 @@ class Bot:
         )
         logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info} | Regime: {regime_lbl} | {regime_info['label']}")
 
-        # Process any signals queued from TradingView webhook thread
-        self._process_webhook_signals(regime_info)
-
         signals_found = 0
         for symbol in symbols:
             try:
-                htf_raw       = self._fetch_ohlcv(symbol, self.tf_trend)
-                entry_raw     = self._fetch_ohlcv(symbol, self.tf_entry)
-                precision_raw = self._fetch_ohlcv(symbol, self.tf_precision)
-                if htf_raw is None or entry_raw is None:
+                htf_raw = self._fetch_ohlcv(symbol, self.tf_trend)
+                if htf_raw is None:
                     continue
 
-                htf_df       = self.elite_strategy.enrich(htf_raw.copy())
-                entry_df     = self.strategy.enrich(entry_raw.copy())
-                precision_df = self.strategy.enrich(precision_raw.copy()) if precision_raw is not None else None
+                htf_df = self.elite_strategy.enrich(htf_raw.copy())
 
-                min_candles = 60
-                if len(htf_df) < min_candles or len(entry_df) < min_candles:
-                    logger.debug(f"Skipping {symbol}: insufficient candle history ({len(htf_df)} htf, {len(entry_df)} entry)")
+                if len(htf_df) < 60:
+                    logger.debug(f"Skipping {symbol}: insufficient 4H history ({len(htf_df)} candles)")
                     continue
 
-                # Weekly data for T1 scoring (best-effort; non-fatal if unavailable)
+                # Weekly data for structural TP and T1 scoring
                 weekly_raw = self._fetch_ohlcv(symbol, "1w")
-                weekly_df  = self.elite_strategy.enrich(weekly_raw.copy()) if weekly_raw is not None and len(weekly_raw) >= 5 else None
+                weekly_df  = (
+                    self.elite_strategy.enrich(weekly_raw.copy())
+                    if weekly_raw is not None and len(weekly_raw) >= 5
+                    else None
+                )
 
-                # Use live MEXC price for paper trade monitoring and entry.
+                # Live price for paper trade monitoring and entry
                 live_price    = self._fetch_live_price(symbol)
-                current_price = live_price if live_price else float(entry_df.iloc[-2]["close"])
+                current_price = live_price if live_price else float(htf_df.iloc[-2]["close"])
 
-                # Paper position management (always runs if position is open)
+                # Elite trailing stop — runs before _paper_tick so SL is updated first
+                if symbol in self._elite_trail_state:
+                    self._elite_manage_trail(symbol, current_price, htf_df)
+
+                # Paper position management
                 if self.paper_enabled and symbol in self._paper_positions:
                     self._paper_tick(symbol, current_price)
-                    self._check_distribution(symbol, entry_df, current_price)
-                elif self.bybit.enabled and symbol in self._mexc_positions:
-                    self._check_distribution(symbol, entry_df, current_price)
                 if symbol in self._forex_positions:
                     self._forex_paper_tick(symbol, current_price)
 
                 in_paper = self.paper_enabled and symbol in self._paper_positions
 
-                # ── Elite 4H strategy (replaces all previous strategies) ─────
+                # ── Elite 4H institutional strategy ──────────────────────────
                 if not in_paper:
                     if self._elite_tick(
                         symbol=symbol,
@@ -1000,15 +789,15 @@ class Bot:
 
         logger.info(
             f"[ELITE] {sig['direction'].upper()} {symbol} "
-            f"@ {sig['entry']:.6g} | Score={sig['score']}/10 | Pending #{pid}"
+            f"@ {sig['entry']:.6g} | Score={sig['score']}/20 | Pending #{pid}"
         )
         return True
 
     def _send_signal_approval(self, pid: int, sig: dict, regime: dict):
-        """Send signal to admin bot with Approve / Skip / Wait buttons."""
+        """Send signal to admin bot with Approve / Skip / Wait buttons (20-point format)."""
         def f(v):
-            if v is None:   return "N/A"
-            if abs(v) >= 1000: return f"{v:.2f}"
+            if v is None:      return "N/A"
+            if abs(v) >= 1000: return f"{v:,.2f}"
             if abs(v) >= 10:   return f"{v:.4f}"
             return f"{v:.6f}"
 
@@ -1017,26 +806,58 @@ class Bot:
         score      = sig.get("score", 0)
         t_score    = sig.get("tech_score", 0)
         s_score    = sig.get("sent_score", 0)
+        adv_score  = sig.get("adv_score",  0)
+        tp_rr      = sig.get("tp_rr", 0)
+        risk_usdt  = sig.get("risk_usdt", 5.0)
+        reward     = risk_usdt * tp_rr
+
         dir_icon   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
         regime_lbl = {"bull": "🟢 Bull", "bear": "🔴 Bear", "neutral": "⚪ Neutral"}.get(
             regime.get("regime", "neutral"), "⚪ Neutral"
         )
-        bar_t = "█" * t_score + "░" * (5 - t_score)
-        bar_s = "█" * s_score + "░" * (5 - s_score)
+        conf_label = (
+            "ELITE 🏆" if score >= 15 else
+            "Strong ⚡" if score >= 12 else
+            "Medium"   if score >= 8  else "Base"
+        )
+
+        # Score bars (out of 5 each for tech/sent, out of 10 for adv)
+        bar_t   = "█" * t_score  + "░" * (5  - t_score)
+        bar_s   = "█" * s_score  + "░" * (5  - s_score)
+        bar_adv = "█" * min(adv_score, 10) + "░" * (10 - min(adv_score, 10))
+
+        # Advanced factor lines (pull from adv_detail if present)
+        adv   = sig.get("adv_detail", {})
+        lines = []
+        kz_lbl   = sig.get("kz_label",   "")
+        wyck_lbl = sig.get("wyck_label",  "")
+        mmm_lbl  = sig.get("mmm_label",   "")
+        vsa_lbl  = sig.get("vsa_label",   "")
+        im_lbl   = (sig.get("im_label",   "") or "").split("\n")[0]  # first line only
+
+        if kz_lbl:   lines.append(kz_lbl)
+        if wyck_lbl: lines.append(wyck_lbl)
+        if mmm_lbl:  lines.append(mmm_lbl)
+        if vsa_lbl:  lines.append(vsa_lbl)
+        if im_lbl:   lines.append(im_lbl)
+
+        adv_block = "\n".join(f"  {l}" for l in lines) if lines else "  N/A"
 
         text = (
-            f"🔔 <b>Signal #{pid:03d} — Pending Approval</b>\n\n"
+            f"🚨 <b>Signal #{pid:03d} — Pending Approval</b>\n\n"
             f"{dir_icon}  •  <b>{symbol}</b>\n"
-            f"Elite 4H BOS\n\n"
-            f"📌 Entry  <code>{f(sig['entry'])}</code>\n"
-            f"🛑 SL       <code>{f(sig['sl'])}</code>\n"
-            f"🎯 TP1    <code>{f(sig['tp1'])}</code>\n"
-            f"🏆 TP2    <code>{f(sig['tp2'])}</code>\n"
-            f"💰 TP3    <code>{f(sig['tp3'])}</code>\n\n"
-            f"📊 Score  <b>{score}/10</b>  "
-            f"Tech {bar_t} ({t_score}/5)  Sent {bar_s} ({s_score}/5)\n"
-            f"🌍 Regime  {regime_lbl}\n\n"
-            f"<i>{sig.get('reason', '')[:150]}</i>"
+            f"Timeframe: 4H  |  {regime_lbl}\n\n"
+            f"📌 Entry   <code>{f(sig['entry'])}</code>\n"
+            f"🛑 SL      <code>{f(sig['sl'])}</code>\n"
+            f"🎯 TP      <code>{f(sig['tp1'])}</code>  ({tp_rr:.1f}:1 RR)\n"
+            f"💵 Risk    <b>${risk_usdt:.0f}</b>  →  Reward <b>${reward:.0f}</b>\n"
+            f"🔁 Trail   activates at <code>{f(sig.get('trail_activate', 0))}</code>\n\n"
+            f"📊 Score  <b>{score}/20</b>  [{conf_label}]\n"
+            f"  Tech [{bar_t}] {t_score}/5\n"
+            f"  Sent [{bar_s}] {s_score}/5\n"
+            f"  Adv  [{bar_adv}] {adv_score}/10\n\n"
+            f"<b>Advanced Confluence:</b>\n{adv_block}\n\n"
+            f"<i>{sig.get('reason', '')[:180]}</i>"
         )
         markup = {
             "inline_keyboard": [[
@@ -1064,33 +885,50 @@ class Bot:
         live_p = entry_data.get("live_price", sig.get("entry", 0))
         self._daily_elite_count += 1
 
-        direction = sig["direction"]
-        score     = sig.get("score", 0)
-        stars     = "⭐" * min(score // 2, 5)
-        dir_tag   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
-        base      = symbol.split("/")[0]
+        direction  = sig["direction"]
+        score      = sig.get("score", 0)
+        dir_tag    = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+        base       = symbol.split("/")[0]
+        tp_rr      = sig.get("tp_rr", 0)
+        risk_usdt  = sig.get("risk_usdt", 5.0)
+        reward     = risk_usdt * tp_rr
+        conf_label = (
+            "ELITE 🏆" if score >= 15 else
+            "Strong ⚡" if score >= 12 else
+            "Medium"   if score >= 8  else "Base"
+        )
+        from datetime import datetime as _dt
+        now_utc = _dt.utcnow()
+        kz_line = sig.get("kz_label", "")
 
         def f(v):
             if v is None:      return "N/A"
-            if abs(v) >= 1000: return f"{v:.2f}"
-            if abs(v) >= 10:   return f"{v:.4f}"
-            return f"{v:.6f}"
+            if abs(v) >= 1000: return f"${v:,.2f}"
+            if abs(v) >= 10:   return f"${v:.4f}"
+            return f"${v:.6f}"
 
-        # Compute qty from notifier helper (risk = $10 default)
-        try:
-            from src.notifier import Notifier as _N
-            qty = _N._qty_for_risk(sig["entry"], sig["sl"])
-            qty_line = f"\n📦 Qty  <code>{_N._fmt_qty(qty)} {base}</code>"
-        except Exception:
-            qty_line = ""
+        # Advanced factor summary for channel
+        adv_lines = []
+        for lbl_key in ("kz_label", "wyck_label", "mmm_label", "vsa_label"):
+            lbl = sig.get(lbl_key, "")
+            if lbl:
+                adv_lines.append(lbl)
+        im_line = (sig.get("im_label", "") or "").split("\n")[0]
+        if im_line:
+            adv_lines.append(im_line)
+        adv_block = "\n".join(adv_lines) if adv_lines else ""
 
         pub_text = (
-            f"{dir_tag}  •  <b>{symbol}</b>\n"
-            f"Elite 4H BOS  {stars}\n\n"
-            f"📌 Entry  <code>{f(sig['entry'])}</code>\n"
-            f"🛑 SL       <code>{f(sig['sl'])}</code>\n"
-            f"🎯 TP1    <code>{f(sig['tp1'])}</code>\n"
-            f"🏆 TP2    <code>{f(sig['tp2'])}</code>{qty_line}"
+            f"🚨 <b>ELITE SIGNAL</b>\n\n"
+            f"{dir_tag}  •  <b>{base}</b>  |  4H\n"
+            f"{kz_line}\n\n"
+            f"📌 Entry   <code>{f(sig['entry'])}</code>\n"
+            f"🛑 SL      <code>{f(sig['sl'])}</code>\n"
+            f"🎯 TP      <code>{f(sig['tp1'])}</code>  ({tp_rr:.1f}:1)\n"
+            f"💵 Risk ${risk_usdt:.0f}  →  Reward ${reward:.0f}\n"
+            f"🔁 Trail   <code>{f(sig.get('trail_activate', 0))}</code>\n\n"
+            f"Score: <b>{score}/20</b>  [{conf_label}]\n"
+            + (f"\n{adv_block}\n" if adv_block else "")
         )
         self.notifier.send(pub_text)
 
@@ -1110,44 +948,171 @@ class Bot:
             )
             self._paper_open(dummy, "Elite 4H BOS", live_price=live_p)
 
+        # Register trailing stop state — managed each tick by _elite_manage_trail
+        sl_dist = sig.get("sl_dist", abs(sig["entry"] - sig["sl"]))
+        if sl_dist > 0:
+            self._elite_trail_state[symbol] = {
+                "direction":      direction,
+                "entry":          sig["entry"],
+                "sl_dist":        sl_dist,
+                "trail_activate": sig.get(
+                    "trail_activate",
+                    sig["entry"] + (self.elite_strategy.trail_rr * sl_dist
+                                    if direction == "long"
+                                    else -self.elite_strategy.trail_rr * sl_dist),
+                ),
+                "current_sl":     sig["sl"],
+                "tp":             sig["tp1"],
+                "atr":            sig.get("atr", 0),
+                "activated":      False,
+            }
+            logger.info(
+                f"[ELITE] Trail state registered for {symbol} | "
+                f"activates @ {self._elite_trail_state[symbol]['trail_activate']:.6g}"
+            )
+
         logger.info(
             f"[ELITE] #{pid} approved — {direction.upper()} {symbol} "
             f"posted to channel + MEXC order placed"
         )
 
-    def _process_webhook_signals(self, regime: dict):
-        """Drain the TradingView webhook queue and send each signal for admin approval."""
-        while not self._webhook_queue.empty():
+    # ------------------------------------------------------------------
+    # Elite trailing stop management
+    # ------------------------------------------------------------------
+
+    def _send_trail_notification(
+        self,
+        symbol: str,
+        direction: str,
+        entry: float,
+        sl_dist: float,
+        new_sl: float,
+        current_price: float,
+        tp: float,
+    ):
+        """Send Telegram notification when the trailing stop moves."""
+        base = symbol.split("/")[0]
+
+        if direction == "long":
+            running_rr = (current_price - entry) / sl_dist
+            locked_rr  = (new_sl - entry) / sl_dist
+        else:
+            running_rr = (entry - current_price) / sl_dist
+            locked_rr  = (entry - new_sl) / sl_dist
+
+        # Try to get locked $ pnl from the paper position if one is open
+        locked_str = ""
+        pos = self._paper_positions.get(symbol)
+        if pos:
+            locked_pnl = self._calc_pnl(pos, new_sl, pos.size_remaining)
+            locked_str = f"\nLocked profit: <b>${locked_pnl:+.2f}</b>"
+        elif locked_rr != 0:
+            locked_str = f"\nLocked profit: <b>{locked_rr:+.2f}R</b>"
+
+        def fmtp(v: float) -> str:
+            if abs(v) >= 1_000:  return f"${v:,.2f}"
+            if abs(v) >= 10:     return f"${v:.4f}"
+            return f"${v:.6f}"
+
+        text = (
+            f"🔒 <b>TRAIL STOP MOVED</b>\n"
+            f"Pair: <b>{base}</b>\n"
+            f"New SL: <code>{fmtp(new_sl)}</code>{locked_str}\n"
+            f"Running RR: <b>{running_rr:.1f}:1</b> and climbing 📈"
+        )
+        self.notifier.send(text)
+
+    def _elite_manage_trail(
+        self,
+        symbol: str,
+        current_price: float,
+        h4_df=None,
+    ):
+        """
+        Manage trailing stop for an active elite position.
+
+        Logic:
+          - Before activation: watches for price to reach trail_activate (default 2:1).
+          - After activation: trails price by 1 ATR; only moves in profit direction;
+            never moves backwards.
+          - Updates paper position's stop_loss so _paper_tick() handles the exit.
+          - Calls update_trail_sl() on MEXC to update the live exchange stop.
+        """
+        state = self._elite_trail_state.get(symbol)
+        if not state:
+            return
+
+        direction      = state["direction"]
+        entry          = state["entry"]
+        sl_dist        = state["sl_dist"]
+        trail_activate = state["trail_activate"]
+        current_sl     = state["current_sl"]
+        tp             = state["tp"]
+        atr            = state["atr"]
+
+        # Refresh ATR from fresh 4H data when available
+        if h4_df is not None and len(h4_df) >= 2:
             try:
-                sig    = self._webhook_queue.get_nowait()
-                symbol = sig["symbol"]
+                fresh_atr = float(h4_df.iloc[-2].get("atr", atr))
+                if not pd.isna(fresh_atr) and fresh_atr > 0:
+                    atr = fresh_atr
+                    state["atr"] = atr
+            except Exception:
+                pass
 
-                if self._daily_elite_count >= self._daily_sig_limit:
-                    logger.info(f"[WEBHOOK] {symbol} dropped — daily limit reached")
-                    continue
-                if self._elite_paused:
-                    logger.info(f"[WEBHOOK] {symbol} dropped — elite paused")
-                    continue
-                if self._is_on_cooldown(symbol, "elite", 2):
-                    logger.info(f"[WEBHOOK] {symbol} dropped — on cooldown")
-                    continue
-                if any(v["symbol"] == symbol for v in self._pending_signals.values()):
-                    logger.info(f"[WEBHOOK] {symbol} dropped — already pending")
-                    continue
+        if atr <= 0:
+            return
 
-                pid = self._next_pending_id
-                self._next_pending_id += 1
-                self._pending_signals[pid] = {
-                    "id": pid, "symbol": symbol,
-                    "signal": sig, "live_price": sig.get("entry", 0),
-                    "sent_at": datetime.utcnow(),
-                }
-                self._send_signal_approval(pid, sig, regime)
-                self._mark_sent(symbol, "elite", 2)
-                self._daily_alerts.append({"stage": 2, "direction": sig["direction"], "symbol": symbol})
-                logger.info(f"[WEBHOOK] TV signal #{pid} queued for approval: {symbol} {sig['direction']}")
-            except Exception as e:
-                logger.warning(f"[WEBHOOK] Process error: {e}")
+        def _apply_new_sl(new_sl: float):
+            """Persist new SL to trail state, paper position, MEXC stop."""
+            state["current_sl"] = new_sl
+            # Update paper position SL so _paper_tick() triggers exit correctly
+            pos = self._paper_positions.get(symbol)
+            if pos:
+                pos.stop_loss = new_sl
+            # Update MEXC live stop order
+            if self.bybit.enabled and symbol in self._mexc_positions:
+                self.bybit.update_trail_sl(symbol, direction, new_sl, tp)
+            self._send_trail_notification(
+                symbol, direction, entry, sl_dist, new_sl, current_price, tp
+            )
+
+        if direction == "long":
+            candidate_sl = current_price - atr
+
+            if not state["activated"]:
+                if current_price >= trail_activate:
+                    state["activated"] = True
+                    logger.info(
+                        f"[TRAIL] {symbol} LONG trail ACTIVATED @ {current_price:.6g} "
+                        f"(trail_activate={trail_activate:.6g})"
+                    )
+                    if candidate_sl > current_sl:
+                        _apply_new_sl(candidate_sl)
+                    else:
+                        state["current_sl"] = candidate_sl
+            else:
+                # Already activated — only move up
+                if candidate_sl > state["current_sl"]:
+                    _apply_new_sl(candidate_sl)
+
+        else:  # short
+            candidate_sl = current_price + atr
+
+            if not state["activated"]:
+                if current_price <= trail_activate:
+                    state["activated"] = True
+                    logger.info(
+                        f"[TRAIL] {symbol} SHORT trail ACTIVATED @ {current_price:.6g} "
+                        f"(trail_activate={trail_activate:.6g})"
+                    )
+                    if candidate_sl < current_sl:
+                        _apply_new_sl(candidate_sl)
+                    else:
+                        state["current_sl"] = candidate_sl
+            else:
+                if candidate_sl < state["current_sl"]:
+                    _apply_new_sl(candidate_sl)
 
     def _send_session_summary(self):
         trades = self._session_trades
@@ -1203,7 +1168,7 @@ class Bot:
             btc_raw = self._fetch_ohlcv("BTC/USDT:USDT", "1h")
             if btc_raw is None or len(btc_raw) < 40:
                 return
-            btc_df       = self.strategy.enrich(btc_raw.copy())
+            btc_df       = self.elite_strategy.enrich(btc_raw.copy())
             row          = btc_df.iloc[-2]
             adx          = float(row.get("adx", 20))
             atr          = float(row.get("atr", 0))
@@ -1520,9 +1485,6 @@ class Bot:
         logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
         logger.info(f"Elite 4H system: daily_limit={self._daily_sig_limit} | max_concurrent={self._max_concurrent}")
         logger.info("=" * 60)
-
-        # Start TradingView webhook server (daemon thread — only if WEBHOOK_SECRET set)
-        self._webhook_server.start()
 
         try:
             symbols = self.pair_selector.get_symbols()

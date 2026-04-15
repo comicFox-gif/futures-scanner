@@ -286,7 +286,8 @@ class MexcExecutor:
         scale         = spec["price_scale"]
 
         # Convert coin qty → contracts
-        risk_usdt = 3.0
+        # risk_usdt comes from the signal (score-based sizing); fall back to $3
+        risk_usdt = float(signal.get("risk_usdt", 3.0))
         qty_coin  = risk_usdt / sl_dist
         vol       = math.floor(qty_coin / contract_size)
 
@@ -455,6 +456,84 @@ class MexcExecutor:
             return True
         except Exception as e:
             logger.error(f"[MEXC] close_position({mexc_sym}): {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Update trailing stop-loss
+    # ------------------------------------------------------------------
+
+    def update_trail_sl(self, symbol: str, direction: str,
+                        new_sl: float, tp: float) -> bool:
+        """
+        Update the trailing stop-loss for an open MEXC position.
+        Cancels any existing stop orders for the symbol, then places a
+        fresh stop with the new (higher for longs / lower for shorts) SL.
+        """
+        if not self.enabled:
+            return False
+        mexc_sym = self._to_symbol(symbol)
+        spec     = self._get_contract(mexc_sym)
+        scale    = spec["price_scale"]
+        sl_price = self._round_price(new_sl, scale)
+        tp_price = self._round_price(tp, scale)
+        pos_type = 1 if direction == "long" else 2
+
+        try:
+            # Resolve current position volume
+            data = self._get(
+                "/api/v1/private/position/open_positions", {"symbol": mexc_sym}
+            )
+            vol = 0
+            for pos in data.get("data", []):
+                v = float(pos.get("holdVol", 0))
+                if v > 0:
+                    vol = int(v)
+                    break
+            if vol == 0:
+                logger.info(f"[MEXC] update_trail_sl: no open position for {mexc_sym}")
+                return False
+
+            # Cancel existing stop orders so we don't stack duplicates
+            try:
+                stop_data = self._get(
+                    "/api/v1/private/stoporder/list/orders",
+                    {"symbol": mexc_sym, "isFinished": "false"},
+                )
+                result_list = (
+                    stop_data.get("data", {}).get("resultList", [])
+                    if isinstance(stop_data.get("data"), dict)
+                    else []
+                )
+                for order in result_list:
+                    oid = order.get("id") or order.get("orderId")
+                    if oid:
+                        try:
+                            self._post("/api/v1/private/stoporder/cancel",
+                                       {"orderId": str(oid)})
+                        except Exception as ce:
+                            logger.warning(f"[MEXC] cancel stop {oid}: {ce}")
+            except Exception as e:
+                logger.warning(f"[MEXC] list stop orders for {mexc_sym}: {e} — skipping cancel")
+
+            # Place fresh stop with updated SL
+            sl_str = format(Decimal(repr(sl_price)), 'f')
+            tp_str = format(Decimal(repr(tp_price)), 'f')
+            self._post("/api/v1/private/stoporder/place", {
+                "symbol":          mexc_sym,
+                "positionType":    str(pos_type),
+                "vol":             str(vol),
+                "stopLossType":    "1",
+                "stopLossPrice":   sl_str,
+                "takeProfitType":  "1",
+                "takeProfitPrice": tp_str,
+            })
+            logger.info(
+                f"[MEXC] Trail SL updated | {mexc_sym} | new SL={sl_price} | TP={tp_price}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"[MEXC] update_trail_sl({mexc_sym}): {e}")
             return False
 
     # ------------------------------------------------------------------

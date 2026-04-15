@@ -1,158 +1,264 @@
 """
-Sentiment Data Fetcher
------------------------
-External market sentiment signals for the elite confluence system.
-
+Sentiment Data Fetcher  —  free endpoints only, no API keys required
+----------------------------------------------------------------------
 Sources:
-  - Fear & Greed Index: api.alternative.me (free, no auth, cached 1h)
-  - Funding Rates:      ccxt exchange.fetch_funding_rate()
-  - Open Interest:      ccxt exchange.fetch_open_interest()
-  - Long/Short Ratio:   Coinglass (optional — needs COINGLASS_API_KEY env var)
-  - Liquidation data:   Coinglass (optional — needs COINGLASS_API_KEY env var)
+  Fear & Greed    alternative.me/fng/                    (free, no auth)
+  Funding rate    MEXC REST /api/v1/contract/funding_rate (free, no auth)
+  Open Interest   MEXC REST /api/v1/contract/open_interest(free, no auth)
+  Long/Short ratio Bybit REST /v5/market/account-ratio    (free, no auth)
+  BTC Dominance   CoinGecko /api/v3/global                (free, no auth)
 
-All functions degrade gracefully on failure: return None / default values.
-Missing Coinglass key → those sentiment points are awarded neutrally (don't penalise).
+All functions are fail-safe: return None / neutral defaults on any error.
+Callers award the sentiment point neutrally when data is unavailable.
 """
 from __future__ import annotations
 import logging
-import os
 import time
 
 import requests
 
 logger = logging.getLogger("futures_bot.sentiment")
 
-# ── Fear & Greed cache ────────────────────────────────────────────────────────
+_SESSION = requests.Session()
+_SESSION.headers.update({"User-Agent": "futures-bot/2.0"})
 
-_fng_cache: dict = {"value": 50, "label": "Neutral", "fetched_at": 0.0}
-_FNG_TTL = 3600  # re-fetch at most once per hour
+MEXC_BASE  = "https://contract.mexc.com"
+BYBIT_BASE = "https://api.bybit.com"
+
+
+# ── Shared cache helper ────────────────────────────────────────────────────────
+
+def _cache_get(cache: dict, key: str, ttl: float):
+    entry = cache.get(key)
+    if entry and time.time() - entry["t"] < ttl:
+        return entry["v"]
+    return None
+
+
+def _cache_set(cache: dict, key: str, value):
+    cache[key] = {"v": value, "t": time.time()}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1.  Fear & Greed Index  (alternative.me)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_fng_cache: dict = {}
+_FNG_TTL = 3600.0   # 1 hour
 
 
 def get_fear_greed() -> dict:
     """
-    Return the current Fear & Greed index.
-    {'value': 0–100, 'label': 'Extreme Fear' | 'Fear' | 'Neutral' | 'Greed' | 'Extreme Greed'}
-    Cached for 1 hour to avoid rate-limit issues.
+    Return {'value': 0-100, 'label': str}.
+    Extreme Fear (0-25) = best long zone.
+    Extreme Greed (75-100) = avoid longs.
+    Cached 1 hour.
     """
-    now = time.time()
-    if now - _fng_cache["fetched_at"] < _FNG_TTL:
-        return {"value": _fng_cache["value"], "label": _fng_cache["label"]}
+    cached = _cache_get(_fng_cache, "fng", _FNG_TTL)
+    if cached:
+        return cached
+
+    default = {"value": 50, "label": "Neutral"}
     try:
-        resp = requests.get(
-            "https://api.alternative.me/fng/?limit=1", timeout=10
+        resp = _SESSION.get(
+            "https://api.alternative.me/fng/?limit=1", timeout=8
         )
         data = resp.json()["data"][0]
-        _fng_cache["value"]      = int(data["value"])
-        _fng_cache["label"]      = data["value_classification"]
-        _fng_cache["fetched_at"] = now
-        logger.debug(f"[SENTIMENT] F&G updated: {_fng_cache['value']} ({_fng_cache['label']})")
+        result = {
+            "value": int(data["value"]),
+            "label": data["value_classification"],
+        }
+        _cache_set(_fng_cache, "fng", result)
+        logger.debug(f"[SENTIMENT] F&G: {result['value']} ({result['label']})")
+        return result
     except Exception as e:
-        logger.warning(f"[SENTIMENT] Fear & Greed fetch failed: {e}")
-    return {"value": _fng_cache["value"], "label": _fng_cache["label"]}
+        logger.debug(f"[SENTIMENT] F&G fetch failed: {e}")
+    return default
 
 
-# ── ccxt-based live data ──────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 2.  Funding Rate  (MEXC REST — no auth)
+# ══════════════════════════════════════════════════════════════════════════════
 
-def get_funding_rate(exchange, symbol: str) -> float | None:
+_fr_cache: dict = {}
+_FR_TTL = 300.0   # 5 minutes (funding settles every 8h, but rate updates frequently)
+
+
+def get_funding_rate(exchange=None, symbol: str = "") -> float | None:
     """
-    Return latest funding rate for symbol.
-    Negative rate = longs paying shorts = bearish positioning → bullish contrarian
-    Positive rate = shorts paying longs = bullish positioning → can be bearish contrarian
-    Returns None on failure.
+    Return latest funding rate for symbol via MEXC public REST.
+    Negative = longs paying shorts (bearish positioning → contrarian bullish).
+    Positive = shorts paying longs (bullish positioning → contrarian bearish).
+
+    `exchange` param kept for API compatibility but not used.
+    `symbol` format: 'BTC/USDT:USDT'  →  internally converted to 'BTC_USDT'.
     """
-    try:
-        data = exchange.fetch_funding_rate(symbol)
-        if data:
-            rate = data.get("fundingRate") or data.get("lastFundingRate")
-            return float(rate) if rate is not None else None
-    except Exception as e:
-        logger.debug(f"[SENTIMENT] Funding rate {symbol}: {e}")
-    return None
-
-
-def get_open_interest(exchange, symbol: str) -> float | None:
-    """
-    Return current open interest amount (in base units).
-    Used to confirm trend: rising OI + rising price = real trend.
-    Returns None on failure.
-    """
-    try:
-        data = exchange.fetch_open_interest(symbol)
-        if data:
-            oi = data.get("openInterestAmount") or data.get("openInterest")
-            return float(oi) if oi else None
-    except Exception as e:
-        logger.debug(f"[SENTIMENT] Open interest {symbol}: {e}")
-    return None
-
-
-# ── Coinglass (optional, requires API key) ────────────────────────────────────
-
-_COINGLASS_BASE = "https://open-api.coinglass.com/public/v2"
-_cg_cache: dict = {}
-_CG_TTL = 900  # cache 15 minutes
-
-
-def _cg_get(endpoint: str, params: dict) -> dict | None:
-    """Internal helper: hit Coinglass API with caching. Returns None if no key or on failure."""
-    api_key = os.getenv("COINGLASS_API_KEY", "").strip()
-    if not api_key:
-        return None
-
-    cache_key = f"{endpoint}|{sorted(params.items())}"
-    entry = _cg_cache.get(cache_key)
-    if entry and time.time() - entry["t"] < _CG_TTL:
-        return entry["data"]
+    mexc_sym = _to_mexc_sym(symbol)
+    cache_key = f"fr|{mexc_sym}"
+    cached = _cache_get(_fr_cache, cache_key, _FR_TTL)
+    if cached is not None:
+        return cached
 
     try:
-        resp = requests.get(
-            f"{_COINGLASS_BASE}/{endpoint}",
-            params=params,
-            headers={"coinglassSecret": api_key},
-            timeout=10,
+        resp = _SESSION.get(
+            f"{MEXC_BASE}/api/v1/contract/funding_rate",
+            params={"symbol": mexc_sym},
+            timeout=8,
         )
         body = resp.json()
         if body.get("success"):
-            _cg_cache[cache_key] = {"data": body["data"], "t": time.time()}
-            return body["data"]
-        logger.debug(f"[COINGLASS] {endpoint} non-success: {body.get('msg')}")
+            rate = body.get("data", {}).get("fundingRate")
+            if rate is not None:
+                result = float(rate)
+                _cache_set(_fr_cache, cache_key, result)
+                logger.debug(f"[SENTIMENT] Funding rate {mexc_sym}: {result:.6f}")
+                return result
     except Exception as e:
-        logger.debug(f"[COINGLASS] {endpoint} error: {e}")
+        logger.debug(f"[SENTIMENT] Funding rate {mexc_sym}: {e}")
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3.  Open Interest  (MEXC REST — no auth)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_oi_cache: dict = {}
+_OI_TTL = 300.0   # 5 minutes
+
+
+def get_open_interest(exchange=None, symbol: str = "") -> float | None:
+    """
+    Return current open interest in USD via MEXC public REST.
+    Used to confirm trend: rising OI + rising price = genuine directional move.
+
+    `exchange` param kept for API compatibility but not used.
+    """
+    mexc_sym = _to_mexc_sym(symbol)
+    cache_key = f"oi|{mexc_sym}"
+    cached = _cache_get(_oi_cache, cache_key, _OI_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _SESSION.get(
+            f"{MEXC_BASE}/api/v1/contract/open_interest",
+            params={"symbol": mexc_sym},
+            timeout=8,
+        )
+        body = resp.json()
+        if body.get("success"):
+            data = body.get("data", {})
+            # MEXC returns holdVol (contracts) and openInterestUSD
+            oi = data.get("openInterestUSD") or data.get("holdVol")
+            if oi is not None:
+                result = float(oi)
+                _cache_set(_oi_cache, cache_key, result)
+                logger.debug(f"[SENTIMENT] OI {mexc_sym}: {result:,.0f}")
+                return result
+    except Exception as e:
+        logger.debug(f"[SENTIMENT] OI {mexc_sym}: {e}")
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4.  Long / Short Ratio  (Bybit public REST — no auth)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ls_cache: dict = {}
+_LS_TTL = 600.0   # 10 minutes
 
 
 def get_long_short_ratio(symbol_base: str) -> float | None:
     """
-    Return long/short ratio from Coinglass (global accounts).
-    > 1.0 = more longs than shorts.
-    < 1.0 = more shorts than longs.
-    Returns None if Coinglass key not set or request fails.
+    Return long/short account ratio from Bybit (global accounts, 4H period).
+    > 1.0  = more longs than shorts.
+    < 1.0  = more shorts than longs.
+    Returns None on failure.
+
+    `symbol_base` should be the base currency string, e.g. 'BTC', 'ETH'.
     """
-    data = _cg_get(
-        "futures/globalLongShortAccountRatio",
-        {"symbol": symbol_base + "USDT", "period": "4h", "limit": 1},
-    )
-    if data and isinstance(data, list) and data:
-        row    = data[-1]
-        longs  = float(row.get("longAccount",  50) or 50)
-        shorts = float(row.get("shortAccount", 50) or 50)
-        if shorts > 0:
-            return round(longs / shorts, 3)
+    bybit_sym = f"{symbol_base.upper()}USDT"
+    cache_key = f"ls|{bybit_sym}"
+    cached = _cache_get(_ls_cache, cache_key, _LS_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _SESSION.get(
+            f"{BYBIT_BASE}/v5/market/account-ratio",
+            params={"category": "linear", "symbol": bybit_sym, "period": "4h", "limit": 1},
+            timeout=8,
+        )
+        body = resp.json()
+        if body.get("retCode") == 0:
+            rows = body.get("result", {}).get("list", [])
+            if rows:
+                row    = rows[0]
+                longs  = float(row.get("buyRatio",  0.5) or 0.5)
+                shorts = float(row.get("sellRatio", 0.5) or 0.5)
+                ratio  = round(longs / shorts, 3) if shorts > 0 else None
+                if ratio is not None:
+                    _cache_set(_ls_cache, cache_key, ratio)
+                    logger.debug(f"[SENTIMENT] L/S ratio {bybit_sym}: {ratio:.3f}")
+                    return ratio
+    except Exception as e:
+        logger.debug(f"[SENTIMENT] L/S ratio {bybit_sym}: {e}")
     return None
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5.  BTC Dominance  (CoinGecko — free, no auth)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_btcd_cache: dict = {}
+_BTCD_TTL = 3600.0   # 1 hour (dominance changes slowly)
+
+
+def get_btc_dominance() -> float | None:
+    """
+    Return BTC market cap dominance as a percentage (e.g. 52.3).
+    > 55% = BTC-only market; < 45% = alt-season.
+    Returns None on failure.
+    """
+    cached = _cache_get(_btcd_cache, "btcd", _BTCD_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _SESSION.get(
+            "https://api.coingecko.com/api/v3/global", timeout=8
+        )
+        data = resp.json().get("data", {})
+        pct  = data.get("market_cap_percentage", {}).get("btc")
+        if pct is not None:
+            result = float(pct)
+            _cache_set(_btcd_cache, "btcd", result)
+            logger.debug(f"[SENTIMENT] BTC.D: {result:.1f}%")
+            return result
+    except Exception as e:
+        logger.debug(f"[SENTIMENT] BTC.D fetch: {e}")
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6.  Liquidity zones — internal (price-action only, no external API)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These are computed from OHLCV data in advanced_confluence.detect_liquidity().
+# No function needed here; provided for callers that want a direct import.
+# See: src/advanced_confluence.py  → detect_liquidity(df)
 
 def get_liquidation_pressure(symbol_base: str) -> dict | None:
     """
-    Return latest liquidation data from Coinglass.
-    {'buy_liq': float, 'sell_liq': float}  — USD values for last 1h.
-    buy_liq  = long liquidations (price fell, longs got rekt) → bearish
-    sell_liq = short liquidations (price rose, shorts got rekt) → bullish
-    Returns None if unavailable.
+    Stub — Coinglass liquidation data removed.
+    Returns None so callers award the sentiment point neutrally.
+    Use advanced_confluence.detect_liquidity() for price-action liquidity zones.
     """
-    data = _cg_get("liquidation/coin", {"symbol": symbol_base, "range": "1h"})
-    if data:
-        return {
-            "buy_liq":  float(data.get("buyLiquidationUSD",  0) or 0),
-            "sell_liq": float(data.get("sellLiquidationUSD", 0) or 0),
-        }
     return None
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _to_mexc_sym(symbol: str) -> str:
+    """'BTC/USDT:USDT' → 'BTC_USDT'"""
+    return symbol.split(":")[0].replace("/", "_")
