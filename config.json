@@ -1,5 +1,5 @@
 {
-  "exchange": "mexc",
+  "exchange": "bybit",
   "channel_name": "",
   "dynamic_pairs": {
     "enabled": true,

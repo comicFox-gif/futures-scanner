@@ -552,7 +552,22 @@ class EliteStrategy:
                     f"[ELITE] {symbol} {direction.upper()} — 1H not aligned: "
                     f"{h1_conf['reason']}"
                 )
-                continue
+                # Return a "watching" stub so bot can alert subscribers
+                return {
+                    "watching": True,
+                    "symbol":    symbol,
+                    "direction": direction,
+                    "entry":     price,
+                    "sl":        price - sl_dist if direction == "long" else price + sl_dist,
+                    "score":     total,
+                    "tp_rr":     required_rr,
+                    "regime":    mregime,
+                    "h1_reason": h1_conf["reason"],
+                    "wyck_score": sc["wyck_score"],
+                    "liq_score":  sc["liq_score"],
+                    "mmm_score":  sc["mmm_score"],
+                    "vsa_score":  sc["vsa_score"],
+                }
 
             # ── TP — Weekly/Daily structural level at required RR ──────────
             struct_tp, struct_label = self._find_structural_tp(

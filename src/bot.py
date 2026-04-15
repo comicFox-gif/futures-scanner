@@ -712,8 +712,8 @@ class Bot:
             logger.info("[ELITE] Pause lifted — resuming signal scanning")
 
         # ── Regime detection via BTC 4H + 1D ────────────────────────────
-        btc_4h  = self._fetch_ohlcv("BTC/USDT:USDT", "4h", limit=100)
-        btc_1d  = self._fetch_ohlcv("BTC/USDT:USDT", "1d", limit=50)
+        btc_4h  = self._fetch_ohlcv("BTC/USDT:USDT", "4h", limit=220)
+        btc_1d  = self._fetch_ohlcv("BTC/USDT:USDT", "1d", limit=220)
         btc_4h_df = self.elite_strategy.enrich(btc_4h.copy()) if btc_4h is not None else None
         btc_1d_df = self.elite_strategy.enrich(btc_1d.copy()) if btc_1d is not None else None
         regime_info = detect_regime(btc_4h_df, btc_1d_df)
@@ -870,6 +870,11 @@ class Bot:
         if not sig:
             return False
 
+        # ── "Watching" alert — setup scored but 1H not confirmed yet ──────
+        if sig.get("watching"):
+            self._send_watching_alert(sig)
+            return False
+
         # Queue for admin approval
         pid = self._next_pending_id
         self._next_pending_id += 1
@@ -889,6 +894,43 @@ class Bot:
             f"@ {sig['entry']:.6g} | Score={sig['score']}/20 | Pending #{pid}"
         )
         return True
+
+    def _send_watching_alert(self, sig: dict):
+        """
+        Broadcast a 'Watching' alert to the public channel when a setup has scored
+        ≥5 points but 1H confirmation hasn't fired yet. Keeps subscribers engaged
+        without giving away the full entry. Rate-limited to once per symbol per 4H.
+        """
+        symbol    = sig["symbol"]
+        direction = sig["direction"]
+
+        # Only send once per symbol per cooldown window
+        watch_key = (symbol, direction, "watch")
+        if self._is_on_cooldown(symbol, direction + "_watch", 0):
+            return
+        last = self._last_alert.get(watch_key)
+        if last and (datetime.utcnow() - last).total_seconds() < self.cooldown_min * 60:
+            return
+        self._last_alert[watch_key] = datetime.utcnow()
+
+        base      = symbol.split("/")[0]
+        dir_tag   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+        score     = sig["score"]
+        tp_rr     = sig["tp_rr"]
+        regime    = sig["regime"].upper()
+        h1_reason = sig.get("h1_reason", "Waiting for 1H confirmation")
+
+        text = (
+            f"👀 <b>SETUP WATCH — {base}</b>\n\n"
+            f"{dir_tag}  |  4H  |  Score <b>{score}/18</b>\n\n"
+            f"Setup is building — all gates passed except 1H confirmation.\n"
+            f"Waiting for: <i>{h1_reason}</i>\n\n"
+            f"Regime: <b>{regime}</b>  |  Target RR: <b>{tp_rr:.0f}:1</b>\n\n"
+            f"<i>Signal fires automatically when 1H confirms. Stay ready.</i>"
+        )
+        self.notifier.send(text)
+        self._last_channel_msg_time = datetime.utcnow()
+        logger.info(f"[WATCH] {direction.upper()} {symbol} score={score} — watching alert sent")
 
     def _send_signal_approval(self, pid: int, sig: dict, regime: dict):
         """Send signal to admin bot with Approve / Skip / Wait buttons (18-point format)."""
