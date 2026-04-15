@@ -458,11 +458,9 @@ class EliteStrategy:
         if len(h4_df) < min_len:
             return None
 
-        # ── Kill Zone gate (hard requirement) ─────────────────────────────
+        # ── Kill Zone — bonus point only, not a hard gate ─────────────────
+        # Detected during scoring; active session adds +1 to total score.
         kz = get_kill_zone()
-        if self.kill_zone_only and not kz["active"]:
-            logger.debug(f"[ELITE] {symbol} skipped — {kz['label']}")
-            return None
 
         row   = h4_df.iloc[-2]
         prev  = h4_df.iloc[-3]

@@ -1,11 +1,13 @@
 """
 Signal Scanner + Paper Trading Bot
 ------------------------------------
-Every 60s:
-  1. Scans 15 symbols for Stage 1 (warning) and Stage 2 (confirmed) signals
-  2. Sends Telegram alert for every signal
+Every 30 minutes:
+  1. Scans symbols for 4H BOS setups with 18-point confluence scoring
+  2. Sends Telegram alert for every qualifying signal
   3. If paper_trading=true: opens a simulated trade on every Stage 2 signal
      and tracks it through TP1 → BE → TP2 → trail → TP3 → exit
+
+Kill zones award +1 bonus point but no longer block signals outside their window.
 """
 
 from __future__ import annotations
@@ -145,8 +147,8 @@ class Bot:
         self._cmd_offset   = 0
         logger.info(f"[CMD] ADMIN_BOT_TOKEN={'SET' if self._admin_token else 'MISSING'} | TELEGRAM_ADMIN_ID={'SET' if self._admin_id else 'MISSING'}")
 
-        # 4H scan-cycle tracker — scan fires once per 4H block
-        self._last_4h_block: int = -1
+        # 30-min scan-cycle tracker — scan fires once per 30-min block
+        self._last_scan_block: int = -1
 
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
@@ -622,26 +624,27 @@ class Bot:
     # 4H scan-cycle helpers
     # ------------------------------------------------------------------
 
-    def _current_4h_block(self) -> int:
-        """Unique integer per 4H candle block: increments at 00/04/08/12/16/20 UTC."""
+    def _current_scan_block(self) -> int:
+        """Unique integer per 30-min block: increments every 30 minutes."""
         now = datetime.utcnow()
-        return now.toordinal() * 6 + now.hour // 4
+        return now.toordinal() * 48 + now.hour * 2 + now.minute // 30
 
     def _should_scan(self) -> bool:
-        """Return True exactly once per 4H block (i.e. once per candle close)."""
-        block = self._current_4h_block()
-        if block != self._last_4h_block:
-            self._last_4h_block = block
+        """Return True once per 30-minute block."""
+        block = self._current_scan_block()
+        if block != self._last_scan_block:
+            self._last_scan_block = block
             return True
         return False
 
     def _next_4h_close_str(self) -> str:
-        """Human-readable label for the next 4H candle close."""
-        now   = datetime.utcnow()
-        next_h = ((now.hour // 4) + 1) * 4
-        if next_h >= 24:
-            return "00:00 UTC (+1 day)"
-        return f"{next_h:02d}:00 UTC"
+        """Human-readable label for the next 30-min scan."""
+        now = datetime.utcnow()
+        next_min = (now.minute // 30 + 1) * 30
+        if next_min >= 60:
+            next_h = (now.hour + 1) % 24
+            return f"{next_h:02d}:00 UTC"
+        return f"{now.hour:02d}:{next_min:02d} UTC"
 
     # ------------------------------------------------------------------
     # Active-position manager — runs every 60 s between 4H scans
