@@ -4,12 +4,14 @@ Elite 4H Confluence Strategy  —  20-point scoring
 Fires on 4H Break of Structure (BOS) when score >= min_score (default 5/20).
 
 Entry gate (ALL required):
-  1. Market regime aligned (bull for longs, bear for shorts; neutral needs score >= 12)
-  2. 4H close breaks above last confirmed swing high (long) / below swing low (short)
-  3. Previous candle was NOT already beyond the swing level (fresh break only)
-  4. RSI in valid momentum zone: 40–75 (long), 25–60 (short)
-  5. Minimum 2:1 RR available — no known 4H structure blocking the 2:1 target
-  6. Active kill zone (London 07-09 / NY 12-14 / London-close 15-17 UTC)
+  1. Kill zone active — London 07:00-09:00 UTC OR NY 12:00-14:00 UTC only
+  2. 4H candle CLOSED (signals only on confirmed closed candles, never open)
+  3. Market regime clear — Bull=longs only, Bear=shorts only, Neutral=no signals
+  4. 4H BOS: close breaks above last swing high (long) / below swing low (short)
+  5. Previous candle was NOT already beyond the swing level (fresh break only)
+  6. RSI in valid momentum zone: 40–75 (long), 25–60 (short)
+  7. Minimum 2:1 RR available — no known 4H structure blocking the 2:1 target
+  8. At least 1pt from EACH category: Wyckoff, Liquidity, MMM, VSA
 
 --- Existing scoring (0–10) ---
 Technical (0–5):
@@ -331,19 +333,40 @@ class EliteStrategy:
             score += liq_score
             for lbl in liq["label"]:
                 notes.append(lbl)
-        # Next liquidity target (informational)
+        # "Clear target visible" (+1) — EQH above for longs, EQL below for shorts
+        # Counts toward category gate even when nothing has been swept yet
+        if liq_score == 0:
+            price_now = float(h4_df.iloc[-2]["close"])
+            if direction == "long":
+                above = [lvl for lvl in liq["eqh_levels"] if lvl > price_now]
+                if above:
+                    liq_score += 1
+                    score += 1
+                    notes.append(f"Liquidity: Clear EQH target ${min(above):,.4g} +1")
+            else:
+                below = [lvl for lvl in liq["eql_levels"] if lvl < price_now]
+                if below:
+                    liq_score += 1
+                    score += 1
+                    notes.append(f"Liquidity: Clear EQL target ${max(below):,.4g} +1")
+        # Store per-category score for gate checks
+        detail["liquidity"]["liq_scored"] = liq_score
+        # Informational: next liquidity target
         if direction == "long" and liq["eqh_levels"]:
             nearest = min(liq["eqh_levels"])
-            notes.append(f"Next EQH target: ${nearest:,.4g}")
+            if not any("EQH target" in n for n in notes):
+                notes.append(f"Next EQH target: ${nearest:,.4g}")
         elif direction == "short" and liq["eql_levels"]:
             nearest = max(liq["eql_levels"])
-            notes.append(f"Next EQL target: ${nearest:,.4g}")
+            if not any("EQL target" in n for n in notes):
+                notes.append(f"Next EQL target: ${nearest:,.4g}")
 
         # ── Market Maker Model ────────────────────────────────────────────
         mmm = detect_mmm(h4_df)
         detail["mmm"] = mmm
         if mmm["score"] > 0:
             mmm_aligned = (
+                mmm.get("phase") == "consolidation" or    # direction-neutral, always award
                 (direction == "long"  and mmm.get("direction") == "long") or
                 (direction == "short" and mmm.get("direction") == "short")
             )
@@ -352,8 +375,6 @@ class EliteStrategy:
                 notes.append(mmm["label"])
             else:
                 notes.append(f"MMM: {mmm['label']} (mismatch)")
-        elif mmm.get("phase") == "consolidation":
-            notes.append(mmm["label"])
 
         # ── VSA ───────────────────────────────────────────────────────────
         vsa = detect_vsa(h4_df)
@@ -436,7 +457,8 @@ class EliteStrategy:
                     continue
                 if rsi < 40 or rsi > 75:
                     continue
-                if mregime == "bear":
+                # Neutral = no signals; Bear = no longs
+                if mregime in ("bear", "neutral"):
                     continue
                 sl_dist = max(price - (float(row["low"]) - _sl_buf), atr * 0.5)
                 swing_ref = swing_high
@@ -447,7 +469,8 @@ class EliteStrategy:
                     continue
                 if rsi > 60 or rsi < 25:
                     continue
-                if mregime == "bull":
+                # Neutral = no signals; Bull = no shorts
+                if mregime in ("bull", "neutral"):
                     continue
                 sl_dist = max((float(row["high"]) + _sl_buf) - price, atr * 0.5)
                 swing_ref = swing_low
@@ -469,12 +492,68 @@ class EliteStrategy:
             adv_score = max(0, min(_ADV_CAP, adv_raw))   # cap at 10
             total     = min(_MAX_SCORE, base_score + adv_score)
 
+            # ── Category gates — at least 1pt from each of 4 categories ──────
+            wyck_d = adv_detail.get("wyckoff",   {})
+            liq_d  = adv_detail.get("liquidity", {})
+            mmm_d  = adv_detail.get("mmm",       {})
+            vsa_d  = adv_detail.get("vsa",       {})
+            kz_d   = adv_detail.get("kz",        {})
+
+            # Wyckoff: spring/upthrust/sos/sow aligned with direction
+            wyck_gate = (
+                wyck_d.get("score", 0) > 0 and (
+                    (direction == "long"  and wyck_d.get("phase") == "accumulation") or
+                    (direction == "short" and wyck_d.get("phase") == "distribution")
+                )
+            )
+
+            # Liquidity: EQL/EQH swept, stop hunt, OR clear target visible
+            if direction == "long":
+                liq_gate = bool(
+                    liq_d.get("eql_swept") or
+                    liq_d.get("stop_hunt") or
+                    liq_d.get("liq_scored", 0) > 0
+                )
+            else:
+                liq_gate = bool(
+                    liq_d.get("eqh_swept") or
+                    liq_d.get("stop_hunt") or
+                    liq_d.get("liq_scored", 0) > 0
+                )
+
+            # MMM: manipulation aligned, OR consolidation, OR AMD NY (+2)
+            mmm_manip_aligned = (
+                mmm_d.get("phase") == "manipulation" and (
+                    (direction == "long"  and mmm_d.get("direction") == "long") or
+                    (direction == "short" and mmm_d.get("direction") == "short")
+                )
+            )
+            mmm_gate = (
+                mmm_manip_aligned or
+                mmm_d.get("phase") == "consolidation" or
+                kz_d.get("amd_score", 0) >= 2
+            )
+
+            # VSA: any positive aligned signal
+            vsa_gate = (
+                vsa_d.get("score", 0) > 0 and (
+                    (direction == "long"  and vsa_d.get("bullish") is True) or
+                    (direction == "short" and vsa_d.get("bullish") is False)
+                )
+            )
+
+            if not (wyck_gate and liq_gate and mmm_gate and vsa_gate):
+                logger.debug(
+                    f"[ELITE] {symbol} {direction.upper()} — category gates failed: "
+                    f"Wyckoff={wyck_gate} Liq={liq_gate} MMM={mmm_gate} VSA={vsa_gate}"
+                )
+                continue
+
             # ── Minimum score gate ─────────────────────────────────────────
-            required = 12 if mregime == "neutral" else self.min_score
-            if total < required:
+            if total < self.min_score:
                 logger.debug(
                     f"[ELITE] {symbol} {direction.upper()} score={total}/20 "
-                    f"< {required} — skipped"
+                    f"< {self.min_score} — skipped"
                 )
                 continue
 

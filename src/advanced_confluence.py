@@ -72,20 +72,13 @@ def get_kill_zone() -> dict:
     else:
         amd = "none"; amd_score = 0
 
-    # Session windows
+    # Only two valid kill zones — all other hours are no-trade
     if 7 <= h < 9:
-        return _kz(True,  "london",       1, "⏰ London Kill Zone 07–09 UTC ✅",   amd, amd_score)
+        return _kz(True,  "london", 1, "⏰ London Kill Zone 07–09 UTC ✅", amd, amd_score)
     if 12 <= h < 14:
-        return _kz(True,  "ny",           1, "⏰ NY Kill Zone 12–14 UTC ✅",       amd, amd_score)
-    if 14 <= h < 17:
-        return _kz(True,  "ny_ext",       1, "⏰ NY Session 14–17 UTC",            amd, amd_score)
-    if 15 <= h < 17:
-        return _kz(True,  "london_close", 1, "⏰ London Close 15–17 UTC",          amd, amd_score)
-    if h >= 23 or h < 1:
-        return _kz(True,  "asian",        0, "⏰ Asian Kill Zone 23–01 UTC",       amd, 0)
+        return _kz(True,  "ny",     1, "⏰ NY Kill Zone 12–14 UTC ✅",     amd, amd_score)
 
-    # No-trade zone
-    return _kz(False, "no_trade", 0, f"⏸ No Trade Zone ({h:02d}:00 UTC) ⏸", "none", 0)
+    return _kz(False, "no_trade", 0, f"⏸ No Trade Zone ({h:02d}:00 UTC)", amd, 0)
 
 
 def _kz(active, name, score, label, amd_phase, amd_score):
@@ -401,8 +394,8 @@ def detect_mmm(df: pd.DataFrame) -> dict:
 
         return dict(
             phase="consolidation", manipulation=False, direction=None,
-            score=0,
-            label=f"MMM: Consolidation {c_low:.5g}–{c_high:.5g}",
+            score=1,
+            label=f"MMM: Consolidation {c_low:.5g}–{c_high:.5g} +1",
         )
 
     except Exception as e:
