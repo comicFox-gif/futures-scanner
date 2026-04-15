@@ -792,12 +792,12 @@ class Bot:
                 no_sig_text = (
                     f"⏳ <b>No Signal This Cycle</b>\n\n"
                     f"Scanned {len(symbols)} pairs — no clean setup found.\n"
-                    f"All entry gates must be met:\n"
-                    f"  • Kill Zone active\n"
+                    f"Entry gates required:\n"
                     f"  • 4H BOS on closed candle\n"
                     f"  • Regime clear (Bull/Bear)\n"
                     f"  • 1H confirmation\n"
-                    f"  • Score ≥5/18 with 3/4 categories\n\n"
+                    f"  • Score ≥5/18\n\n"
+                    f"Kill Zone active = +1 bonus point (not a gate).\n"
                     f"Bot is running normally.\n"
                     f"Next scan: <b>{next_scan}</b>"
                 )
