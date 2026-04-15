@@ -12,7 +12,7 @@ Votes:
 
 4+ bull votes → bull regime (allow longs, block shorts)
 4+ bear votes → bear regime (allow shorts, block longs)
-Otherwise     → neutral (both directions allowed)
+Otherwise     → neutral (all signals blocked)
 """
 from __future__ import annotations
 import logging

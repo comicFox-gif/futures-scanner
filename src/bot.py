@@ -923,7 +923,7 @@ class Bot:
         """
         Execute an approved elite signal:
           1. Post to public Telegram channel
-          2. Place MEXC order
+          2. Place Bybit order
           3. Open paper position
         """
         entry_data = self._pending_signals.pop(pid, None)
@@ -1118,7 +1118,7 @@ class Bot:
             return
 
         def _apply_new_sl(new_sl: float):
-            """Persist new SL to trail state, paper position, MEXC stop."""
+            """Persist new SL to trail state, paper position, Bybit stop."""
             state["current_sl"] = new_sl
             # Update paper position SL so _paper_tick() triggers exit correctly
             pos = self._paper_positions.get(symbol)
