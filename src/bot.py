@@ -1,7 +1,7 @@
 """
 Signal Scanner + Paper Trading Bot
 ------------------------------------
-Every 30 minutes:
+Every 10 minutes:
   1. Scans symbols for 4H BOS setups with 18-point confluence scoring
   2. Sends Telegram alert for every qualifying signal
   3. If paper_trading=true: opens a simulated trade on every Stage 2 signal
@@ -625,12 +625,12 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _current_scan_block(self) -> int:
-        """Unique integer per 30-min block: increments every 30 minutes."""
+        """Unique integer per 10-min block: increments every 10 minutes."""
         now = datetime.utcnow()
-        return now.toordinal() * 48 + now.hour * 2 + now.minute // 30
+        return now.toordinal() * 144 + now.hour * 6 + now.minute // 10
 
     def _should_scan(self) -> bool:
-        """Return True once per 30-minute block."""
+        """Return True once per 10-minute block."""
         block = self._current_scan_block()
         if block != self._last_scan_block:
             self._last_scan_block = block
@@ -638,9 +638,9 @@ class Bot:
         return False
 
     def _next_4h_close_str(self) -> str:
-        """Human-readable label for the next 30-min scan."""
+        """Human-readable label for the next 10-min scan."""
         now = datetime.utcnow()
-        next_min = (now.minute // 30 + 1) * 30
+        next_min = (now.minute // 10 + 1) * 10
         if next_min >= 60:
             next_h = (now.hour + 1) % 24
             return f"{next_h:02d}:00 UTC"
