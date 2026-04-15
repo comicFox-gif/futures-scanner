@@ -1,8 +1,6 @@
 {
   "exchange": "mexc",
   "channel_name": "",
-  "mode": "swing",
-  "timeframe_sr": "4h",
   "dynamic_pairs": {
     "enabled": true,
     "top_n": 40,
@@ -36,168 +34,24 @@
     "atr_sl_multiplier": 1.5,
     "volume_sma_period": 20,
     "volume_filter_multiplier": 1.5,
-    "lookback_candles": 600
+    "lookback_candles": 100
   },
   "paper_trading": {
     "enabled": false,
     "balance": 1000.0,
     "risk_pct": 0.02
   },
-  "trend_inception": {
-    "ema_cross_max_candles_ago": 20,
-    "ema_cross_proximity_pct": 0.003,
-    "pullback_atr_tolerance": 2.0
-  },
-  "filters": {
-    "min_body_ratio": 0.5,
-    "max_wick_against_trade": 0.35,
-    "consecutive_closes": 2,
-    "macd_hist_atr_multiplier": 0.05,
-    "volume_building_candles": 2
-  },
-  "sr_bounce": {
-    "swing_lookback_left": 5,
-    "swing_lookback_right": 2,
-    "cluster_pct": 0.003,
-    "max_levels": 6,
-    "min_touches": 2,
-    "touch_atr_multiplier": 0.5,
-    "approach_atr_multiplier": 1.5
-  },
-  "order_block": {
-    "lookback_candles": 80,
-    "impulse_candles": 3,
-    "impulse_atr_mult": 2.0,
-    "approach_atr_mult": 1.5,
-    "touch_atr_mult": 0.6
-  },
-  "trendline": {
-    "swing_left": 5,
-    "swing_right": 3,
-    "warn_atr_mult": 1.0,
-    "touch_atr_mult": 0.5,
-    "break_atr_mult": 0.3,
-    "max_slope_atr_per_candle": 1.5
-  },
-  "rsi_divergence": {
-    "lookback_candles": 50,
-    "min_rsi_difference": 5.0,
-    "bull_div_rsi_max": 50,
-    "bear_div_rsi_min": 50
-  },
   "signal": {
-    "tp1_rr": 1.0,
-    "tp2_rr": 2.0,
-    "tp3_rr": 2.0,
+    "tp1_rr": 5.0,
+    "tp2_rr": 5.0,
+    "tp3_rr": 5.0,
     "atr_sl_multiplier": 1.5,
     "signal_cooldown_minutes": 240
-  },
-  "whale_momentum": {
-    "volume_multiplier": 2.5,
-    "body_min": 0.55,
-    "delta_mult": 1.8,
-    "lookback": 3,
-    "rsi_max": 65,
-    "rsi_min": 45
-  },
-  "structure_break": {
-    "swing_left": 5,
-    "swing_right": 2,
-    "lookback": 40,
-    "volume_multiplier": 1.5,
-    "adx_min": 25,
-    "min_body": 0.5
-  },
-  "macd_zero_cross": {
-    "cross_lookback": 3,
-    "volume_multiplier": 1.4,
-    "adx_min": 25,
-    "min_body": 0.5
-  },
-  "ema_ribbon_pullback": {
-    "touch_atr_mult": 1.0,
-    "volume_multiplier": 1.4,
-    "adx_min": 25,
-    "min_body": 0.5
-  },
-  "vwap_pullback": {
-    "touch_atr_mult": 0.5,
-    "volume_multiplier": 1.3,
-    "adx_min": 22
-  },
-  "rsi_macd_reversal": {
-    "rsi_oversold": 30,
-    "rsi_overbought": 70,
-    "rsi_warn_long": 35,
-    "rsi_warn_short": 65
-  },
-  "scalp_signal": {
-    "tp1_rr": 1.0,
-    "tp2_rr": 1.5,
-    "tp3_rr": 1.5,
-    "atr_sl_multiplier": 0.8,
-    "signal_cooldown_minutes": 30
-  },
-  "scalp_filters": {
-    "min_body_ratio": 0.4,
-    "max_wick_against_trade": 0.45,
-    "consecutive_closes": 2,
-    "macd_hist_atr_multiplier": 0.03,
-    "volume_building_candles": 2
-  },
-  "scalp_whale_momentum": {
-    "volume_multiplier": 2.2,
-    "body_min": 0.5,
-    "delta_mult": 1.5,
-    "lookback": 3,
-    "rsi_max": 65,
-    "rsi_min": 45
-  },
-  "scalp_structure_break": {
-    "swing_left": 5,
-    "swing_right": 2,
-    "lookback": 40,
-    "volume_multiplier": 1.3,
-    "adx_min": 20,
-    "min_body": 0.45
-  },
-  "scalp_macd_zero_cross": {
-    "cross_lookback": 3,
-    "volume_multiplier": 1.2,
-    "adx_min": 22,
-    "min_body": 0.4
-  },
-  "scalp_ema_ribbon_pullback": {
-    "touch_atr_mult": 1.0,
-    "volume_multiplier": 1.2,
-    "adx_min": 20,
-    "min_body": 0.4
-  },
-  "fvg_retest": {
-    "volume_multiplier": 0.8,
-    "lookback": 20
-  },
-  "sweep_reversal": {
-    "sweep_volume_multiplier": 1.3
-  },
-  "ob_retest": {
-    "lookback_candles": 40,
-    "impulse_candles": 3,
-    "impulse_atr_mult": 2.0,
-    "volume_multiplier": 0.8
-  },
-  "mss_pullback": {
-    "swing_left": 5,
-    "swing_right": 2,
-    "lookback": 40,
-    "pullback_atr_mult": 1.0,
-    "volume_multiplier": 0.9
   },
   "bot": {
     "poll_interval_seconds": 60,
     "daily_summary_utc_hour": 0
   },
-
   "elite": {
     "swing_left": 5,
     "swing_right": 2,
@@ -208,8 +62,8 @@
     "min_score": 5,
     "daily_limit": 5,
     "max_concurrent": 3,
-    "min_rr": 2.0,
-    "tp_rr": 3.0,
+    "min_rr": 5.0,
+    "tp_rr": 5.0,
     "trail_rr": 3.0,
     "kill_zone_only": true
   }

@@ -189,28 +189,41 @@ class Notifier:
     # Scanner started
     # ------------------------------------------------------------------
 
-    def scanner_started(self, symbols: list, tf_trend: str, tf_entry: str,
-                        cooldown_min: int, paper_enabled: bool = False, paper_balance: float = 0,
-                        strategies=None, label: str = "Signal Scanner", mode: str = "swing",
-                        confluence_min: int = 2, tf_precision: str = "15m"):
-        mode_label = "SCALP ⚡" if mode == "scalp" else "SWING 📈"
-        strats = strategies or ["Wyckoff", "Liquidity/EQH-EQL", "MMM", "VSA", "Intermarket", "Kill Zone"]
-        strat_str = "  •  ".join(strats)
+    def scanner_started(self, symbols: list = None,
+                        paper_enabled: bool = False, paper_balance: float = 0):
+        symbols    = symbols or []
         paper_line = (
             f"Paper: <b>ON</b>  (<code>${paper_balance:.0f}</code>)"
-            if paper_enabled else "Paper: OFF"
+            if paper_enabled else "Paper: <b>OFF</b>"
         )
         self.send(
-            f"🟢 <b>{label} Online</b>\n"
+            f"🟢 <b>Elite Crypto Futures Scanner Online</b>\n"
             f"{LINE}\n"
-            f"<b>{len(symbols)} pairs</b>  ·  {mode_label}\n"
-            f"Trend: <b>{tf_trend}</b>  →  Structure: <b>{tf_entry}</b>  →  Precision: <b>{tf_precision}</b>\n"
-            f"Cooldown: {cooldown_min}min  ·  Scoring: <b>20-point</b> (Tech + Sentiment + Advanced)\n"
+            f"<b>{len(symbols)} pairs</b>  ·  Institutional 4H system\n"
             f"{DLINE}\n"
-            f"{strat_str}\n"
+            f"<b>Timeframe Stack</b>\n"
+            f"  📅 1W  — Bias + major liquidity levels\n"
+            f"  📅 1D  — Structure + Daily TP targets\n"
+            f"  📅 4H  — Signal detection (CLOSED candles only)\n"
+            f"  📅 1H  — Confirmation gate (FVG / MSS / sweep)\n"
+            f"{DLINE}\n"
+            f"<b>Entry Gates (ALL required)</b>\n"
+            f"  ⏰ Kill Zone: London 07-09 · NY 12-14 UTC\n"
+            f"  📊 Regime: Bull=longs · Bear=shorts · Neutral=none\n"
+            f"  🏆 Score: 5/20 min · Categories: Wyckoff+Liq+MMM+VSA\n"
+            f"  ✅ 1H aligned: FVG or MSS or sweep confirms\n"
+            f"{DLINE}\n"
+            f"<b>Execution</b>\n"
+            f"  🎯 Min RR: <b>5:1</b>  ·  TP: Weekly/Daily levels\n"
+            f"  🔁 Trail: activates at 3:1\n"
+            f"  📡 Scan: every 4H close (00·04·08·12·16·20 UTC)\n"
+            f"{DLINE}\n"
+            f"<b>Strategies</b>\n"
+            f"  Wyckoff  ·  Liquidity/EQH-EQL  ·  MMM\n"
+            f"  VSA  ·  Intermarket  ·  Kill Zone AMD\n"
             f"{DLINE}\n"
             f"{paper_line}\n"
-            f"<i>Scanning every 60s — signals post here.</i>"
+            f"<i>Signals post here on approval.</i>"
         )
 
     # ------------------------------------------------------------------

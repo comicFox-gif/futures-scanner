@@ -73,6 +73,7 @@ from src.advanced_confluence import (
     detect_vsa,
     detect_delta_divergence,
     get_intermarket_score,
+    confirm_1h_alignment,
     risk_usdt_for_score,
     tp_rr_for_score,
 )
@@ -160,26 +161,51 @@ class EliteStrategy:
             return False
         return True
 
-    def _find_structural_tp(self, weekly_df, entry, sl_dist, direction,
-                             required_rr: float = 2.0) -> tuple[float | None, str]:
+    def _find_structural_tp(self, weekly_df, daily_df, entry, sl_dist, direction,
+                             required_rr: float = 5.0) -> tuple[float | None, str]:
         """
-        Find nearest weekly swing level between required_rr and 6:1.
+        Find the nearest Weekly or Daily swing level at or beyond required_rr.
+        Daily levels are checked first (more precise); weekly as fallback.
         Returns (price, reason_label) or (None, "").
         """
-        if weekly_df is None or len(weekly_df) < 4:
-            return None, ""
+        candidates: list[tuple[float, str]] = []   # (price, label)
 
+        # ── Daily levels ──────────────────────────────────────────────────
+        if daily_df is not None and len(daily_df) >= 10:
+            if direction == "long":
+                swings = find_swing_highs_idx(daily_df.iloc[:-2], 3, 1)
+                for _, lvl in swings:
+                    if lvl > entry:
+                        candidates.append((lvl, f"Daily resistance {lvl:.5g}"))
+            else:
+                swings = find_swing_lows_idx(daily_df.iloc[:-2], 3, 1)
+                for _, lvl in swings:
+                    if lvl < entry:
+                        candidates.append((lvl, f"Daily support {lvl:.5g}"))
+
+        # ── Weekly levels ─────────────────────────────────────────────────
+        if weekly_df is not None and len(weekly_df) >= 4:
+            if direction == "long":
+                swings = find_swing_highs_idx(weekly_df.iloc[:-2], 2, 1)
+                for _, lvl in swings:
+                    if lvl > entry:
+                        candidates.append((lvl, f"Weekly resistance {lvl:.5g}"))
+            else:
+                swings = find_swing_lows_idx(weekly_df.iloc[:-2], 2, 1)
+                for _, lvl in swings:
+                    if lvl < entry:
+                        candidates.append((lvl, f"Weekly support {lvl:.5g}"))
+
+        # Sort by proximity to entry
         if direction == "long":
-            swings     = find_swing_highs_idx(weekly_df.iloc[:-2], 2, 1)
-            candidates = sorted([sh[1] for sh in swings if sh[1] > entry])
+            candidates.sort(key=lambda x: x[0])
         else:
-            swings     = find_swing_lows_idx(weekly_df.iloc[:-2], 2, 1)
-            candidates = sorted([sl[1] for sl in swings if sl[1] < entry], reverse=True)
+            candidates.sort(key=lambda x: x[0], reverse=True)
 
-        for lvl in candidates:
+        for lvl, lbl in candidates:
             rr = abs(lvl - entry) / sl_dist
-            if required_rr <= rr <= 6.0:
-                return lvl, f"Weekly level {lvl:.5g} ({rr:.1f}:1 RR)"
+            if rr >= required_rr:
+                return lvl, f"{lbl} ({rr:.1f}:1 RR)"
 
         return None, ""
 
@@ -414,12 +440,21 @@ class EliteStrategy:
         self,
         symbol:    str,
         weekly_df,
+        daily_df,
         h4_df:     pd.DataFrame,
+        h1_df,
         regime:    dict,
         exchange=None,
     ) -> dict | None:
         """
         Scan for a 4H BOS signal with 20-point confluence scoring.
+
+        Timeframe stack:
+          weekly_df  — bias + major levels (20 candles)
+          daily_df   — structure + TP targets (50 candles)
+          h4_df      — primary entry TF, CLOSED candles only (100 candles)
+          h1_df      — confirmation gate: FVG / MSS / sweep (100 candles)
+
         Returns a signal dict or None.
         """
         min_len = self.lookback + self.swing_left + self.swing_right + 5
@@ -557,10 +592,20 @@ class EliteStrategy:
                 )
                 continue
 
-            # ── Determine TP based on score ────────────────────────────────
-            score_tp_rr = tp_rr_for_score(total)
+            # ── 1H confirmation gate ───────────────────────────────────────
+            h1_conf = confirm_1h_alignment(h1_df, direction)
+            if not h1_conf["aligned"]:
+                logger.debug(
+                    f"[ELITE] {symbol} {direction.upper()} — 1H not aligned: "
+                    f"{h1_conf['reason']}"
+                )
+                continue
+
+            # ── Determine TP — Weekly/Daily structural level, min 5:1 ──────
+            score_tp_rr = tp_rr_for_score(total)   # always >= 5.0
             struct_tp, struct_label = self._find_structural_tp(
-                weekly_df, price, sl_dist, direction, required_rr=score_tp_rr
+                weekly_df, daily_df, price, sl_dist, direction,
+                required_rr=score_tp_rr,
             )
             if struct_tp:
                 tp_price  = struct_tp
@@ -570,7 +615,7 @@ class EliteStrategy:
                     price + score_tp_rr * sl_dist if direction == "long"
                     else price - score_tp_rr * sl_dist
                 )
-                tp_reason = f"Fixed {score_tp_rr:.0f}:1 RR"
+                tp_reason = f"Fixed {score_tp_rr:.0f}:1 RR (no structural level)"
 
             actual_rr      = abs(tp_price - price) / sl_dist
             trail_activate = (
@@ -595,10 +640,12 @@ class EliteStrategy:
             im_lbl    = adv_detail.get("intermarket", {}).get("label", "")[:60]
             delta_lbl = adv_detail.get("delta", {}).get("label", "")
 
+            h1_lbl = h1_conf["reason"]
             reason = (
                 f"4H BOS {'↑' if direction == 'long' else '↓'} {swing_ref:.5g} | "
                 f"Score {total}/20 [{conf_label}] | "
                 f"TP {tp_reason} | Trail @{self.trail_rr:.0f}:1 | "
+                f"1H: {h1_lbl} | "
                 f"Tech [{', '.join(t_notes)}] | "
                 f"Sent [{', '.join(s_notes)}] | "
                 f"{kz_lbl} | {wyck_lbl} | {mmm_lbl} | {vsa_lbl} | "
@@ -632,6 +679,7 @@ class EliteStrategy:
                 "mmm_label":   mmm_lbl,
                 "vsa_label":   vsa_lbl,
                 "im_label":    im_lbl,
+                "h1_label":    h1_lbl,
             }
 
         return None

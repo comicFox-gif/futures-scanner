@@ -40,27 +40,15 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 
 class Bot:
     def __init__(self, cfg: dict, env: dict):
-        self.env  = env   # keep full env dict for later use in run()
-        # Mode switch: "scalp" swaps signal + filter params before strategies load
-        self.mode = cfg.get("mode", "swing")
-        self.send_warnings = False   # confirmed signals only — no setup/warning alerts
-        if self.mode == "scalp":
-            if "scalp_signal" in cfg:
-                cfg = {**cfg, "signal": cfg["scalp_signal"]}
-            if "scalp_filters" in cfg:
-                cfg = {**cfg, "filters": cfg["scalp_filters"]}
-            if "scalp_structure_break" in cfg:
-                cfg = {**cfg, "structure_break": cfg["scalp_structure_break"]}
-            if "scalp_macd_zero_cross" in cfg:
-                cfg = {**cfg, "macd_zero_cross": cfg["scalp_macd_zero_cross"]}
-            if "scalp_ema_ribbon_pullback" in cfg:
-                cfg = {**cfg, "ema_ribbon_pullback": cfg["scalp_ema_ribbon_pullback"]}
-            if "scalp_whale_momentum" in cfg:
-                cfg = {**cfg, "whale_momentum": cfg["scalp_whale_momentum"]}
-        self.cfg = cfg
-        self.tf_trend: str     = cfg["timeframe_trend"]
-        self.tf_entry: str     = cfg["timeframe_entry"]
-        self.tf_precision: str = "15m"  # 15m for both swing and scalp — 5m is too noisy
+        self.env  = env
+        self.cfg  = cfg
+
+        # Fixed timeframe stack — no scalp mode
+        self.tf_weekly  = "1w"    # bias + major levels   (20 candles)
+        self.tf_daily   = "1d"    # structure + TP levels (50 candles)
+        self.tf_trend   = "4h"    # primary entry TF      (100 candles)
+        self.tf_entry   = "1h"    # confirmation TF       (100 candles)
+
         self.lookback: int = cfg["strategy"]["lookback_candles"]
         self.poll_interval: int = cfg["bot"]["poll_interval_seconds"]
         self.daily_summary_hour: int = cfg["bot"].get("daily_summary_utc_hour", 0)
@@ -149,14 +137,8 @@ class Bot:
         self._cmd_offset   = 0
         logger.info(f"[CMD] ADMIN_BOT_TOKEN={'SET' if self._admin_token else 'MISSING'} | TELEGRAM_ADMIN_ID={'SET' if self._admin_id else 'MISSING'}")
 
-        # Mode recommendation tracking — alert once when scalp/swing conditions change
-        self._mode_rec: str | None = None           # last recommendation sent
-        self._last_mode_alert: datetime | None = None
-        self._mode_rec_reason: str = ""             # human-readable reason for last rec
-
-        # Confluence threshold — minimum score (1-5) to fire a signal
-        self._confluence_min: int     = int(os.getenv("CONF_MIN", "2"))
-        self._confluence_enabled: bool = True   # toggle via Telegram button
+        # 4H scan-cycle tracker — scan fires once per 4H block
+        self._last_4h_block: int = -1
 
         # Restore paper state from previous session (survives redeploy)
         load_state(self)
@@ -192,11 +174,12 @@ class Bot:
     # Data fetching
     # ------------------------------------------------------------------
 
-    def _fetch_ohlcv(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+    def _fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = None) -> Optional[pd.DataFrame]:
         try:
-            raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=self.lookback)
-            if not raw or len(raw) < 50:
-                logger.warning(f"Not enough data: {symbol} {timeframe}")
+            raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit or self.lookback)
+            min_bars = 5 if timeframe in ("1w", "1d") else 20
+            if not raw or len(raw) < min_bars:
+                logger.warning(f"Not enough data: {symbol} {timeframe} ({len(raw) if raw else 0} bars)")
                 return None
             return ohlcv_to_df(raw)
         except Exception as e:
@@ -627,17 +610,81 @@ class Bot:
     # ------------------------------------------------------------------
     # Main tick
     # ------------------------------------------------------------------
+    # 4H scan-cycle helpers
+    # ------------------------------------------------------------------
+
+    def _current_4h_block(self) -> int:
+        """Unique integer per 4H candle block: increments at 00/04/08/12/16/20 UTC."""
+        now = datetime.utcnow()
+        return now.toordinal() * 6 + now.hour // 4
+
+    def _should_scan(self) -> bool:
+        """Return True exactly once per 4H block (i.e. once per candle close)."""
+        block = self._current_4h_block()
+        if block != self._last_4h_block:
+            self._last_4h_block = block
+            return True
+        return False
+
+    def _next_4h_close_str(self) -> str:
+        """Human-readable label for the next 4H candle close."""
+        now   = datetime.utcnow()
+        next_h = ((now.hour // 4) + 1) * 4
+        if next_h >= 24:
+            return "00:00 UTC (+1 day)"
+        return f"{next_h:02d}:00 UTC"
+
+    # ------------------------------------------------------------------
+    # Active-position manager — runs every 60 s between 4H scans
+    # ------------------------------------------------------------------
+
+    def _manage_active_positions(self):
+        """
+        Monitor paper TP/SL hits and trailing stops every 60 s.
+        Only fetches data for symbols with open positions — lightweight.
+        """
+        active = (
+            set(self._paper_positions.keys()) |
+            set(self._elite_trail_state.keys()) |
+            set(self._forex_positions.keys())
+        )
+        if not active:
+            return
+
+        for symbol in active:
+            try:
+                live_price = self._fetch_live_price(symbol)
+                if live_price is None:
+                    continue
+
+                # Trail management needs fresh 4H ATR
+                if symbol in self._elite_trail_state:
+                    h4_raw = self._fetch_ohlcv(symbol, "4h", limit=50)
+                    h4_df  = (self.elite_strategy.enrich(h4_raw.copy())
+                              if h4_raw is not None else None)
+                    self._elite_manage_trail(symbol, live_price, h4_df)
+
+                if self.paper_enabled and symbol in self._paper_positions:
+                    self._paper_tick(symbol, live_price)
+
+                if symbol in self._forex_positions:
+                    self._forex_paper_tick(symbol, live_price)
+
+            except Exception as e:
+                logger.warning(f"[POSITION] {symbol}: {e}")
+
+    # ------------------------------------------------------------------
 
     def _tick(self):
+        """Full 4H scan — runs once per 4H candle close."""
         self._check_session_resume()
-        symbols   = self.pair_selector.get_symbols()
-        now       = datetime.utcnow().strftime("%H:%M:%S")
-        open_pos  = len(self._paper_positions)
+        symbols  = self.pair_selector.get_symbols()
+        now      = datetime.utcnow().strftime("%H:%M UTC")
+        open_pos = len(self._paper_positions)
         paper_bal = f"${self.paper_balance:.2f}" if self.paper_enabled else ""
-        paper_info = f" | Paper: {paper_bal} | Positions: {open_pos}" if self.paper_enabled else ""
+        paper_info = f" | Paper: {paper_bal} | Pos: {open_pos}" if self.paper_enabled else ""
 
-        # ── Elite regime detection (once per tick using BTC data) ────────────
-        # Reset daily signal count at UTC midnight
+        # Reset daily count at UTC midnight
         today = datetime.utcnow().date()
         if self._daily_elite_date != today:
             self._daily_elite_count = 0
@@ -649,60 +696,57 @@ class Bot:
             self._elite_resume_at = None
             logger.info("[ELITE] Pause lifted — resuming signal scanning")
 
-        # BTC data for regime + enrich with elite strategy indicators
-        btc_4h_raw    = self._fetch_ohlcv("BTC/USDT:USDT", "4h")
-        btc_daily_raw = self._fetch_ohlcv("BTC/USDT:USDT", "1d")
-        btc_4h_df   = self.elite_strategy.enrich(btc_4h_raw.copy())    if btc_4h_raw    is not None and len(btc_4h_raw)    >= 10 else None
-        btc_daily_df = self.elite_strategy.enrich(btc_daily_raw.copy()) if btc_daily_raw is not None and len(btc_daily_raw) >= 10 else None
-        regime_info  = detect_regime(btc_4h_df, btc_daily_df)
-        regime_lbl   = {"bull": "🟢 Bull", "bear": "🔴 Bear", "neutral": "⚪ Neutral"}.get(
+        # ── Regime detection via BTC 4H + 1D ────────────────────────────
+        btc_4h  = self._fetch_ohlcv("BTC/USDT:USDT", "4h", limit=100)
+        btc_1d  = self._fetch_ohlcv("BTC/USDT:USDT", "1d", limit=50)
+        btc_4h_df = self.elite_strategy.enrich(btc_4h.copy()) if btc_4h is not None else None
+        btc_1d_df = self.elite_strategy.enrich(btc_1d.copy()) if btc_1d is not None else None
+        regime_info = detect_regime(btc_4h_df, btc_1d_df)
+        regime_lbl  = {"bull": "🟢 Bull", "bear": "🔴 Bear", "neutral": "⚪ Neutral"}.get(
             regime_info["regime"], "⚪ Neutral"
         )
-        logger.info(f">>> Scanning {len(symbols)} pairs @ {now} UTC{paper_info} | Regime: {regime_lbl} | {regime_info['label']}")
+        logger.info(
+            f">>> 4H Scan @ {now}{paper_info} | Regime: {regime_lbl} | "
+            f"{regime_info['label']} | {len(symbols)} pairs"
+        )
 
         signals_found = 0
         for symbol in symbols:
             try:
-                htf_raw = self._fetch_ohlcv(symbol, self.tf_trend)
-                if htf_raw is None:
+                # ── Fetch full timeframe stack ────────────────────────────
+                h4_raw  = self._fetch_ohlcv(symbol, "4h",  limit=100)
+                if h4_raw is None:
+                    continue
+                h4_df   = self.elite_strategy.enrich(h4_raw.copy())
+                if len(h4_df) < 60:
+                    logger.debug(f"Skipping {symbol}: insufficient 4H data ({len(h4_df)} bars)")
                     continue
 
-                htf_df = self.elite_strategy.enrich(htf_raw.copy())
+                weekly_raw = self._fetch_ohlcv(symbol, "1w", limit=20)
+                weekly_df  = (self.elite_strategy.enrich(weekly_raw.copy())
+                              if weekly_raw is not None else None)
 
-                if len(htf_df) < 60:
-                    logger.debug(f"Skipping {symbol}: insufficient 4H history ({len(htf_df)} candles)")
-                    continue
+                daily_raw  = self._fetch_ohlcv(symbol, "1d", limit=50)
+                daily_df   = (self.elite_strategy.enrich(daily_raw.copy())
+                              if daily_raw is not None else None)
 
-                # Weekly data for structural TP and T1 scoring
-                weekly_raw = self._fetch_ohlcv(symbol, "1w")
-                weekly_df  = (
-                    self.elite_strategy.enrich(weekly_raw.copy())
-                    if weekly_raw is not None and len(weekly_raw) >= 5
-                    else None
-                )
+                h1_raw     = self._fetch_ohlcv(symbol, "1h", limit=100)
+                h1_df      = (self.elite_strategy.enrich(h1_raw.copy())
+                              if h1_raw is not None else None)
 
-                # Live price for paper trade monitoring and entry
                 live_price    = self._fetch_live_price(symbol)
-                current_price = live_price if live_price else float(htf_df.iloc[-2]["close"])
-
-                # Elite trailing stop — runs before _paper_tick so SL is updated first
-                if symbol in self._elite_trail_state:
-                    self._elite_manage_trail(symbol, current_price, htf_df)
-
-                # Paper position management
-                if self.paper_enabled and symbol in self._paper_positions:
-                    self._paper_tick(symbol, current_price)
-                if symbol in self._forex_positions:
-                    self._forex_paper_tick(symbol, current_price)
+                current_price = live_price if live_price else float(h4_df.iloc[-2]["close"])
 
                 in_paper = self.paper_enabled and symbol in self._paper_positions
 
-                # ── Elite 4H institutional strategy ──────────────────────────
+                # ── Elite 4H institutional signal scan ────────────────────
                 if not in_paper:
                     if self._elite_tick(
                         symbol=symbol,
                         weekly_df=weekly_df,
-                        h4_df=htf_df,
+                        daily_df=daily_df,
+                        h4_df=h4_df,
+                        h1_df=h1_df,
                         regime=regime_info,
                         current_price=current_price,
                         live_price=live_price,
@@ -713,10 +757,11 @@ class Bot:
                 logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
                 self.notifier.error_alert(f"Scanning {symbol}", str(e)[:200])
 
-        signal_note = f" | {signals_found} signal(s) fired" if signals_found > 0 else " | No signals"
-        logger.info(f"<<< Scan complete{signal_note} | Next scan in {self.poll_interval}s")
-        logger.info(f"    Pairs: {' | '.join(s.split('/')[0] for s in symbols)}")
-
+        signal_note = f" | {signals_found} signal(s) queued" if signals_found else " | No signals"
+        logger.info(
+            f"<<< Scan complete{signal_note} | Next: {self._next_4h_close_str()} | "
+            f"Pairs: {' '.join(s.split('/')[0] for s in symbols)}"
+        )
         self._maybe_send_daily_summary()
         self._maybe_send_positions_report()
 
@@ -728,7 +773,9 @@ class Bot:
         self,
         symbol: str,
         weekly_df,
+        daily_df,
         h4_df,
+        h1_df,
         regime: dict,
         current_price: float,
         live_price: float = None,
@@ -762,7 +809,9 @@ class Bot:
             sig = self.elite_strategy.generate_signal(
                 symbol=symbol,
                 weekly_df=weekly_df,
+                daily_df=daily_df,
                 h4_df=h4_df,
+                h1_df=h1_df,
                 regime=regime,
                 exchange=self.exchange if self.bybit.enabled else None,
             )
@@ -833,9 +882,11 @@ class Bot:
         wyck_lbl = sig.get("wyck_label",  "")
         mmm_lbl  = sig.get("mmm_label",   "")
         vsa_lbl  = sig.get("vsa_label",   "")
-        im_lbl   = (sig.get("im_label",   "") or "").split("\n")[0]  # first line only
+        im_lbl   = (sig.get("im_label",   "") or "").split("\n")[0]
+        h1_lbl   = sig.get("h1_label",    "")
 
         if kz_lbl:   lines.append(kz_lbl)
+        if h1_lbl:   lines.append(f"1H: {h1_lbl}")
         if wyck_lbl: lines.append(wyck_lbl)
         if mmm_lbl:  lines.append(mmm_lbl)
         if vsa_lbl:  lines.append(vsa_lbl)
@@ -916,6 +967,9 @@ class Bot:
         im_line = (sig.get("im_label", "") or "").split("\n")[0]
         if im_line:
             adv_lines.append(im_line)
+        h1_line = sig.get("h1_label", "")
+        if h1_line:
+            adv_lines.insert(0, f"1H: {h1_line}")
         adv_block = "\n".join(adv_lines) if adv_lines else ""
 
         pub_text = (
@@ -1144,88 +1198,6 @@ class Bot:
     # Telegram command listener (admin only)
     # ------------------------------------------------------------------
 
-    def _check_mode_recommendation(self):
-        """
-        Each tick: check BTC 1h ADX + active session window.
-        Alert admin when conditions flip between scalp-friendly and swing-friendly.
-        London open: 07-11 UTC | NY open: 13-17 UTC = scalp windows (high liquidity).
-        Outside those windows / ADX < 20 = swing conditions.
-        Sends at most once per 2 hours to avoid spam.
-        """
-        if not self._admin_token or not self._admin_id:
-            return
-        try:
-            import pandas as pd
-            now_utc = datetime.utcnow()
-            hour    = now_utc.hour
-
-            # Session windows (UTC)
-            in_london  = 7 <= hour < 11
-            in_ny      = 13 <= hour < 17
-            in_active  = in_london or in_ny
-
-            # BTC 1h conditions
-            btc_raw = self._fetch_ohlcv("BTC/USDT:USDT", "1h")
-            if btc_raw is None or len(btc_raw) < 40:
-                return
-            btc_df       = self.elite_strategy.enrich(btc_raw.copy())
-            row          = btc_df.iloc[-2]
-            adx          = float(row.get("adx", 20))
-            atr          = float(row.get("atr", 0))
-            atr_sma      = btc_df["atr"].rolling(20).mean().iloc[-2]
-            atr_expanding = (not pd.isna(atr_sma)) and atr > float(atr_sma)
-            trending      = (not pd.isna(adx)) and adx >= 25
-
-            # Determine recommendation
-            if in_active and (trending or atr_expanding):
-                rec = "scalp"
-            elif not in_active or (not trending and not atr_expanding):
-                rec = "swing"
-            else:
-                return  # ambiguous conditions — stay silent
-
-            # Only alert on change, and at most once per 2 hours
-            if rec == self._mode_rec:
-                return
-            if self._last_mode_alert and (now_utc - self._last_mode_alert).total_seconds() < 7200:
-                return
-
-            self._mode_rec        = rec
-            self._last_mode_alert = now_utc
-
-            mode_buttons = {
-                "inline_keyboard": [[
-                    {"text": "⚡ Switch to Scalp", "callback_data": "cmd_scalp"},
-                    {"text": "📈 Switch to Swing", "callback_data": "cmd_swing"},
-                ]]
-            }
-
-            if rec == "scalp":
-                session_label = "London" if in_london else "NY"
-                atr_label     = "↑ expanding" if atr_expanding else "normal"
-                self._mode_rec_reason = f"{session_label} session open | ADX 1h: {adx:.0f} | ATR: {atr_label}"
-                msg = (
-                    f"⚡ <b>Scalp Conditions Active</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Session: <b>{session_label} open</b> | ADX 1h: <b>{adx:.0f}</b> | ATR: {atr_label}\n"
-                    f"Current mode: <b>{self.mode.upper()}</b>\n\n"
-                    f"Liquidity is high — faster setups on <b>15m/30m</b> work well now."
-                )
-            else:
-                session_label = "Asian session" if not in_active else "Low volatility"
-                self._mode_rec_reason = f"{session_label} | ADX 1h: {adx:.0f}"
-                msg = (
-                    f"📈 <b>Swing Conditions Active</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Conditions: <b>{session_label}</b> | ADX 1h: <b>{adx:.0f}</b>\n"
-                    f"Current mode: <b>{self.mode.upper()}</b>\n\n"
-                    f"Low volatility / ranging — <b>4h/1h</b> swing setups preferred."
-                )
-            self._admin_send(msg, markup=mode_buttons)
-            logger.info(f"[MODE REC] {rec.upper()} recommended (ADX={adx:.0f}, session={in_active}, atr_exp={atr_expanding})")
-        except Exception as e:
-            logger.warning(f"[MODE REC] check error: {e}")
-
     def _admin_send(self, text: str, markup: dict = None):
         """Send a message via the dedicated admin bot."""
         if not self._admin_token or not self._admin_id:
@@ -1243,34 +1215,27 @@ class Bot:
 
     def _control_panel_markup(self) -> dict:
         """Inline keyboard for the admin control panel."""
-        bybit_btn    = "⏹ Stop Trading" if self.bybit.enabled else "▶️ Start Trading"
-        bybit_cb     = "cmd_stop"        if self.bybit.enabled else "cmd_start"
-        scalp_btn    = "⚡ Scalp ✓"     if self.mode == "scalp" else "⚡ Scalp"
-        swing_btn    = "📈 Swing ✓"     if self.mode == "swing" else "📈 Swing"
-        elite_pause_btn = "▶️ Resume Elite" if self._elite_paused else "⏸ Pause Elite"
+        bybit_btn       = "⏹ Stop MEXC"   if self.bybit.enabled else "▶️ Start MEXC"
+        bybit_cb        = "cmd_stop"        if self.bybit.enabled else "cmd_start"
+        elite_pause_btn = "▶️ Resume Scan" if self._elite_paused  else "⏸ Pause Scan"
         elite_pause_cb  = "cmd_resume_elite" if self._elite_paused else "cmd_pause_elite"
-        pending_n    = len(self._pending_signals)
+        pending_n       = len(self._pending_signals)
         return {
             "inline_keyboard": [
-                # Row 1: MEXC toggle
+                # Row 1: MEXC execution toggle
                 [{"text": bybit_btn, "callback_data": bybit_cb}],
-                # Row 2: Mode switch
-                [
-                    {"text": scalp_btn, "callback_data": "cmd_scalp"},
-                    {"text": swing_btn, "callback_data": "cmd_swing"},
-                ],
-                # Row 3: Elite controls
+                # Row 2: Elite scan controls
                 [
                     {"text": elite_pause_btn, "callback_data": elite_pause_cb},
-                    {"text": "🔄 Reset Daily", "callback_data": "cmd_reset_daily"},
+                    {"text": "🔄 Reset Daily",  "callback_data": "cmd_reset_daily"},
                 ],
-                # Row 4: Pending signals
+                # Row 3: Signal counts
                 [
-                    {"text": f"⏳ Pending: {pending_n}", "callback_data": "cmd_status"},
+                    {"text": f"⏳ Pending: {pending_n}",                         "callback_data": "cmd_status"},
                     {"text": f"📊 Today: {self._daily_elite_count}/{self._daily_sig_limit}", "callback_data": "cmd_status"},
                 ],
-                # Row 5: Status
-                [{"text": "📊 Status", "callback_data": "cmd_status"}],
+                # Row 4: Status refresh
+                [{"text": "📊 Refresh Status", "callback_data": "cmd_status"}],
             ]
         }
 
@@ -1293,23 +1258,28 @@ class Bot:
 
     def _send_control_panel(self, *_):
         """Send the control panel with current state and action buttons."""
-        bybit_state  = "🟢 ON"   if self.bybit.enabled  else "🔴 OFF"
-        paper_state  = "🟢 ON"   if self.paper_enabled  else "🔴 OFF"
-        elite_state  = "🔴 PAUSED" if self._elite_paused else "🟢 ACTIVE"
-        resume_note  = ""
+        bybit_state = "🟢 ON"     if self.bybit.enabled  else "🔴 OFF"
+        paper_state = "🟢 ON"     if self.paper_enabled  else "🔴 OFF"
+        scan_state  = "🔴 PAUSED" if self._elite_paused  else "🟢 ACTIVE"
+        resume_note = ""
         if self._elite_paused and self._elite_resume_at:
-            resume_note = f" (resumes {self._elite_resume_at.strftime('%H:%M UTC')})"
-        open_pos     = len(self._paper_positions)
-        balance      = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
-        pending_n    = len(self._pending_signals)
+            resume_note = f" → resumes {self._elite_resume_at.strftime('%H:%M UTC')}"
+        open_pos  = len(self._paper_positions)
+        balance   = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
+        pending_n = len(self._pending_signals)
         text = (
             f"🤖 <b>Bot Control Panel</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"MEXC execution:   {bybit_state}\n"
             f"Paper trading:    {paper_state} ({balance})\n"
             f"Open positions:   {open_pos}\n"
-            f"Mode:             {self.mode.upper()}\n"
-            f"Elite scanning:   {elite_state}{resume_note}\n"
+            f"─────────────────────────\n"
+            f"TF stack:  1W · 1D · 4H · 1H\n"
+            f"Kill zones: London 07-09 · NY 12-14 UTC\n"
+            f"Scan cycle: every 4H close\n"
+            f"Next scan:  {self._next_4h_close_str()}\n"
+            f"─────────────────────────\n"
+            f"Scanning:         {scan_state}{resume_note}\n"
             f"Signals today:    {self._daily_elite_count}/{self._daily_sig_limit}\n"
             f"Pending approval: {pending_n}"
         )
@@ -1351,53 +1321,6 @@ class Bot:
                     elif cb_data == "cmd_status":
                         self._answer_callback(cb_id)
                         self._send_control_panel()
-                    elif cb_data == "cmd_scalp":
-                        self.mode         = "scalp"
-                        self.tf_trend     = "30m"
-                        self.tf_entry     = "15m"
-                        self.tf_precision = "15m"
-                        logger.info("[CMD] Switched to SCALP mode (30m trend / 15m structure / 15m precision)")
-                        self._answer_callback(cb_id, "⚡ Scalp mode active")
-                        self._send_control_panel()
-                        reason = self._mode_rec_reason or "London/NY session open — high liquidity"
-                        self.notifier.send(
-                            f"⚡ <b>Mode switched to SCALP</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"Reason: {reason}\n"
-                            f"Trend: <b>30m</b>  →  Structure: <b>15m</b>  →  Precision: <b>5m</b>"
-                        )
-                    elif cb_data == "cmd_swing":
-                        self.mode         = "swing"
-                        self.tf_trend     = "4h"
-                        self.tf_entry     = "1h"
-                        self.tf_precision = "15m"
-                        logger.info("[CMD] Switched to SWING mode (4h trend / 1h structure / 15m precision)")
-                        self._answer_callback(cb_id, "📈 Swing mode active")
-                        self._send_control_panel()
-                        reason = self._mode_rec_reason or "Asian session / low volatility — ranging market"
-                        self.notifier.send(
-                            f"📈 <b>Mode switched to SWING</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"Reason: {reason}\n"
-                            f"Trend: <b>4h</b>  →  Structure: <b>1h</b>  →  Precision: <b>15m</b>"
-                        )
-                    elif cb_data == "cmd_conf_toggle":
-                        self._confluence_enabled = not self._confluence_enabled
-                        state = "ON" if self._confluence_enabled else "OFF"
-                        logger.info(f"[CMD] Confluence filtering {state}")
-                        self._answer_callback(cb_id, f"🎯 Confluence {state}")
-                        self._send_control_panel()
-                    elif cb_data.startswith("cmd_conf_"):
-                        try:
-                            new_min = int(cb_data.split("_")[-1])
-                            if 1 <= new_min <= 5:
-                                self._confluence_min = new_min
-                                logger.info(f"[CMD] Confluence min set to {new_min}")
-                                self._answer_callback(cb_id, f"🎯 Confluence min: {new_min}/5")
-                                self._send_control_panel()
-                        except (ValueError, IndexError):
-                            pass
-
                     # ── Elite signal approval buttons ────────────────────
                     elif cb_data.startswith("elite_approve_"):
                         try:
@@ -1473,57 +1396,55 @@ class Bot:
 
     def run(self):
         self._running = True
+        dp_cfg   = self.cfg.get("dynamic_pairs", {})
+        dp_note  = f"TOP {dp_cfg.get('top_n', 30)} pairs by 24h vol | refresh {dp_cfg.get('refresh_hours', 4)}h"
         paper_note = (
-            f" | Paper: ON (balance={self.paper_balance:.0f} USDT, risk={self.risk_pct*100:.0f}% per trade)"
-            if self.paper_enabled else " | Paper: OFF"
+            f" | Paper ON (${self.paper_balance:.0f}, {self.risk_pct*100:.0f}% risk)"
+            if self.paper_enabled else " | Paper OFF"
         )
-        dp_cfg    = self.cfg.get("dynamic_pairs", {})
-        dp_note   = f"Dynamic pairs: TOP {dp_cfg.get('top_n', 30)} by 24h volume | Refresh: every {dp_cfg.get('refresh_hours', 4)}h"
         logger.info("=" * 60)
-        logger.info(f"Scanner started — {dp_note}{paper_note} | Mode: {self.mode.upper()}")
-        logger.info(f"Trend TF: {self.tf_trend} | Structure TF: {self.tf_entry} | Precision TF: {self.tf_precision} | SR TF: {self.tf_sr}")
-        logger.info(f"Cooldown: {self.cooldown_min}min | Summary: {self.daily_summary_hour:02d}:00 UTC")
-        logger.info(f"Elite 4H system: daily_limit={self._daily_sig_limit} | max_concurrent={self._max_concurrent}")
+        logger.info(f"Elite Futures Scanner — {dp_note}{paper_note}")
+        logger.info(f"TF stack: {self.tf_weekly} bias · {self.tf_daily} structure · "
+                    f"{self.tf_trend} entry · {self.tf_entry} confirmation")
+        logger.info(f"Scan cycle: 4H closes (00/04/08/12/16/20 UTC) | "
+                    f"Kill zones: London 07-09 · NY 12-14")
+        logger.info(f"Min RR: 5:1 | Trail: 3:1 | Daily limit: {self._daily_sig_limit} | "
+                    f"Max concurrent: {self._max_concurrent}")
         logger.info("=" * 60)
 
         try:
             symbols = self.pair_selector.get_symbols()
         except Exception as e:
-            logger.error(f"Pair selector failed on startup: {e} — using fallback list")
+            logger.error(f"Pair selector failed: {e} — using fallback")
             symbols = self.cfg.get("symbols", ["BTC/USDT:USDT", "ETH/USDT:USDT"])
 
-        bybit_note = f" | MEXC: {'ON' if self.bybit.enabled else 'OFF'}"
+        mexc_note = f" | MEXC: {'ON' if self.bybit.enabled else 'OFF'}"
         self.notifier.scanner_started(
-            symbols, self.tf_trend, self.tf_entry,
-            self.cooldown_min, self.paper_enabled, self.paper_balance,
-            strategies=["Wyckoff", "Liquidity/EQH-EQL", "MMM", "VSA", "Intermarket", "Kill Zone"],
-            label=f"Elite Crypto Futures Scanner{bybit_note}",
-            mode=self.mode,
-            confluence_min=self._confluence_min,
-            tf_precision=self.tf_precision,
+            symbols,
+            paper_enabled=self.paper_enabled,
+            paper_balance=self.paper_balance,
         )
-        # Forex startup alert intentionally removed — forex bot runs as a separate service
 
         if self._admin_token and self._admin_id:
-            logger.info(f"[CMD] Admin commands active (admin_id={self._admin_id}) — polling each tick")
+            logger.info(f"[CMD] Admin bot active (id={self._admin_id})")
             self._send_control_panel()
         else:
-            logger.info("[CMD] ADMIN_BOT_TOKEN or TELEGRAM_ADMIN_ID not set — admin commands disabled")
+            logger.info("[CMD] Admin bot not configured")
 
         while self._running:
             try:
                 self._poll_commands()
-                self._check_mode_recommendation()
-                self._tick()
+                self._manage_active_positions()   # runs every 60s — trail + paper TP/SL
+                if self._should_scan():
+                    self._tick()                  # runs once per 4H candle close
             except KeyboardInterrupt:
                 logger.info("Stopped by user.")
                 break
             except Exception as e:
-                logger.error(f"Tick error: {e}\n{traceback.format_exc()}")
+                logger.error(f"Loop error: {e}\n{traceback.format_exc()}")
                 self.notifier.error_alert("Main loop", str(e)[:200])
 
-            logger.debug(f"Sleeping {self.poll_interval}s...")
-            time.sleep(self.poll_interval)
+            time.sleep(60)   # poll Telegram + positions every 60s
 
         self.notifier.send("🔴 <b>Scanner stopped.</b>")
 

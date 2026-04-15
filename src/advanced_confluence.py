@@ -681,7 +681,102 @@ def _fetch_intermarket(exchange=None) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 8.  Position sizing by confluence score
+# 8.  1H Confirmation Gate
+# ══════════════════════════════════════════════════════════════════════════════
+
+def confirm_1h_alignment(h1_df: pd.DataFrame, direction: str) -> dict:
+    """
+    Check if the 1H timeframe confirms the 4H signal direction.
+    Passes if ANY one of three conditions is present:
+      1. FVG  — 3-candle imbalance in signal direction (last 6 closed 1H bars)
+      2. MSS  — 1H BOS: last closed bar breaks a recent 1H swing
+      3. Sweep — 1H stop hunt (spike beyond prev extreme + reversal close)
+
+    Returns:
+      {aligned, reason, fvg_present, mss_present, sweep_present}
+    """
+    FAIL = dict(aligned=False, reason="1H: Insufficient data",
+                fvg_present=False, mss_present=False, sweep_present=False)
+    try:
+        if h1_df is None or len(h1_df) < 20:
+            return FAIL
+
+        cur     = h1_df.iloc[-2]   # last CLOSED 1H candle
+        prev    = h1_df.iloc[-3]
+        vol_win = h1_df.iloc[-15:-2]
+        vol_avg = float(vol_win["volume"].mean()) if len(vol_win) else 1.0
+
+        fvg_present   = False
+        mss_present   = False
+        sweep_present = False
+        reasons: list[str] = []
+
+        # ── 1. FVG ───────────────────────────────────────────────────────
+        # Look back 6 confirmed candles for a 3-bar gap
+        for i in range(-8, -3):
+            try:
+                c0 = h1_df.iloc[i - 1]
+                c2 = h1_df.iloc[i + 1]
+                if direction == "long":
+                    # Bullish FVG: gap between c0.high and c2.low
+                    if float(c2["low"]) > float(c0["high"]):
+                        fvg_present = True
+                        reasons.append("1H FVG bullish ✅")
+                        break
+                else:
+                    # Bearish FVG: gap between c0.low and c2.high
+                    if float(c2["high"]) < float(c0["low"]):
+                        fvg_present = True
+                        reasons.append("1H FVG bearish ✅")
+                        break
+            except IndexError:
+                pass
+
+        # ── 2. MSS — 1H structure break ──────────────────────────────────
+        lookback = h1_df.iloc[-15:-3]   # last 12 confirmed bars (exclude cur + prev)
+        cur_close = float(cur["close"])
+        if direction == "long":
+            sh = float(lookback["high"].max())
+            if cur_close > sh:
+                mss_present = True
+                reasons.append(f"1H MSS ↑ above {sh:,.4g} ✅")
+        else:
+            sl = float(lookback["low"].min())
+            if cur_close < sl:
+                mss_present = True
+                reasons.append(f"1H MSS ↓ below {sl:,.4g} ✅")
+
+        # ── 3. Liquidity Sweep on 1H ──────────────────────────────────────
+        cur_vol = float(cur["volume"])
+        if direction == "long":
+            if (float(cur["low"])   < float(prev["low"])
+                    and cur_close   > float(prev["low"])
+                    and cur_vol     > vol_avg * 0.8):
+                sweep_present = True
+                reasons.append("1H sell-side sweep ✅")
+        else:
+            if (float(cur["high"])  > float(prev["high"])
+                    and cur_close   < float(prev["high"])
+                    and cur_vol     > vol_avg * 0.8):
+                sweep_present = True
+                reasons.append("1H buy-side sweep ✅")
+
+        aligned = fvg_present or mss_present or sweep_present
+        reason  = (" | ".join(reasons)
+                   if aligned
+                   else f"1H disagrees — no FVG/MSS/sweep for {direction}")
+        return dict(aligned=aligned, reason=reason,
+                    fvg_present=fvg_present,
+                    mss_present=mss_present,
+                    sweep_present=sweep_present)
+
+    except Exception as e:
+        logger.debug(f"[1H CONFIRM] {e}")
+        return FAIL
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9.  Position sizing by confluence score
 # ══════════════════════════════════════════════════════════════════════════════
 
 def risk_usdt_for_score(score: int) -> float:
@@ -704,11 +799,9 @@ def risk_usdt_for_score(score: int) -> float:
 def tp_rr_for_score(score: int) -> float:
     """
     Minimum TP RR based on confluence score.
+    Floor is always 5:1 per execution rules.
 
-    5–7   → 2:1
-    8–11  → 3:1
-    12+   → 5:1
+    5–14  → 5:1
+    15–20 → 5:1 (targeting deeper weekly/daily levels)
     """
-    if score >= 12:  return 5.0
-    if score >= 8:   return 3.0
-    return 2.0
+    return 5.0
