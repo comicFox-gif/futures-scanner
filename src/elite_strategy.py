@@ -513,25 +513,10 @@ class EliteStrategy:
             sc = self._score_all_categories(h4_df, weekly_df, symbol, direction, exchange, kz)
             total = sc["total"]
 
-            # ── Category gates — at least 3 of 4 must score (Wyckoff, Liq, MMM, VSA)
-            # Requiring all 4 simultaneously is too restrictive — Wyckoff (needs volume
-            # climax) and VSA (needs specific bar patterns) won't always be present together.
-            cat_scores = [
-                sc["wyck_score"] > 0,
-                sc["liq_score"]  > 0,
-                sc["mmm_score"]  > 0,
-                sc["vsa_score"]  > 0,
-            ]
-            if sum(cat_scores) < 3:
-                logger.debug(
-                    f"[ELITE] {symbol} {direction.upper()} — category gates failed "
-                    f"({sum(cat_scores)}/4): "
-                    f"W={sc['wyck_score']} L={sc['liq_score']} "
-                    f"M={sc['mmm_score']} V={sc['vsa_score']}"
-                )
-                continue
-
             # ── Minimum score gate ─────────────────────────────────────────
+            # No per-category requirement — bot grabs whatever confluence is
+            # present and fires if total ≥ 5. Spring + MMM alone = 6pts which
+            # always co-occur anyway, so category gates are redundant friction.
             if total < self.min_score:
                 logger.debug(
                     f"[ELITE] {symbol} {direction.upper()} score={total}/{_MAX_SCORE} "
