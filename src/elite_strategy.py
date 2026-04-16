@@ -524,10 +524,18 @@ class EliteStrategy:
             sc = self._score_all_categories(h4_df, weekly_df, symbol, direction, exchange, kz)
             total = sc["total"]
 
+            # ── Forming alert — score ≥3 but below signal threshold ────────
+            # Return early stub so bot notifies admin the setup is building.
+            if total >= 3 and total < self.min_score:
+                return {
+                    "forming":   True,
+                    "symbol":    symbol,
+                    "direction": direction,
+                    "score":     total,
+                    "entry":     price,
+                }
+
             # ── Minimum score gate ─────────────────────────────────────────
-            # No per-category requirement — bot grabs whatever confluence is
-            # present and fires if total ≥ 5. Spring + MMM alone = 6pts which
-            # always co-occur anyway, so category gates are redundant friction.
             if total < self.min_score:
                 logger.debug(
                     f"[ELITE] {symbol} {direction.upper()} score={total}/{_MAX_SCORE} "
