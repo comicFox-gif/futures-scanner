@@ -619,8 +619,9 @@ def _fetch_intermarket(exchange=None) -> dict:
         dxy = yf.download("DX-Y.NYB", period="30d", interval="1d",
                           progress=False, auto_adjust=True)
         if dxy is not None and len(dxy) >= 21:
-            ma20 = float(dxy["Close"].rolling(20).mean().iloc[-1])
-            last = float(dxy["Close"].iloc[-1])
+            close = dxy["Close"].squeeze()
+            ma20  = float(close.rolling(20).mean().iloc[-1])
+            last  = float(close.iloc[-1])
             data["dxy_bearish"] = last < ma20
     except Exception as e:
         logger.debug(f"[INTERMARKET] DXY fetch: {e}")
@@ -630,7 +631,8 @@ def _fetch_intermarket(exchange=None) -> dict:
         spx = yf.download("^GSPC", period="5d", interval="1d",
                           progress=False, auto_adjust=True)
         if spx is not None and len(spx) >= 2:
-            data["spx_bullish"] = float(spx["Close"].iloc[-1]) > float(spx["Close"].iloc[-2])
+            close = spx["Close"].squeeze()
+            data["spx_bullish"] = float(close.iloc[-1]) > float(close.iloc[-2])
     except Exception as e:
         logger.debug(f"[INTERMARKET] SPX fetch: {e}")
 

@@ -4,8 +4,8 @@ Market Regime Detector
 5-vote BTC structural analysis → 'bull', 'bear', or 'neutral'
 
 Votes:
-  V1: Wyckoff phase on BTC Weekly  (accumulation=bull, distribution=bear)
-  V2: Wyckoff phase on BTC Daily   (accumulation=bull, distribution=bear)
+  V1: BTC Weekly structural trend   (close > 10W SMA + trending up = bull)
+  V2: BTC Daily structural trend    (close > 20D SMA + trending up = bull)
   V3: BTC Dominance level          (>52%=bull, <48%=bear)
   V4: Intermarket confirmation     (3+/5 macro factors aligned)
   V5: BTC 4H price structure       (Higher Highs=bull, Lower Lows=bear)
@@ -45,24 +45,31 @@ def _has_lower_lows(df: pd.DataFrame, lookback: int = 12) -> bool:
     return float(lows[-n:].min()) < float(lows[-2*n:-n].min()) < float(lows[:n].min())
 
 
-def _wyckoff_vote(df: pd.DataFrame | None, label: str) -> tuple[int, int, str]:
+def _trend_vote(df: pd.DataFrame | None, label: str, sma_period: int = 20) -> tuple[int, int, str]:
     """
-    Run Wyckoff detection on df.
-    Returns (bull_vote, bear_vote, note_str).
+    Structural trend vote using SMA and recent price direction.
+    Bull: close > SMA AND close is higher than N candles ago.
+    Bear: close < SMA AND close is lower than N candles ago.
+    Always fires — no dependency on rare volume climax events.
     """
-    if df is None or len(df) < 30:
+    if df is None or len(df) < sma_period + 5:
         return 0, 0, f"{label}:N/A"
     try:
-        from src.advanced_confluence import detect_wyckoff
-        w = detect_wyckoff(df)
-        phase = w.get("phase", "unknown")
-        if phase == "accumulation":
-            return 1, 0, f"{label}:Accum"
-        if phase == "distribution":
-            return 0, 1, f"{label}:Dist"
+        close     = df["close"].iloc[-(sma_period + 5):]
+        sma       = float(close.rolling(sma_period).mean().iloc[-2])
+        cur_close = float(close.iloc[-2])
+        past_close = float(close.iloc[-(sma_period // 2) - 2])  # half-period ago
+
+        above_sma = cur_close > sma
+        trending_up = cur_close > past_close
+
+        if above_sma and trending_up:
+            return 1, 0, f"{label}:↑{cur_close:.0f}>SMA{sma:.0f}"
+        if not above_sma and not trending_up:
+            return 0, 1, f"{label}:↓{cur_close:.0f}<SMA{sma:.0f}"
     except Exception as e:
-        logger.debug(f"[REGIME] Wyckoff {label}: {e}")
-    return 0, 0, f"{label}:neutral"
+        logger.debug(f"[REGIME] Trend {label}: {e}")
+    return 0, 0, f"{label}:mixed"
 
 
 def _btcd_vote() -> tuple[int, int, str]:
@@ -130,12 +137,12 @@ def detect_regime(
     bear = 0
     notes: list[str] = []
 
-    # V1: Wyckoff on Weekly BTC
-    b, r, n = _wyckoff_vote(btc_weekly_df, "W-Wyck")
+    # V1: Weekly structural trend (close vs 10-week SMA + direction)
+    b, r, n = _trend_vote(btc_weekly_df, "W-Trend", sma_period=10)
     bull += b; bear += r; notes.append(n)
 
-    # V2: Wyckoff on Daily BTC
-    b, r, n = _wyckoff_vote(btc_daily_df, "D-Wyck")
+    # V2: Daily structural trend (close vs 20-day SMA + direction)
+    b, r, n = _trend_vote(btc_daily_df, "D-Trend", sma_period=20)
     bull += b; bear += r; notes.append(n)
 
     # V3: BTC Dominance
