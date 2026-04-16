@@ -481,10 +481,14 @@ class EliteStrategy:
         mregime = regime.get("regime", "neutral")
         _sl_buf = atr * 0.2
 
+        # BOS lookback: did the break happen within the last 3 closed 4H bars?
+        # Gives a 12-hour window instead of a 4-hour single-candle gate.
+        bos_window = h4_df.iloc[-5:-2]["close"]  # 3 candles before the last closed bar
+
         for direction in ("long", "short"):
             # ── BOS check ─────────────────────────────────────────────────
             if direction == "long":
-                bos = price > swing_high and float(prev["close"]) <= swing_high
+                bos = price > swing_high and any(float(c) <= swing_high for c in bos_window)
                 if not bos:
                     continue
                 if rsi < 40 or rsi > 75:
@@ -494,7 +498,7 @@ class EliteStrategy:
                 sl_dist   = max(price - (float(row["low"]) - _sl_buf), atr * 0.5)
                 swing_ref = swing_high
             else:
-                bos = price < swing_low and float(prev["close"]) >= swing_low
+                bos = price < swing_low and any(float(c) >= swing_low for c in bos_window)
                 if not bos:
                     continue
                 if rsi > 60 or rsi < 25:
