@@ -729,13 +729,13 @@ class Bot:
                 .dropna()
             )
             logger.info(f"[REGIME] Weekly derived from daily resample: {len(btc_1w)} bars")
-        btc_4h_df = self.elite_strategy.enrich(btc_4h.copy()) if btc_4h is not None else None
-        btc_1d_df = self.elite_strategy.enrich(btc_1d.copy()) if btc_1d is not None else None
-        btc_1w_df = (self.elite_strategy.enrich(btc_1w.copy())
-                     if btc_1w is not None and len(btc_1w) >= 6 else None)
+        # Regime only needs raw close/high/low — no enrich() needed (avoids EMA200 NaN-dropping weekly data)
+        btc_4h_df = btc_4h
+        btc_1d_df = btc_1d
+        btc_1w_df = btc_1w if btc_1w is not None and len(btc_1w) >= 6 else None
         logger.info(
-            f"[REGIME] Enriched: 4H={'OK' if btc_4h_df is not None else 'None'} | "
-            f"1D={'OK' if btc_1d_df is not None else 'None'} | "
+            f"[REGIME] BTC dfs: 4H={'OK({})'.format(len(btc_4h_df)) if btc_4h_df is not None else 'None'} | "
+            f"1D={'OK({})'.format(len(btc_1d_df)) if btc_1d_df is not None else 'None'} | "
             f"1W={'OK({})'.format(len(btc_1w_df)) if btc_1w_df is not None else 'None'}"
         )
         regime_info = detect_regime(
@@ -753,6 +753,7 @@ class Bot:
         signals_found = 0
         for symbol in symbols:
             try:
+                time.sleep(0.25)  # throttle: ~4 req/s to stay within Bybit rate limits
                 # ── Fetch full timeframe stack ────────────────────────────
                 h4_raw  = self._fetch_ohlcv(symbol, "4h",  limit=100)
                 if h4_raw is None:
