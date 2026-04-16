@@ -47,20 +47,27 @@ def _has_lower_lows(df: pd.DataFrame, lookback: int = 12) -> bool:
 
 def _trend_vote(df: pd.DataFrame | None, label: str, sma_period: int = 20) -> tuple[int, int, str]:
     """
-    Structural trend vote using SMA and recent price direction.
-    Bull: close > SMA AND close is higher than N candles ago.
-    Bear: close < SMA AND close is lower than N candles ago.
-    Always fires — no dependency on rare volume climax events.
+    Structural trend vote using SMA + recent candle direction.
+    Bull: close > SMA AND last closed candle above 3 candles ago.
+    Bear: close < SMA AND last closed candle below 3 candles ago.
+    Uses full df — no slicing — so works even with minimal candle history.
     """
-    if df is None or len(df) < sma_period + 5:
+    if df is None or len(df) < max(sma_period + 2, 6):
         return 0, 0, f"{label}:N/A"
     try:
-        close     = df["close"].iloc[-(sma_period + 5):]
-        sma       = float(close.rolling(sma_period).mean().iloc[-2])
-        cur_close = float(close.iloc[-2])
-        past_close = float(close.iloc[-(sma_period // 2) - 2])  # half-period ago
+        close     = df["close"]
+        sma_val   = close.rolling(sma_period).mean().iloc[-2]
+        if pd.isna(sma_val):
+            # Not enough history for full SMA — fall back to 10-period
+            sma_val = close.rolling(min(10, len(close) - 2)).mean().iloc[-2]
+        if pd.isna(sma_val):
+            return 0, 0, f"{label}:N/A"
 
-        above_sma = cur_close > sma
+        sma       = float(sma_val)
+        cur_close = float(close.iloc[-2])
+        past_close = float(close.iloc[-5])   # 3 candles back — simple direction check
+
+        above_sma   = cur_close > sma
         trending_up = cur_close > past_close
 
         if above_sma and trending_up:
