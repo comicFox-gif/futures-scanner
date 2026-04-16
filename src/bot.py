@@ -712,12 +712,32 @@ class Bot:
             logger.info("[ELITE] Pause lifted — resuming signal scanning")
 
         # ── Regime detection via BTC 4H + 1D ────────────────────────────
-        btc_4h  = self._fetch_ohlcv("BTC/USDT:USDT", "4h", limit=220)
-        btc_1d  = self._fetch_ohlcv("BTC/USDT:USDT", "1d", limit=220)
-        btc_1w  = self._fetch_ohlcv("BTC/USDT:USDT", "1w", limit=60)
+        btc_4h  = self._fetch_ohlcv("BTC/USDT:USDT", "4h",  limit=220)
+        btc_1d  = self._fetch_ohlcv("BTC/USDT:USDT", "1d",  limit=220)
+        btc_1w  = self._fetch_ohlcv("BTC/USDT:USDT", "1w",  limit=60)
+        logger.info(
+            f"[REGIME] BTC data: 4H={len(btc_4h) if btc_4h is not None else 'None'} bars | "
+            f"1D={len(btc_1d) if btc_1d is not None else 'None'} bars | "
+            f"1W={len(btc_1w) if btc_1w is not None else 'None'} bars"
+        )
+        # Fallback: derive weekly from daily resample if exchange weekly fetch fails
+        if btc_1d is not None and (btc_1w is None or len(btc_1w) < 6):
+            btc_1w = (
+                btc_1d.resample("W")
+                .agg({"open": "first", "high": "max", "low": "min",
+                      "close": "last", "volume": "sum"})
+                .dropna()
+            )
+            logger.info(f"[REGIME] Weekly derived from daily resample: {len(btc_1w)} bars")
         btc_4h_df = self.elite_strategy.enrich(btc_4h.copy()) if btc_4h is not None else None
         btc_1d_df = self.elite_strategy.enrich(btc_1d.copy()) if btc_1d is not None else None
-        btc_1w_df = self.elite_strategy.enrich(btc_1w.copy()) if btc_1w is not None else None
+        btc_1w_df = (self.elite_strategy.enrich(btc_1w.copy())
+                     if btc_1w is not None and len(btc_1w) >= 6 else None)
+        logger.info(
+            f"[REGIME] Enriched: 4H={'OK' if btc_4h_df is not None else 'None'} | "
+            f"1D={'OK' if btc_1d_df is not None else 'None'} | "
+            f"1W={'OK({})'.format(len(btc_1w_df)) if btc_1w_df is not None else 'None'}"
+        )
         regime_info = detect_regime(
             btc_4h_df, btc_1d_df, btc_1w_df,
             exchange=self.exchange if self.bybit.enabled else None,
