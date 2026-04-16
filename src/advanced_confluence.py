@@ -547,8 +547,8 @@ def get_intermarket_score(exchange=None, direction: str = "long") -> dict:
     """
     Fetch and score macro intermarket factors for the given trade direction.
 
-    Bullish alignment (for longs):  DXY below MA20, SPX rising, BTC.D < 55%,
-                                     ETH/BTC rising, Fear&Greed < 50.
+    Bullish alignment (for longs):  Funding rate ≤0, market cap rising,
+                                     BTC.D < 55%, ETH/BTC rising, F&G < 50.
     Bearish alignment (for shorts): inverse of the above.
 
     Scores:
@@ -567,11 +567,11 @@ def get_intermarket_score(exchange=None, direction: str = "long") -> dict:
 
     # Factor booleans: True = bullish for crypto
     checks = {
-        "DXY":    raw.get("dxy_bearish"),    # below MA = bullish for crypto
-        "SPX":    raw.get("spx_bullish"),
-        "BTC.D":  raw.get("btcd_low"),       # <55% = alt friendly
+        "Funding": raw.get("funding_bearish"),  # negative rate = contrarian bull
+        "MktCap":  raw.get("mktcap_rising"),    # total crypto market cap rising
+        "BTC.D":   raw.get("btcd_low"),         # <55% = alt friendly
         "ETH/BTC": raw.get("ethbtc_rising"),
-        "F/G":    raw.get("fg_bullish"),     # fear = good for longs
+        "F/G":     raw.get("fg_bullish"),       # fear = good for longs
     }
 
     if direction == "short":
@@ -604,39 +604,36 @@ def get_intermarket_score(exchange=None, direction: str = "long") -> dict:
 
 
 def _fetch_intermarket(exchange=None) -> dict:
-    """Internal: fetch raw intermarket data. All failures return None fields."""
+    """
+    Internal: fetch raw intermarket data — crypto-native sources only.
+    No yfinance / no stock market dependencies.
+
+    Factors:
+      funding_bearish  — BTC funding rate negative (shorts paying = contrarian bull)
+      mktcap_rising    — Total crypto market cap 24h change positive
+      btcd_low         — BTC dominance < 55% (alt-friendly)
+      ethbtc_rising    — ETH/BTC ratio rising (risk appetite)
+      fg_bullish       — Fear & Greed < 50 (fear = good for longs)
+    """
     data: dict = {
-        "dxy_bearish":  None,
-        "spx_bullish":  None,
-        "btcd_low":     None,
-        "ethbtc_rising": None,
-        "fg_bullish":   None,
+        "funding_bearish": None,
+        "mktcap_rising":   None,
+        "btcd_low":        None,
+        "ethbtc_rising":   None,
+        "fg_bullish":      None,
     }
 
-    # ── DXY & SPX via yfinance ────────────────────────────────────────────
+    # ── BTC Funding Rate (Bybit public REST — no auth) ────────────────────
     try:
-        import yfinance as yf
-        dxy = yf.download("DX-Y.NYB", period="30d", interval="1d",
-                          progress=False, auto_adjust=True)
-        if dxy is not None and len(dxy) >= 21:
-            close = dxy["Close"].squeeze()
-            ma20  = float(close.rolling(20).mean().iloc[-1])
-            last  = float(close.iloc[-1])
-            data["dxy_bearish"] = last < ma20
+        from src.sentiment import get_funding_rate
+        rate = get_funding_rate(None, "BTC/USDT:USDT")
+        if rate is not None:
+            # Negative rate = shorts paying longs = bearish crowd = contrarian bull
+            data["funding_bearish"] = rate <= 0
     except Exception as e:
-        logger.debug(f"[INTERMARKET] DXY fetch: {e}")
+        logger.debug(f"[INTERMARKET] Funding rate: {e}")
 
-    try:
-        import yfinance as yf
-        spx = yf.download("^GSPC", period="5d", interval="1d",
-                          progress=False, auto_adjust=True)
-        if spx is not None and len(spx) >= 2:
-            close = spx["Close"].squeeze()
-            data["spx_bullish"] = float(close.iloc[-1]) > float(close.iloc[-2])
-    except Exception as e:
-        logger.debug(f"[INTERMARKET] SPX fetch: {e}")
-
-    # ── BTC Dominance via CoinGecko (free) ───────────────────────────────
+    # ── Total crypto market cap + BTC Dominance (CoinGecko /global) ───────
     try:
         import requests as _req
         resp = _req.get(
@@ -645,13 +642,15 @@ def _fetch_intermarket(exchange=None) -> dict:
             headers={"User-Agent": "futures-bot/1.0"},
         )
         if resp.status_code == 200:
-            btcd = resp.json().get("data", {}).get(
-                "market_cap_percentage", {}
-            ).get("btc")
+            gdata = resp.json().get("data", {})
+            btcd = gdata.get("market_cap_percentage", {}).get("btc")
             if btcd is not None:
                 data["btcd_low"] = float(btcd) < 55.0
+            mktcap_chg = gdata.get("market_cap_change_percentage_24h_usd")
+            if mktcap_chg is not None:
+                data["mktcap_rising"] = float(mktcap_chg) > 0
     except Exception as e:
-        logger.debug(f"[INTERMARKET] BTC.D fetch: {e}")
+        logger.debug(f"[INTERMARKET] CoinGecko global: {e}")
 
     # ── ETH/BTC ratio via ccxt exchange ──────────────────────────────────
     if exchange is not None:
