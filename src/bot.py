@@ -774,8 +774,7 @@ class Bot:
                               if daily_raw is not None else None)
 
                 h1_raw     = self._fetch_ohlcv(symbol, "1h", limit=100)
-                h1_df      = (self.elite_strategy.enrich(h1_raw.copy())
-                              if h1_raw is not None else None)
+                h1_df      = h1_raw  # confirm_1h_alignment uses raw OHLCV only — enrich() would NaN-drop most rows
 
                 live_price    = self._fetch_live_price(symbol)
                 current_price = live_price if live_price else float(h4_df.iloc[-2]["close"])
