@@ -853,32 +853,6 @@ class Bot:
         Run the Elite 4H strategy for one symbol.
         Returns True if a signal was queued for admin approval.
         """
-        # Daily signal cap
-        if self._daily_elite_count >= self._daily_sig_limit:
-            return False
-
-        # Daily loss limit — stop new signals if -$20 reached
-        if self._daily_pnl <= self._daily_loss_limit:
-            logger.info(f"[ELITE] {symbol} skipped — daily loss limit hit (${self._daily_pnl:.2f})")
-            return False
-
-        # Consecutive-SL cooldown
-        if self._elite_paused:
-            return False
-
-        # Max concurrent positions
-        concurrent = len(self._paper_positions) + len(self._mexc_positions)
-        if concurrent >= self._max_concurrent:
-            return False
-
-        # Already pending approval for this symbol — don't spam admin
-        if any(v["symbol"] == symbol for v in self._pending_signals.values()):
-            return False
-
-        # Standard signal cooldown
-        if self._is_on_cooldown(symbol, "elite", 2):
-            return False
-
         try:
             sig = self.elite_strategy.generate_signal(
                 symbol=symbol,
@@ -904,6 +878,22 @@ class Bot:
         # ── "Watching" alert — setup scored but 1H not confirmed yet ──────
         if sig.get("watching"):
             self._send_watching_alert(sig)
+            return False
+
+        # ── Guards for real signal queuing only (not forming/watching) ────
+        if self._daily_elite_count >= self._daily_sig_limit:
+            return False
+        if self._daily_pnl <= self._daily_loss_limit:
+            logger.info(f"[ELITE] {symbol} skipped — daily loss limit hit (${self._daily_pnl:.2f})")
+            return False
+        if self._elite_paused:
+            return False
+        concurrent = len(self._paper_positions) + len(self._mexc_positions)
+        if concurrent >= self._max_concurrent:
+            return False
+        if any(v["symbol"] == symbol for v in self._pending_signals.values()):
+            return False
+        if self._is_on_cooldown(symbol, "elite", 2):
             return False
 
         # Queue for admin approval
