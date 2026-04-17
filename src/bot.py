@@ -811,7 +811,7 @@ class Bot:
             silent_since = self._last_channel_msg_time
             channel_silent_4h = (
                 silent_since is None or
-                (datetime.utcnow() - silent_since).total_seconds() >= 4 * 3600
+                (datetime.utcnow() - silent_since).total_seconds() >= 12 * 3600
             )
             if channel_silent_4h:
                 next_scan = self._next_4h_close_str()
@@ -1319,11 +1319,13 @@ class Bot:
         )
 
     def _maybe_send_positions_report(self):
-        """Send open positions summary to Telegram every 60 minutes."""
+        """Send open positions summary 3× per day, only when positions are actually open."""
         if not self.paper_enabled:
             return
-        if (datetime.utcnow() - self._last_positions_report).total_seconds() < 3600:
-            return
+        if not self._paper_positions:
+            return  # nothing open — stay silent
+        if (datetime.utcnow() - self._last_positions_report).total_seconds() < 8 * 3600:
+            return  # max 3× per day (every 8 hours)
         self._last_positions_report = datetime.utcnow()
         self.notifier.paper_positions_update(self._paper_positions, self.paper_balance, self.paper_start_balance)
 
