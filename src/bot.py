@@ -755,19 +755,21 @@ class Bot:
             try:
                 time.sleep(0.25)  # throttle: ~4 req/s to stay within Bybit rate limits
                 # ── Fetch full timeframe stack ────────────────────────────
-                h4_raw  = self._fetch_ohlcv(symbol, "4h",  limit=100)
+                # 300 bars needed: EMA200 warmup (199 NaN rows) + 100 valid rows for strategy
+                h4_raw  = self._fetch_ohlcv(symbol, "4h",  limit=300)
                 if h4_raw is None:
                     continue
                 h4_df   = self.elite_strategy.enrich(h4_raw.copy())
                 if len(h4_df) < 60:
-                    logger.debug(f"Skipping {symbol}: insufficient 4H data ({len(h4_df)} bars)")
+                    logger.info(f"Skipping {symbol}: insufficient 4H data ({len(h4_df)} bars after enrich)")
                     continue
 
-                weekly_raw = self._fetch_ohlcv(symbol, "1w", limit=20)
-                weekly_df  = (self.elite_strategy.enrich(weekly_raw.copy())
-                              if weekly_raw is not None else None)
+                # Weekly: raw only — EMA200 can never warm up on ~60 weekly bars max
+                weekly_raw = self._fetch_ohlcv(symbol, "1w", limit=60)
+                weekly_df  = weekly_raw
 
-                daily_raw  = self._fetch_ohlcv(symbol, "1d", limit=50)
+                # Daily: 300 bars gives ~100 valid rows after EMA200 warmup
+                daily_raw  = self._fetch_ohlcv(symbol, "1d", limit=300)
                 daily_df   = (self.elite_strategy.enrich(daily_raw.copy())
                               if daily_raw is not None else None)
 
