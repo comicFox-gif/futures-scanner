@@ -491,7 +491,7 @@ class EliteStrategy:
                 bos = price > swing_high and any(float(c) <= swing_high for c in bos_window)
                 if not bos:
                     continue
-                if rsi < 40 or rsi > 75:
+                if rsi < 40 or rsi > 80:
                     continue
                 if mregime in ("bear", "neutral"):
                     continue
@@ -501,7 +501,7 @@ class EliteStrategy:
                 bos = price < swing_low and any(float(c) >= swing_low for c in bos_window)
                 if not bos:
                     continue
-                if rsi > 60 or rsi < 25:
+                if rsi > 65 or rsi < 20:
                     continue
                 if mregime in ("bull", "neutral"):
                     continue
@@ -516,12 +516,12 @@ class EliteStrategy:
             liq_map = calculate_liquidation_map(h4_df)
             clear, liq_reason = liq_map_clear_to_entry(liq_map, price, sl_price_check, direction)
             if not clear:
-                logger.debug(f"[ELITE] {symbol} {direction.upper()} — {liq_reason}")
+                logger.info(f"[ELITE] {symbol} {direction.upper()} — liq map blocked: {liq_reason}")
                 continue
 
             # ── Fast 2:1 clearance gate (minimum possible RR) ─────────────
             if not self._check_rr_clearance(h4_df, price, sl_dist, direction, min_rr=2.0):
-                logger.debug(f"[ELITE] {symbol} {direction.upper()} — no 2:1 RR clearance")
+                logger.info(f"[ELITE] {symbol} {direction.upper()} — no 2:1 RR clearance (structure in the way)")
                 continue
 
             # ── Score all 7 categories (18-point system) ───────────────────
@@ -541,7 +541,7 @@ class EliteStrategy:
 
             # ── Minimum score gate ─────────────────────────────────────────
             if total < self.min_score:
-                logger.debug(
+                logger.info(
                     f"[ELITE] {symbol} {direction.upper()} score={total}/{_MAX_SCORE} "
                     f"< {self.min_score} — skipped"
                 )
@@ -552,8 +552,8 @@ class EliteStrategy:
             if required_rr > 2.0:
                 if not self._check_rr_clearance(h4_df, price, sl_dist, direction,
                                                  min_rr=required_rr):
-                    logger.debug(
-                        f"[ELITE] {symbol} {direction.upper()} — no {required_rr:.0f}:1 clearance"
+                    logger.info(
+                        f"[ELITE] {symbol} {direction.upper()} — no {required_rr:.0f}:1 clearance (structure in the way)"
                     )
                     continue
 
