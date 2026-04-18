@@ -1,16 +1,18 @@
 """
 Elite 4H Confluence Strategy  —  18-point scoring
 ---------------------------------------------------
-Fires on 4H Break of Structure (BOS) when score >= min_score (default 5/18).
+Fires when 4H liquidity sweep completes and score >= min_score (default 5/18).
 
 Hard requirements (ALL must be true — score irrelevant):
-  1. Kill zone active — London 07:00-09:00 UTC OR NY 12:00-14:00 UTC only
-  2. 4H candle CLOSED (never on open candle)
-  3. Market regime clear — Bull=longs only, Bear=shorts only, Neutral=no signals
-  4. 4H BOS: close breaks above last swing high (long) / below swing low (short)
-  5. RSI in valid momentum zone: 40–75 (long), 25–60 (short)
-  6. 1H must confirm direction (FVG / MSS / sweep)
-  7. Not Friday after 17:00 UTC / Not Sunday before 22:00 UTC
+  1. 4H candle CLOSED (never on open candle)
+  2. Market regime clear — Bull=longs only, Bear=shorts only, Neutral=no signals
+  3. Liquidity sweep complete: EQL swept (wick below, close above) → long
+                               EQH swept (wick above, close below) → short
+     Entering at a swing level = entering INTO the whale hunt.
+     We enter AFTER the hunt is done — real move follows the sweep.
+  4. RSI in valid momentum zone: 35–75 (long), 25–65 (short)
+  5. 1H must confirm direction (FVG / MSS / sweep)
+  6. Not Friday after 17:00 UTC / Not Sunday before 22:00 UTC
 
 Category scoring (per-category caps, total capped at 18):
   WYCKOFF         (max 5): Spring/Upthrust=3, SOS/SOW=2, Phase=1
@@ -479,36 +481,44 @@ class EliteStrategy:
             return None
 
         mregime = regime.get("regime", "neutral")
-        _sl_buf = atr * 0.2
 
-        # BOS lookback: did the break happen within the last 3 closed 4H bars?
-        # Gives a 12-hour window instead of a 4-hour single-candle gate.
-        bos_window = h4_df.iloc[-5:-2]["close"]  # 3 candles before the last closed bar
+        # ── Liquidity sweep detection — the real entry trigger ────────────────
+        # Entering at a swing high/low breakout = entering INTO the whale hunt.
+        # We wait for the sweep to COMPLETE (wick through EQL/EQH, close back inside),
+        # then enter in the direction of the real move AFTER the hunt.
+        liq_trigger = detect_liquidity(h4_df)
+        bullish_sweep = liq_trigger["eql_swept"] or any(
+            "Sellside" in str(l) for l in liq_trigger.get("label", [])
+        )
+        bearish_sweep = liq_trigger["eqh_swept"] or any(
+            "Buyside" in str(l) for l in liq_trigger.get("label", [])
+        )
 
         for direction in ("long", "short"):
-            # ── BOS check ─────────────────────────────────────────────────
+            # ── Sweep trigger ──────────────────────────────────────────────
             if direction == "long":
-                bos = price > swing_high and any(float(c) <= swing_high for c in bos_window)
-                if not bos:
+                # EQL swept: wick below equal lows, closed back above → real move up
+                if not bullish_sweep:
                     continue
-                if rsi < 40 or rsi > 80:
+                if rsi < 35 or rsi > 75:
                     continue
                 if mregime in ("bear", "neutral"):
                     continue
-                # SL below structural swing low — gives room for whale sweeps below the cluster
-                sl_dist   = max(price - (swing_low - atr * 0.5), atr * 1.0)
-                swing_ref = swing_high
+                # SL below the sweep wick — the hunt already happened here,
+                # whales won't come back below this level again
+                sl_dist   = max(price - (float(row["low"]) - atr * 0.3), atr * 0.8)
+                swing_ref = swing_low
             else:
-                bos = price < swing_low and any(float(c) >= swing_low for c in bos_window)
-                if not bos:
+                # EQH swept: wick above equal highs, closed back below → real move down
+                if not bearish_sweep:
                     continue
-                if rsi > 65 or rsi < 20:
+                if rsi > 65 or rsi < 25:
                     continue
                 if mregime in ("bull", "neutral"):
                     continue
-                # SL above structural swing high — gives room for whale sweeps above the cluster
-                sl_dist   = max((swing_high + atr * 0.5) - price, atr * 1.0)
-                swing_ref = swing_low
+                # SL above the sweep wick — hunt complete, no reason to return
+                sl_dist   = max((float(row["high"]) + atr * 0.3) - price, atr * 0.8)
+                swing_ref = swing_high
 
             # ── Liquidation map — block if unswept cluster between entry & SL ─
             # Equal highs/lows between entry and SL are stop magnets.
