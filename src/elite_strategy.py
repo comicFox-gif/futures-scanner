@@ -497,11 +497,33 @@ class EliteStrategy:
             "Buyside" in str(l) for l in liq_trigger.get("label", [])
         )
 
+        # ── 1H sweep confirmation — tighter trigger ───────────────────────────
+        # 4H sweep says the hunt happened. 1H sweep says it's already reversing.
+        # Both must agree — eliminates entries where only the 4H wick triggered.
+        h1_liq = detect_liquidity(h1_df) if h1_df is not None else {}
+        h1_bullish_sweep = h1_liq.get("eql_swept") or any(
+            "Sellside" in str(l) for l in h1_liq.get("label", [])
+        )
+        h1_bearish_sweep = h1_liq.get("eqh_swept") or any(
+            "Buyside" in str(l) for l in h1_liq.get("label", [])
+        )
+
+        # ── Wyckoff phase check — needed alongside sweep ──────────────────────
+        wyck_trigger = detect_wyckoff(h4_df)
+
         for direction in ("long", "short"):
-            # ── Sweep trigger ──────────────────────────────────────────────
+            # ── Sweep trigger (4H + 1H must both confirm) ─────────────────
             if direction == "long":
-                # EQL swept: wick below equal lows, closed back above → real move up
                 if not bullish_sweep:
+                    continue
+                # 1H must also show a sweep or stop hunt confirming reversal
+                if not h1_bullish_sweep:
+                    logger.debug(f"[ELITE] {symbol} LONG — 4H sweep OK but 1H sweep not confirmed")
+                    continue
+                # Wyckoff must be in accumulation — spring/SOS/SC are the elite entry points
+                wyck_aligned = wyck_trigger.get("phase") == "accumulation"
+                if not wyck_aligned:
+                    logger.debug(f"[ELITE] {symbol} LONG — Wyckoff not accumulation ({wyck_trigger.get('phase')})")
                     continue
                 if rsi < 35 or rsi > 75:
                     continue
@@ -512,8 +534,15 @@ class EliteStrategy:
                 sl_dist   = max(price - (float(row["low"]) - atr * 0.3), atr * 0.8)
                 swing_ref = swing_low
             else:
-                # EQH swept: wick above equal highs, closed back below → real move down
                 if not bearish_sweep:
+                    continue
+                if not h1_bearish_sweep:
+                    logger.debug(f"[ELITE] {symbol} SHORT — 4H sweep OK but 1H sweep not confirmed")
+                    continue
+                # Wyckoff must be in distribution — upthrust/SOW/BC are the elite entry points
+                wyck_aligned = wyck_trigger.get("phase") == "distribution"
+                if not wyck_aligned:
+                    logger.debug(f"[ELITE] {symbol} SHORT — Wyckoff not distribution ({wyck_trigger.get('phase')})")
                     continue
                 if rsi > 65 or rsi < 25:
                     continue
@@ -596,11 +625,11 @@ class EliteStrategy:
                     "vsa_score":  sc["vsa_score"],
                 }
 
-            # ── Claude visual confirmation ─────────────────────────────────
-            vision_ok, vision_reason = self.vision.confirm(h4_df, symbol, direction, liq_trigger)
-            if not vision_ok:
-                logger.info(f"[VISION] {symbol} {direction.upper()} rejected: {vision_reason}")
-                continue
+            # ── Claude visual confirmation (disabled — enable when backtested) ──
+            # vision_ok, vision_reason = self.vision.confirm(h4_df, symbol, direction, liq_trigger)
+            # if not vision_ok:
+            #     logger.info(f"[VISION] {symbol} {direction.upper()} rejected: {vision_reason}")
+            #     continue
 
             # ── TP — Weekly/Daily structural level at required RR ──────────
             struct_tp, struct_label = self._find_structural_tp(
