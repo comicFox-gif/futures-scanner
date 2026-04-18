@@ -56,6 +56,7 @@ from src.advanced_confluence import (
     calculate_liquidation_map,
     liq_map_clear_to_entry,
 )
+from src.chart_vision import ChartVision
 
 logger = logging.getLogger("futures_bot.elite")
 
@@ -90,6 +91,8 @@ class EliteStrategy:
         self.min_rr      = elite.get("min_rr",   2.0)
         self.trail_rr    = elite.get("trail_rr", 3.0)   # activates at 3:1
         self.kill_zone_only = elite.get("kill_zone_only", True)
+        vision_key = cfg.get("anthropic_api_key") or __import__("os").environ.get("ANTHROPIC_API_KEY", "")
+        self.vision = ChartVision(api_key=vision_key)
 
     # ── Indicators ────────────────────────────────────────────────────────────
 
@@ -592,6 +595,12 @@ class EliteStrategy:
                     "mmm_score":  sc["mmm_score"],
                     "vsa_score":  sc["vsa_score"],
                 }
+
+            # ── Claude visual confirmation ─────────────────────────────────
+            vision_ok, vision_reason = self.vision.confirm(h4_df, symbol, direction, liq_trigger)
+            if not vision_ok:
+                logger.info(f"[VISION] {symbol} {direction.upper()} rejected: {vision_reason}")
+                continue
 
             # ── TP — Weekly/Daily structural level at required RR ──────────
             struct_tp, struct_label = self._find_structural_tp(
