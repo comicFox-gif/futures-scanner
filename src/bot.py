@@ -936,7 +936,13 @@ class Bot:
         score = sig["score"]
         dir_tag = "🟢 LONG" if direction == "long" else "🔴 SHORT"
 
-        text = f"👀 Setup forming: {base}USDT {score}/18 {dir_tag}"
+        sweep_tag = "EQL Swept 💧" if direction == "long" else "EQH Swept 💧"
+        text = (
+            f"👀 <b>Setup Forming — {base}USDT</b>\n"
+            f"{dir_tag}  |  Score <b>{score}/18</b>\n"
+            f"Trigger: {sweep_tag}\n"
+            f"<i>Confluence building — not enough to signal yet.</i>"
+        )
         # Admin only — not public channel (not enough confluence yet)
         self._admin_send(text)
         logger.info(f"[FORMING] {direction.upper()} {symbol} score={score}/18")
@@ -966,12 +972,17 @@ class Bot:
         regime    = sig["regime"].upper()
         h1_reason = sig.get("h1_reason", "Waiting for 1H confirmation")
 
+        sweep_tag = "EQL Swept 💧" if direction == "long" else "EQH Swept 💧"
+        wyck_score = sig.get("wyck_score", 0)
+        liq_score  = sig.get("liq_score",  0)
         text = (
             f"👀 <b>SETUP WATCH — {base}</b>\n\n"
-            f"{dir_tag}  |  4H  |  Score <b>{score}/18</b>\n\n"
-            f"Setup is building — all gates passed except 1H confirmation.\n"
-            f"Waiting for: <i>{h1_reason}</i>\n\n"
-            f"Regime: <b>{regime}</b>  |  Target RR: <b>{tp_rr:.0f}:1</b>\n\n"
+            f"{dir_tag}  •  4H  •  Score <b>{score}/18</b>\n\n"
+            f"🏦 Trigger: <b>{sweep_tag}</b>\n"
+            f"📊 Wyckoff: <b>{wyck_score}/5</b>  |  Liquidity: <b>{liq_score}/4</b>\n"
+            f"🌍 Regime: <b>{regime}</b>  |  Target RR: <b>{tp_rr:.0f}:1</b>\n\n"
+            f"⏳ Waiting for 1H confirmation\n"
+            f"<i>{h1_reason}</i>\n\n"
             f"<i>Signal fires automatically when 1H confirms. Stay ready.</i>"
         )
         self.notifier.send(text)
@@ -1018,15 +1029,19 @@ class Bot:
         free_block = _block(sig.get("free_lines",  []))
         kz_block   = sig.get("kz_line", "⬜ Kill Zone +0")
 
+        sweep_tag  = "EQL Swept 💧 → LONG" if sig["direction"] == "long" else "EQH Swept 💧 → SHORT"
+        wyck_phase = sig.get("wyck_lines", ["N/A"])[0] if sig.get("wyck_lines") else "N/A"
         text = (
             f"🚨 <b>ELITE SIGNAL — #{pid:03d}</b>\n\n"
             f"Pair:      <b>{base}USDT</b>\n"
             f"Direction: <b>{dir_icon}</b>\n"
+            f"Trigger:   <b>{sweep_tag}</b>\n"
+            f"Wyckoff:   <b>{wyck_phase}</b>\n"
             f"Regime:    <b>{regime_str}</b>\n"
             f"Kill Zone: <b>{kz_label or 'N/A'}</b>\n"
             f"Score:     <b>{score}/18 {conf_bolts}</b>\n\n"
             f"Entry:  <code>{f(sig['entry'])}</code>\n"
-            f"SL:     <code>{f(sig['sl'])}</code>\n"
+            f"SL:     <code>{f(sig['sl'])}</code>  <i>(below sweep wick)</i>\n"
             f"TP:     <code>{f(sig['tp1'])}</code>\n"
             f"Risk:   <b>${risk_usdt:.0f}</b>\n"
             f"Reward: <b>${reward:.0f}</b>\n"
@@ -1103,11 +1118,13 @@ class Bot:
                     cat_lines.append(ln)
         cat_block = "\n".join(cat_lines) if cat_lines else ""
 
+        sweep_tag = "EQL Swept 💧" if direction == "long" else "EQH Swept 💧"
         pub_text = (
             f"🚨 <b>ELITE SIGNAL</b>\n\n"
-            f"{dir_tag}  •  <b>{base}</b>  |  4H\n"
-            f"{kz_line}\n"
-            + (f"1H: {h1_line}\n" if h1_line else "")
+            f"{dir_tag}  •  <b>{base}</b>  •  4H\n\n"
+            f"🏦 Trigger: <b>{sweep_tag}</b>  — whale hunt complete\n"
+            + (f"📊 1H: {h1_line}\n" if h1_line else "")
+            + (f"🕐 {kz_line}\n" if kz_line else "")
             + f"\n"
             f"📌 Entry   <code>{f(sig['entry'])}</code>\n"
             f"🛑 SL      <code>{f(sig['sl'])}</code>\n"
