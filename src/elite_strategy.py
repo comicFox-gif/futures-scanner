@@ -495,7 +495,8 @@ class EliteStrategy:
                     continue
                 if mregime in ("bear", "neutral"):
                     continue
-                sl_dist   = max(price - (float(row["low"]) - _sl_buf), atr * 0.5)
+                # SL below structural swing low — gives room for whale sweeps below the cluster
+                sl_dist   = max(price - (swing_low - atr * 0.5), atr * 1.0)
                 swing_ref = swing_high
             else:
                 bos = price < swing_low and any(float(c) >= swing_low for c in bos_window)
@@ -505,7 +506,8 @@ class EliteStrategy:
                     continue
                 if mregime in ("bull", "neutral"):
                     continue
-                sl_dist   = max((float(row["high"]) + _sl_buf) - price, atr * 0.5)
+                # SL above structural swing high — gives room for whale sweeps above the cluster
+                sl_dist   = max((swing_high + atr * 0.5) - price, atr * 1.0)
                 swing_ref = swing_low
 
             # ── Liquidation map — block if unswept cluster between entry & SL ─
