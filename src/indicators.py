@@ -18,6 +18,11 @@ def compute_emas(df: pd.DataFrame, periods: list[int]) -> pd.DataFrame:
 def compute_macd(df: pd.DataFrame, fast: int, slow: int, signal: int) -> pd.DataFrame:
     """Add MACD columns: macd, macd_signal, macd_hist."""
     macd = ta.macd(df["close"], fast=fast, slow=slow, signal=signal)
+    if macd is None:
+        df["macd"] = float("nan")
+        df["macd_signal"] = float("nan")
+        df["macd_hist"] = float("nan")
+        return df
     df["macd"] = macd[f"MACD_{fast}_{slow}_{signal}"]
     df["macd_signal"] = macd[f"MACDs_{fast}_{slow}_{signal}"]
     df["macd_hist"] = macd[f"MACDh_{fast}_{slow}_{signal}"]
