@@ -508,47 +508,28 @@ class EliteStrategy:
             "Buyside" in str(l) for l in h1_liq.get("label", [])
         )
 
-        # ── Wyckoff phase check — needed alongside sweep ──────────────────────
-        wyck_trigger = detect_wyckoff(h4_df)
+        # BOS lookback window: did the sweep complete within the last 3 closed 4H bars?
+        # Gives a 12-hour confirmation window instead of single-candle only.
+        bos_window = h4_df.iloc[-5:-2]["close"]
 
         for direction in ("long", "short"):
-            # ── Sweep trigger (4H + 1H must both confirm) ─────────────────
+            # ── Sweep trigger (4H must confirm, 1H confirms via FVG/MSS/sweep) ───
             if direction == "long":
                 if not bullish_sweep:
-                    continue
-                # 1H must also show a sweep or stop hunt confirming reversal
-                if not h1_bullish_sweep:
-                    logger.debug(f"[ELITE] {symbol} LONG — 4H sweep OK but 1H sweep not confirmed")
-                    continue
-                # Wyckoff must be in accumulation — spring/SOS/SC are the elite entry points
-                wyck_aligned = wyck_trigger.get("phase") == "accumulation"
-                if not wyck_aligned:
-                    logger.debug(f"[ELITE] {symbol} LONG — Wyckoff not accumulation ({wyck_trigger.get('phase')})")
                     continue
                 if rsi < 35 or rsi > 75:
                     continue
                 if mregime in ("bear", "neutral"):
                     continue
-                # SL below the sweep wick — the hunt already happened here,
-                # whales won't come back below this level again
                 sl_dist   = max(price - (float(row["low"]) - atr * 0.3), atr * 0.8)
                 swing_ref = swing_low
             else:
                 if not bearish_sweep:
                     continue
-                if not h1_bearish_sweep:
-                    logger.debug(f"[ELITE] {symbol} SHORT — 4H sweep OK but 1H sweep not confirmed")
-                    continue
-                # Wyckoff must be in distribution — upthrust/SOW/BC are the elite entry points
-                wyck_aligned = wyck_trigger.get("phase") == "distribution"
-                if not wyck_aligned:
-                    logger.debug(f"[ELITE] {symbol} SHORT — Wyckoff not distribution ({wyck_trigger.get('phase')})")
-                    continue
                 if rsi > 65 or rsi < 25:
                     continue
                 if mregime in ("bull", "neutral"):
                     continue
-                # SL above the sweep wick — hunt complete, no reason to return
                 sl_dist   = max((float(row["high"]) + atr * 0.3) - price, atr * 0.8)
                 swing_ref = swing_high
 
