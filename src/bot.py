@@ -796,8 +796,10 @@ class Bot:
                         signals_found += 1
 
             except Exception as e:
-                logger.error(f"Error scanning {symbol}: {e}\n{traceback.format_exc()}")
-                self.notifier.error_alert(f"Scanning {symbol}", str(e)[:200])
+                tb = traceback.format_exc()
+                logger.error(f"Error scanning {symbol}: {e}\n{tb}")
+                tb_tail = "\n".join(tb.strip().splitlines()[-6:])
+                self.notifier.error_alert(f"Scanning {symbol}", f"{e}\n---\n{tb_tail}"[:800])
 
         signal_note = f" | {signals_found} signal(s) queued" if signals_found else " | No signals"
         logger.info(
@@ -1594,8 +1596,11 @@ class Bot:
                 logger.info("Stopped by user.")
                 break
             except Exception as e:
-                logger.error(f"Loop error: {e}\n{traceback.format_exc()}")
-                self.notifier.error_alert("Main loop", str(e)[:200])
+                tb = traceback.format_exc()
+                logger.error(f"Loop error: {e}\n{tb}")
+                # Include last 3 traceback lines in Telegram so we can pinpoint the exact line
+                tb_tail = "\n".join(tb.strip().splitlines()[-6:])
+                self.notifier.error_alert("Main loop", f"{e}\n---\n{tb_tail}"[:800])
 
             time.sleep(60)   # poll Telegram + positions every 60s
 
