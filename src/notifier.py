@@ -2,6 +2,16 @@
 Telegram Notifier
 ------------------
 Clean signal format for paid channel distribution.
+
+v2 patches applied:
+  - _stars() fixed for 0–20 quality scale
+  - _confluence_block() denominator fixed /5 → /20
+  - scanner_started() min score corrected 5 → 12
+  - warning_signal() tp label fixed (was fetching tp3, labelling TP2)
+  - confirmed_signal() now shows RSI; confluence param wired up
+  - elite_confirmed_signal() added — full 20-pt breakdown
+  - forming_signal() added — score 6–11 setup-building alert
+  - watching_signal() added — score passed but 1H not yet aligned
 """
 
 import logging
@@ -16,6 +26,8 @@ _SUB_BOT_KEY = os.getenv("SUB_BOT_API_KEY", "")
 
 LINE  = "━" * 30
 DLINE = "─" * 30
+
+_MAX_SCORE = 20
 
 
 class Notifier:
@@ -145,7 +157,9 @@ class Notifier:
         return (entry - level) / entry * 100
 
     def _stars(self, quality: int) -> str:
-        return "⭐" * quality + "☆" * (5 - quality)
+        # FIX: quality is now 0–20; map to 5-star scale before rendering
+        filled = min(5, round(quality / _MAX_SCORE * 5))
+        return "⭐" * filled + "☆" * (5 - filled)
 
     def _dir_tag(self, direction: str) -> str:
         return "🟢 LONG" if direction == "long" else "🔴 SHORT"
@@ -158,6 +172,13 @@ class Notifier:
             return f"⚡ <b>{self.channel}</b>  |  {self._ts()}"
         return f"<i>{self._ts()}</i>"
 
+    def _conf_label(self, score: int) -> str:
+        """Map 20-pt score to confidence label matching elite_strategy.py."""
+        if score >= 18: return "ELITE 🏆"
+        if score >= 14: return "Strong ⚡"
+        if score >= 10: return "Medium"
+        return "Base"
+
     def _signal_block(self, no: int, strategy: str, quality: int,
                       direction: str, symbol: str,
                       price: float, sl: float, tp1: float, tp2: float, tp3: float,
@@ -169,11 +190,11 @@ class Notifier:
         """
         if fmt is None:
             fmt = self._fmt
-        f       = fmt
-        stars   = self._stars(quality)
-        dir_tag = self._dir_tag(direction)
-        qty     = self._qty_for_risk(price, sl)
-        base    = self._base_currency(symbol)
+        f          = fmt
+        stars      = self._stars(quality)
+        dir_tag    = self._dir_tag(direction)
+        qty        = self._qty_for_risk(price, sl)
+        base       = self._base_currency(symbol)
         extra_line = f"  ·  {extra}" if extra else ""
         return (
             f"{dir_tag}  •  <b>{symbol}</b>  #{no:03d}\n"
@@ -183,6 +204,228 @@ class Notifier:
             f"🎯 TP1    <code>{f(tp1)}</code>\n"
             f"🏆 TP2    <code>{f(tp2)}</code>\n\n"
             f"📦 Qty  <code>{self._fmt_qty(qty)} {base}</code>{extra_line}"
+        )
+
+    # ------------------------------------------------------------------
+    # NEW — Elite confluence score block
+    # ------------------------------------------------------------------
+
+    def _elite_score_block(self, sig: dict) -> str:
+        """
+        Render the full 20-point confluence breakdown from an Elite signal dict.
+        Uses the per-category *_lines keys populated by _score_all_categories().
+        """
+        total      = sig.get("score", 0)
+        conf_label = self._conf_label(total)
+
+        sections = []
+
+        # Kill zone + AMD
+        kz_line = sig.get("kz_line", "")
+        if kz_line:
+            sections.append(kz_line)
+        for line in sig.get("amd_lines", []):
+            sections.append(line)
+
+        # Wyckoff
+        for line in sig.get("wyck_lines", []):
+            sections.append(line)
+
+        # Liquidity
+        for line in sig.get("liq_lines", []):
+            sections.append(line)
+
+        # MMM
+        for line in sig.get("mmm_lines", []):
+            sections.append(line)
+
+        # VSA
+        for line in sig.get("vsa_lines", []):
+            sections.append(line)
+
+        # Intermarket
+        for line in sig.get("im_lines", []):
+            sections.append(line)
+
+        # Free data (funding, OI, L/S, F&G)
+        for line in sig.get("free_lines", []):
+            sections.append(line)
+
+        # 1H confirmation
+        for line in sig.get("h1_lines", []):
+            sections.append(line)
+
+        lines_str = "\n".join(sections) if sections else "—"
+
+        # Liquidation map proximity
+        liq_above = sig.get("liq_nearest_above")
+        liq_below = sig.get("liq_nearest_below")
+        liq_lines = []
+        if liq_above:
+            str_a = sig.get("liq_nearest_above_strength", 0)
+            liq_lines.append(f"  ↑ Resistance cluster  <code>{self._fmt(liq_above)}</code>  (str {str_a})")
+        if liq_below:
+            str_b = sig.get("liq_nearest_below_strength", 0)
+            liq_lines.append(f"  ↓ Support cluster     <code>{self._fmt(liq_below)}</code>  (str {str_b})")
+        liq_map_str = "\n" + "\n".join(liq_lines) if liq_lines else ""
+
+        return (
+            f"{DLINE}\n"
+            f"<b>Score  {total}/{_MAX_SCORE}  [{conf_label}]</b>\n"
+            f"{DLINE}\n"
+            f"{lines_str}"
+            f"{liq_map_str}"
+        )
+
+    # ------------------------------------------------------------------
+    # NEW — Elite confirmed signal   (stage: 2)
+    # ------------------------------------------------------------------
+
+    def elite_confirmed_signal(self, sig: dict):
+        """
+        Full confirmed signal for the Elite 4H BOS strategy.
+        Renders entry/SL/TP block + complete 20-point confluence breakdown.
+
+        Expects the dict returned by EliteStrategy.generate_signal() with
+        stage=2 (i.e. all gates passed, 1H aligned, score >= min_score).
+        """
+        self._signal_no += 1
+
+        direction  = sig["direction"]
+        symbol     = sig["symbol"]
+        price      = sig["entry"]
+        sl         = sig["sl"]
+        tp         = sig["tp1"]          # tp1/tp2/tp3 are same value currently
+        score      = sig.get("score", 0)
+        tp_rr      = sig.get("tp_rr", 0)
+        rsi        = sig.get("rsi", 0)
+        risk_usdt  = sig.get("risk_usdt", 10.0)
+        atr        = sig.get("atr", 0)
+        trail_act  = sig.get("trail_activate")
+        h1_label   = sig.get("h1_label", "")
+        conf_label = self._conf_label(score)
+        stars      = self._stars(score)
+        dir_tag    = self._dir_tag(direction)
+        base       = self._base_currency(symbol)
+        qty        = self._qty_for_risk(price, sl, risk_usdt)
+        sl_pct     = abs(price - sl) / price * 100
+
+        trail_line = (
+            f"\n🔁 Trail  <code>{self._fmt(trail_act)}</code>  (activates at 3:1)"
+            if trail_act else ""
+        )
+
+        header = (
+            f"{dir_tag}  •  <b>{symbol}</b>  #{self._signal_no:03d}\n"
+            f"Elite 4H BOS  {stars}\n\n"
+            f"📌 Entry    <code>{self._fmt(price)}</code>\n"
+            f"🛑 SL         <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 TP         <code>{self._fmt(tp)}</code>  ({tp_rr:.1f}:1 RR)\n"
+            f"{trail_line}\n"
+            f"📦 Risk  <code>${risk_usdt:.0f}</code>  ·  "
+            f"Qty  <code>{self._fmt_qty(qty)} {base}</code>  ·  "
+            f"RSI <code>{rsi:.0f}</code>"
+        )
+
+        score_block = self._elite_score_block(sig)
+
+        footer = (
+            f"\n{DLINE}\n"
+            f"1H: <i>{h1_label}</i>\n"
+            f"{self._footer()}"
+        )
+
+        msg = header + "\n" + score_block + footer
+        self.send_signal(msg, is_forex=self._is_forex_symbol(symbol))
+
+    # ------------------------------------------------------------------
+    # NEW — Forming alert   (score 6–11, below min_score threshold)
+    # ------------------------------------------------------------------
+
+    def forming_signal(self, sig: dict):
+        """
+        Alert sent when a setup is building but hasn't reached min_score yet.
+        Gives subscribers early visibility to watch a pair.
+
+        Expects the dict returned by EliteStrategy.generate_signal() with
+        forming=True.
+        """
+        direction  = sig["direction"]
+        symbol     = sig["symbol"]
+        price      = sig["entry"]
+        score      = sig.get("score", 0)
+        h1_aligned = sig.get("h1_aligned", None)   # may be absent in older signals
+
+        dir_tag   = self._dir_tag(direction)
+        h1_note   = ""
+        if h1_aligned is True:
+            h1_note = "  ·  1H ✅"
+        elif h1_aligned is False:
+            h1_note = "  ·  1H ⏳"
+
+        self.send(
+            f"👀 <b>Setup Forming</b>  [Elite 4H BOS]\n"
+            f"{DLINE}\n"
+            f"{dir_tag}  •  <b>{symbol}</b>\n"
+            f"Price  <code>{self._fmt(price)}</code>\n"
+            f"Score  <code>{score}/{_MAX_SCORE}</code>  (need 12){h1_note}\n"
+            f"{DLINE}\n"
+            f"<i>Watching for confluence to build — not a signal yet.</i>\n"
+            f"<i>{self._ts()}</i>"
+        )
+
+    # ------------------------------------------------------------------
+    # NEW — Watching alert   (score >= min_score, 1H not yet aligned)
+    # ------------------------------------------------------------------
+
+    def watching_signal(self, sig: dict):
+        """
+        Alert sent when score passes min_score but 1H hasn't confirmed yet.
+        This is the most actionable pre-signal — subscribers should be ready.
+
+        Expects the dict returned by EliteStrategy.generate_signal() with
+        watching=True.
+        """
+        direction = sig["direction"]
+        symbol    = sig["symbol"]
+        price     = sig["entry"]
+        sl        = sig["sl"]
+        score     = sig.get("score", 0)
+        tp_rr     = sig.get("tp_rr", 0)
+        h1_reason = sig.get("h1_reason", "1H not yet aligned")
+        conf_label = self._conf_label(score)
+
+        dir_tag  = self._dir_tag(direction)
+        sl_pct   = abs(price - sl) / price * 100
+
+        # Per-category mini-summary (just the scores, no full lines)
+        wyck_s = sig.get("wyck_score", 0)
+        liq_s  = sig.get("liq_score",  0)
+        mmm_s  = sig.get("mmm_score",  0)
+        vsa_s  = sig.get("vsa_score",  0)
+
+        cat_line = (
+            f"Wyckoff <code>{wyck_s}</code>  "
+            f"Liq <code>{liq_s}</code>  "
+            f"MMM <code>{mmm_s}</code>  "
+            f"VSA <code>{vsa_s}</code>"
+        )
+
+        self.send(
+            f"⏳ <b>Waiting for 1H</b>  [Elite 4H BOS]\n"
+            f"{DLINE}\n"
+            f"{dir_tag}  •  <b>{symbol}</b>\n"
+            f"Score  <code>{score}/{_MAX_SCORE}</code>  [{conf_label}]  ·  Need 1H confirm\n"
+            f"{DLINE}\n"
+            f"📌 Entry  <code>{self._fmt(price)}</code>\n"
+            f"🛑 SL       <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
+            f"🎯 Target  {tp_rr:.0f}:1 RR minimum\n"
+            f"{DLINE}\n"
+            f"{cat_line}\n"
+            f"{DLINE}\n"
+            f"<i>1H: {h1_reason}</i>\n"
+            f"<i>Signal fires when FVG / MSS / sweep confirms on 1H close.</i>\n"
+            f"<i>{self._ts()}</i>"
         )
 
     # ------------------------------------------------------------------
@@ -210,7 +453,7 @@ class Notifier:
             f"<b>Entry Gates (ALL required)</b>\n"
             f"  ⏰ Kill Zone: London 07-09 · NY 12-14 UTC\n"
             f"  📊 Regime: Bull=longs · Bear=shorts · Neutral=none\n"
-            f"  🏆 Score: 5/20 min · Categories: Wyckoff+Liq+MMM+VSA\n"
+            f"  🏆 Score: 12/20 min · Wyckoff+Liq+MMM+VSA+1H+KZ\n"  # FIX: was 5/20
             f"  ✅ 1H aligned: FVG or MSS or sweep confirms\n"
             f"{DLINE}\n"
             f"<b>Execution</b>\n"
@@ -235,7 +478,8 @@ class Notifier:
         symbol    = signal.symbol if hasattr(signal, "symbol") else signal["symbol"]
         price     = signal.entry_price if hasattr(signal, "entry_price") else signal["entry"]
         sl        = signal.stop_loss if hasattr(signal, "stop_loss") else signal["sl"]
-        tp3       = signal.tp3 if hasattr(signal, "tp3") else signal["tp3"]
+        # FIX: was fetching tp3 but labelling it TP2 — now consistently uses tp2
+        tp2       = signal.tp2 if hasattr(signal, "tp2") else signal["tp2"]
         rsi       = signal.rsi if hasattr(signal, "rsi") else signal["rsi"]
         reason    = signal.reason if hasattr(signal, "reason") else signal["reason"]
         sl_pct    = abs(price - sl) / price * 100
@@ -246,14 +490,14 @@ class Notifier:
             f"{dir_tag}  •  <b>{symbol}</b>\n"
             f"Price  <code>{self._fmt(price)}</code>   RSI <code>{rsi:.0f}</code>\n"
             f"🛑 SL  <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
-            f"🏆 TP2 <code>{self._fmt(tp3)}</code>\n"
+            f"🏆 TP2 <code>{self._fmt(tp2)}</code>\n"   # FIX: label now matches value
             f"{DLINE}\n"
             f"<i>{reason}</i>\n"
             f"<i>{self._ts()}</i>"
         )
 
     # ------------------------------------------------------------------
-    # Stage 2 — CONFIRMED (crypto)
+    # Stage 2 — CONFIRMED (crypto, non-Elite strategies)
     # ------------------------------------------------------------------
 
     def _confluence_block(self, conf_score: int, conf_labels: list) -> str:
@@ -261,7 +505,7 @@ class Notifier:
         labels_str = "\n".join(conf_labels) if conf_labels else "—"
         return (
             f"\n{DLINE}\n"
-            f"<b>Confluence  {conf_score}/5</b>\n"
+            f"<b>Confluence  {conf_score}/{_MAX_SCORE}</b>\n"   # FIX: was /5
             f"{labels_str}"
         )
 
@@ -283,11 +527,24 @@ class Notifier:
             self._signal_no, strategy_name, quality,
             direction, symbol, price, sl, tp1, tp2, tp3, reason,
         )
+
+        # FIX: now appends RSI and volume to the message
+        msg += f"\n\nRSI <code>{rsi:.0f}</code>  ·  Vol <code>{vol:.2f}x</code>"
+
+        # FIX: confluence param now rendered if provided
+        if confluence:
+            conf_score, conf_labels = confluence
+            msg += self._confluence_block(conf_score, conf_labels)
+
         forex_msg = self._signal_block(
             self._signal_no, strategy_name, quality,
             direction, symbol, price, sl, tp1, tp2, tp3, reason,
             fmt=self._fmt_fx,
         )
+        if confluence:
+            conf_score, conf_labels = confluence
+            forex_msg += self._confluence_block(conf_score, conf_labels)
+
         self.send_signal(msg, forex_message=forex_msg, is_forex=self._is_forex_symbol(symbol))
 
     # ------------------------------------------------------------------
