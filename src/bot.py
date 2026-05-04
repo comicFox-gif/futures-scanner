@@ -872,9 +872,8 @@ class Bot:
         if not sig:
             return False
 
-        # ── "Forming" alert — scored ≥3 but below signal threshold ──────
+        # Forming signals (score 6–11) are below the 12-point threshold — suppress silently
         if sig.get("forming"):
-            self._send_forming_alert(sig)
             return False
 
         # ── "Watching" alert — setup scored but 1H not confirmed yet ──────
