@@ -876,8 +876,9 @@ class Bot:
         if sig.get("forming"):
             return False
 
-        # Watching signals (score ≥12 but 1H not yet confirmed) — suppress until fully confirmed
+        # ── "Watching" alert — score ≥12 but 1H not confirmed yet ──────
         if sig.get("watching"):
+            self._send_watching_alert(sig)
             return False
 
         # ── Guards for real signal queuing only (not forming/watching) ────
