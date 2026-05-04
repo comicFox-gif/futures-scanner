@@ -1,4 +1,4 @@
-## “””
+“””
 Advanced Confluence Detectors — v2.0
 
 Rebuilt scoring system:
