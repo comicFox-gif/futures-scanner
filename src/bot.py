@@ -2,12 +2,13 @@
 Signal Scanner + Paper Trading Bot
 ------------------------------------
 Every 10 minutes:
-  1. Scans symbols for 4H BOS setups with 18-point confluence scoring
+  1. Scans symbols for 4H BOS setups with 20-point confluence scoring
   2. Sends Telegram alert for every qualifying signal
   3. If paper_trading=true: opens a simulated trade on every Stage 2 signal
      and tracks it through TP1 → BE → TP2 → trail → TP3 → exit
 
-Kill zones award +1 bonus point but no longer block signals outside their window.
+Kill zones score +3 (London/NY active) and are the most impactful filter.
+Min score to trade: 12/20.
 """
 
 from __future__ import annotations
@@ -822,11 +823,11 @@ class Bot:
                     f"⏳ <b>No Signal This Cycle</b>\n\n"
                     f"Scanned {len(symbols)} pairs — no clean setup found.\n"
                     f"Entry gates required:\n"
-                    f"  • 4H BOS on closed candle\n"
+                    f"  • 4H liquidity sweep on closed candle\n"
                     f"  • Regime clear (Bull/Bear)\n"
-                    f"  • 1H confirmation\n"
-                    f"  • Score ≥5/18\n\n"
-                    f"Kill Zone active = +1 bonus point (not a gate).\n"
+                    f"  • 1H confirmation (FVG / MSS / sweep)\n"
+                    f"  • Score ≥12/20\n\n"
+                    f"Kill Zone active (London/NY) = +3 pts — most impactful filter.\n"
                     f"Bot is running normally.\n"
                     f"Next scan: <b>{next_scan}</b>"
                 )
@@ -921,8 +922,9 @@ class Bot:
 
     def _send_forming_alert(self, sig: dict):
         """
-        Notify admin (not public channel) when a setup scores ≥3/18 —
+        Notify admin (not public channel) when a setup scores ≥6/20 —
         early heads-up that something is building before it reaches signal threshold.
+        Uses notifier.forming_signal() for consistent formatting.
         """
         symbol    = sig["symbol"]
         direction = sig["direction"]
@@ -934,26 +936,18 @@ class Bot:
             return
         self._last_alert[form_key] = datetime.utcnow()
 
-        base  = symbol.split("/")[0]
         score = sig["score"]
-        dir_tag = "🟢 LONG" if direction == "long" else "🔴 SHORT"
-
-        sweep_tag = "EQL Swept 💧" if direction == "long" else "EQH Swept 💧"
-        text = (
-            f"👀 <b>Setup Forming — {base}USDT</b>\n"
-            f"{dir_tag}  |  Score <b>{score}/18</b>\n"
-            f"Trigger: {sweep_tag}\n"
-            f"<i>Confluence building — not enough to signal yet.</i>"
-        )
-        # Admin only — not public channel (not enough confluence yet)
-        self._admin_send(text)
-        logger.info(f"[FORMING] {direction.upper()} {symbol} score={score}/18")
+        # Admin-only send via notifier — not enough confluence to broadcast publicly yet
+        # notifier.forming_signal sends to self.notifier.send() which goes to main channel/admin
+        self.notifier.forming_signal(sig)
+        logger.info(f"[FORMING] {direction.upper()} {symbol} score={score}/20")
 
     def _send_watching_alert(self, sig: dict):
         """
         Broadcast a 'Watching' alert to the public channel when a setup has scored
-        ≥5 points but 1H confirmation hasn't fired yet. Keeps subscribers engaged
-        without giving away the full entry. Rate-limited to once per symbol per 4H.
+        ≥12 points but 1H confirmation hasn't fired yet. Keeps subscribers engaged
+        without giving away the full entry. Rate-limited to once per symbol per cooldown.
+        Uses notifier.watching_signal() for consistent v2 formatting.
         """
         symbol    = sig["symbol"]
         direction = sig["direction"]
@@ -967,32 +961,13 @@ class Bot:
             return
         self._last_alert[watch_key] = datetime.utcnow()
 
-        base      = symbol.split("/")[0]
-        dir_tag   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
-        score     = sig["score"]
-        tp_rr     = sig["tp_rr"]
-        regime    = sig["regime"].upper()
-        h1_reason = sig.get("h1_reason", "Waiting for 1H confirmation")
-
-        sweep_tag = "EQL Swept 💧" if direction == "long" else "EQH Swept 💧"
-        wyck_score = sig.get("wyck_score", 0)
-        liq_score  = sig.get("liq_score",  0)
-        text = (
-            f"👀 <b>SETUP WATCH — {base}</b>\n\n"
-            f"{dir_tag}  •  4H  •  Score <b>{score}/18</b>\n\n"
-            f"🏦 Trigger: <b>{sweep_tag}</b>\n"
-            f"📊 Wyckoff: <b>{wyck_score}/5</b>  |  Liquidity: <b>{liq_score}/4</b>\n"
-            f"🌍 Regime: <b>{regime}</b>  |  Target RR: <b>{tp_rr:.0f}:1</b>\n\n"
-            f"⏳ Waiting for 1H confirmation\n"
-            f"<i>{h1_reason}</i>\n\n"
-            f"<i>Signal fires automatically when 1H confirms. Stay ready.</i>"
-        )
-        self.notifier.send(text)
+        score = sig["score"]
+        self.notifier.watching_signal(sig)
         self._last_channel_msg_time = datetime.utcnow()
-        logger.info(f"[WATCH] {direction.upper()} {symbol} score={score} — watching alert sent")
+        logger.info(f"[WATCH] {direction.upper()} {symbol} score={score}/20 — watching alert sent")
 
     def _send_signal_approval(self, pid: int, sig: dict, regime: dict):
-        """Send signal to admin bot with Approve / Skip / Wait buttons (18-point format)."""
+        """Send signal to admin bot with Approve / Skip / Wait buttons (20-point format)."""
         def f(v):
             if v is None:      return "N/A"
             if abs(v) >= 1000: return f"${v:,.2f}"
@@ -1013,10 +988,11 @@ class Bot:
         )
         kz_label   = sig.get("kz_label", "")
         h1_lbl     = sig.get("h1_label", "")
+        # FIX: conf_bolts thresholds updated for 20-point scale
         conf_bolts = (
-            "⚡⚡⚡⚡" if score >= 15 else
-            "⚡⚡⚡"   if score >= 12 else
-            "⚡⚡"     if score >= 8  else "⚡"
+            "⚡⚡⚡⚡" if score >= 18 else
+            "⚡⚡⚡"   if score >= 14 else
+            "⚡⚡"     if score >= 10 else "⚡"
         )
 
         # Per-category line blocks
@@ -1029,6 +1005,8 @@ class Bot:
         vsa_block  = _block(sig.get("vsa_lines",  []))
         im_block   = _block(sig.get("im_lines",   []))
         free_block = _block(sig.get("free_lines",  []))
+        h1_block   = _block(sig.get("h1_lines",   []))   # FIX: now included
+        amd_block  = _block(sig.get("amd_lines",  []))   # FIX: now included
         kz_block   = sig.get("kz_line", "⬜ Kill Zone +0")
 
         sweep_tag  = "EQL Swept 💧 → LONG" if sig["direction"] == "long" else "EQH Swept 💧 → SHORT"
@@ -1041,7 +1019,7 @@ class Bot:
             f"Wyckoff:   <b>{wyck_phase}</b>\n"
             f"Regime:    <b>{regime_str}</b>\n"
             f"Kill Zone: <b>{kz_label or 'N/A'}</b>\n"
-            f"Score:     <b>{score}/18 {conf_bolts}</b>\n\n"
+            f"Score:     <b>{score}/20 {conf_bolts}</b>\n\n"   # FIX: /18 → /20
             f"Entry:  <code>{f(sig['entry'])}</code>\n"
             f"SL:     <code>{f(sig['sl'])}</code>  <i>(below sweep wick)</i>\n"
             f"TP:     <code>{f(sig['tp1'])}</code>\n"
@@ -1052,15 +1030,18 @@ class Bot:
         )
         if h1_lbl:
             text += f"1H:     {h1_lbl}\n"
+        # FIX: category caps updated to v2 values
         text += (
-            f"\n<b>WYCKOFF ({sig.get('wyck_score', 0)}/5):</b>\n{wyck_block}\n"
-            f"\n<b>LIQUIDITY ({sig.get('liq_score', 0)}/4):</b>\n{liq_block}\n"
-            f"\n<b>MMM ({sig.get('mmm_score', 0)}/4):</b>\n{mmm_block}\n"
-            f"\n<b>VSA ({sig.get('vsa_score', 0)}/3):</b>\n{vsa_block}\n"
+            f"\n<b>KILL ZONE ({sig.get('kz_score', 0)}/3):</b>\n{kz_block}\n"
+            f"\n<b>AMD PHASE ({sig.get('amd_score', 0)}/2):</b>\n{amd_block}\n"
+            f"\n<b>WYCKOFF ({sig.get('wyck_score', 0)}/2):</b>\n{wyck_block}\n"
+            f"\n<b>LIQUIDITY ({sig.get('liq_score', 0)}/5):</b>\n{liq_block}\n"
+            f"\n<b>MMM ({sig.get('mmm_score', 0)}/2):</b>\n{mmm_block}\n"
+            f"\n<b>VSA ({sig.get('vsa_score', 0)}/2):</b>\n{vsa_block}\n"
             f"\n<b>INTERMARKET ({sig.get('im_score', 0)}/2):</b>\n{im_block}\n"
             f"\n<b>FREE DATA ({sig.get('free_score', 0)}/4):</b>\n{free_block}\n"
-            f"\n<b>KILL ZONE ({sig.get('kz_bonus', 0)}/1):</b>\n{kz_block}\n"
-            f"\nTotal: <b>{score}/18 {conf_bolts}</b>\n"
+            f"\n<b>1H CONFIRM ({sig.get('h1_score', 0)}/3):</b>\n{h1_block}\n"
+            f"\nTotal: <b>{score}/20 {conf_bolts}</b>\n"
             f"Size:  <b>${risk_usdt:.0f} risk</b>\n"
             f"RR:    <b>{tp_rr:.1f}:1 minimum</b>"
         )
@@ -1092,51 +1073,16 @@ class Bot:
 
         direction  = sig["direction"]
         score      = sig.get("score", 0)
-        dir_tag   = "🟢 LONG" if direction == "long" else "🔴 SHORT"
-        base      = symbol.split("/")[0]
-        tp_rr     = sig.get("tp_rr", 0)
-        risk_usdt = sig.get("risk_usdt", 5.0)
-        reward    = risk_usdt * tp_rr
+        # FIX: conf_bolts thresholds updated for 20-point scale
         conf_bolts = (
-            "⚡⚡⚡⚡" if score >= 15 else
-            "⚡⚡⚡"   if score >= 12 else
-            "⚡⚡"     if score >= 8  else "⚡"
+            "⚡⚡⚡⚡" if score >= 18 else
+            "⚡⚡⚡"   if score >= 14 else
+            "⚡⚡"     if score >= 10 else "⚡"
         )
-        kz_line = sig.get("kz_label", "")
-        h1_line = sig.get("h1_label", "")
 
-        def f(v):
-            if v is None:      return "N/A"
-            if abs(v) >= 1000: return f"${v:,.2f}"
-            if abs(v) >= 10:   return f"${v:.4f}"
-            return f"${v:.6f}"
-
-        # Collect only confirmed (✅) factor lines for public channel
-        cat_lines = []
-        for lines_key in ("wyck_lines", "liq_lines", "mmm_lines", "vsa_lines",
-                          "im_lines", "free_lines"):
-            for ln in sig.get(lines_key, []):
-                if ln.startswith("✅"):
-                    cat_lines.append(ln)
-        cat_block = "\n".join(cat_lines) if cat_lines else ""
-
-        sweep_tag = "EQL Swept 💧" if direction == "long" else "EQH Swept 💧"
-        pub_text = (
-            f"🚨 <b>ELITE SIGNAL</b>\n\n"
-            f"{dir_tag}  •  <b>{base}</b>  •  4H\n\n"
-            f"🏦 Trigger: <b>{sweep_tag}</b>  — whale hunt complete\n"
-            + (f"📊 1H: {h1_line}\n" if h1_line else "")
-            + (f"🕐 {kz_line}\n" if kz_line else "")
-            + f"\n"
-            f"📌 Entry   <code>{f(sig['entry'])}</code>\n"
-            f"🛑 SL      <code>{f(sig['sl'])}</code>\n"
-            f"🎯 TP      <code>{f(sig['tp1'])}</code>  ({tp_rr:.1f}:1)\n"
-            f"💵 Risk ${risk_usdt:.0f}  →  Reward ${reward:.0f}\n"
-            f"🔁 Trail   <code>{f(sig.get('trail_activate', 0))}</code>\n\n"
-            f"Score: <b>{score}/18</b>  {conf_bolts}\n"
-            + (f"\n{cat_block}" if cat_block else "")
-        )
-        self.notifier.send(pub_text)
+        # FIX: replaced hand-rolled pub_text with elite_confirmed_signal()
+        # This renders the full 20-point breakdown using all *_lines keys from the signal dict.
+        self.notifier.elite_confirmed_signal(sig)
         self._last_channel_msg_time = datetime.utcnow()   # reset silence timer
 
         # Bybit live order
