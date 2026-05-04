@@ -468,7 +468,7 @@ class Notifier:
             f"  ✅ 1H aligned: FVG or MSS or sweep confirms\n"
             f"{DLINE}\n"
             f"<b>Execution</b>\n"
-            f"  🎯 Min RR: <b>5:1</b>  ·  TP: Weekly/Daily levels\n"
+            f"  🎯 Min RR: <b>2–5:1</b> (by score)  ·  TP: Weekly/Daily levels\n"
             f"  🔁 Trail: activates at 3:1\n"
             f"  📡 Scan: every 4H close (00·04·08·12·16·20 UTC)\n"
             f"{DLINE}\n"

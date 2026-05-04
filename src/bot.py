@@ -1344,7 +1344,7 @@ class Bot:
                     f"{self.tf_trend} entry · {self.tf_entry} confirmation")
         logger.info(f"Scan cycle: 4H closes (00/04/08/12/16/20 UTC) | "
                     f"Kill zones: London 07-09 · NY 12-14")
-        logger.info(f"Min RR: 5:1 | Trail: 3:1 | Daily limit: {self._daily_sig_limit} | "
+        logger.info(f"Min RR: 2-5:1 (by score) | Trail: 3:1 | Daily limit: {self._daily_sig_limit} | "
                     f"Max concurrent: {self._max_concurrent}")
         logger.info("=" * 60)
 
