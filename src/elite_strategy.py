@@ -144,45 +144,59 @@ class EliteStrategy:
             return False
         return True
 
-    def _find_structural_tp(self, weekly_df, daily_df, entry, sl_dist, direction,
-                             required_rr: float = 5.0) -> tuple[float | None, str]:
+    def _find_structural_tps(
+        self, weekly_df, daily_df, entry: float, sl_dist: float, direction: str
+    ) -> tuple:
+        """
+        Return 3 distinct structural TP levels: (tp1, tp2, tp3, lbl1, lbl2, lbl3).
+
+        Collects all Daily + Weekly swing levels beyond entry, deduplicates
+        levels within 0.5% of each other, then picks the 3 nearest qualifying
+        ones (≥1.5:1 RR minimum).  Falls back to fixed 2:1 / 3:1 / 5:1 when
+        there is not enough structure on the chart.
+        """
+        mult = 1 if direction == "long" else -1
         candidates: list[tuple[float, str]] = []
 
         if daily_df is not None and len(daily_df) >= 10:
             if direction == "long":
-                swings = find_swing_highs_idx(daily_df.iloc[:-2], 3, 1)
-                for _, lvl in swings:
-                    if lvl > entry:
-                        candidates.append((lvl, f"Daily resistance {lvl:.5g}"))
+                for _, lvl in find_swing_highs_idx(daily_df.iloc[:-2], 3, 1):
+                    rr = (lvl - entry) / sl_dist
+                    if rr >= 1.5:
+                        candidates.append((lvl, f"D-{lvl:.5g} ({rr:.1f}R)"))
             else:
-                swings = find_swing_lows_idx(daily_df.iloc[:-2], 3, 1)
-                for _, lvl in swings:
-                    if lvl < entry:
-                        candidates.append((lvl, f"Daily support {lvl:.5g}"))
+                for _, lvl in find_swing_lows_idx(daily_df.iloc[:-2], 3, 1):
+                    rr = (entry - lvl) / sl_dist
+                    if rr >= 1.5:
+                        candidates.append((lvl, f"D-{lvl:.5g} ({rr:.1f}R)"))
 
         if weekly_df is not None and len(weekly_df) >= 4:
             if direction == "long":
-                swings = find_swing_highs_idx(weekly_df.iloc[:-2], 2, 1)
-                for _, lvl in swings:
-                    if lvl > entry:
-                        candidates.append((lvl, f"Weekly resistance {lvl:.5g}"))
+                for _, lvl in find_swing_highs_idx(weekly_df.iloc[:-2], 2, 1):
+                    rr = (lvl - entry) / sl_dist
+                    if rr >= 1.5:
+                        candidates.append((lvl, f"W-{lvl:.5g} ({rr:.1f}R)"))
             else:
-                swings = find_swing_lows_idx(weekly_df.iloc[:-2], 2, 1)
-                for _, lvl in swings:
-                    if lvl < entry:
-                        candidates.append((lvl, f"Weekly support {lvl:.5g}"))
+                for _, lvl in find_swing_lows_idx(weekly_df.iloc[:-2], 2, 1):
+                    rr = (entry - lvl) / sl_dist
+                    if rr >= 1.5:
+                        candidates.append((lvl, f"W-{lvl:.5g} ({rr:.1f}R)"))
 
-        if direction == "long":
-            candidates.sort(key=lambda x: x[0])
-        else:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-
+        # Sort nearest first, deduplicate within 0.5%
+        candidates.sort(key=lambda x: x[0] * mult, reverse=(direction == "long"))
+        deduped: list[tuple[float, str]] = []
         for lvl, lbl in candidates:
-            rr = abs(lvl - entry) / sl_dist
-            if rr >= required_rr:
-                return lvl, f"{lbl} ({rr:.1f}:1 RR)"
+            if not deduped or abs(lvl - deduped[-1][0]) / max(abs(deduped[-1][0]), 1e-10) > 0.005:
+                deduped.append((lvl, lbl))
 
-        return None, ""
+        def fixed(rr_mult: float) -> tuple[float, str]:
+            p = entry + mult * rr_mult * sl_dist
+            return p, f"Fixed {rr_mult:.0f}:1"
+
+        tp1 = deduped[0] if len(deduped) > 0 else fixed(2.0)
+        tp2 = deduped[1] if len(deduped) > 1 else fixed(3.0)
+        tp3 = deduped[2] if len(deduped) > 2 else fixed(5.0)
+        return tp1[0], tp2[0], tp3[0], tp1[1], tp2[1], tp3[1]
 
     # ── Free data scoring (max 4pts) ─────────────────────────────────────────
 
@@ -651,22 +665,13 @@ class EliteStrategy:
                     "vsa_score":  sc["vsa_score"],
                 }
 
-            # ── TP — Weekly/Daily structural level at required RR ─────────
-            struct_tp, struct_label = self._find_structural_tp(
-                weekly_df, daily_df, price, sl_dist, direction,
-                required_rr=required_rr,
+            # ── TPs — 3 distinct structural levels (Weekly/Daily swings) ─
+            tp1_price, tp2_price, tp3_price, tp1_lbl, tp2_lbl, tp3_lbl = (
+                self._find_structural_tps(weekly_df, daily_df, price, sl_dist, direction)
             )
-            if struct_tp:
-                tp_price  = struct_tp
-                tp_reason = struct_label
-            else:
-                tp_price  = (
-                    price + required_rr * sl_dist if direction == "long"
-                    else price - required_rr * sl_dist
-                )
-                tp_reason = f"Fixed {required_rr:.0f}:1 RR (no structural level)"
+            tp_reason = tp3_lbl   # furthest TP label used in log/reason string
 
-            actual_rr      = abs(tp_price - price) / sl_dist
+            actual_rr      = abs(tp3_price - price) / sl_dist
             trail_activate = (
                 price + self.trail_rr * sl_dist if direction == "long"
                 else price - self.trail_rr * sl_dist
@@ -695,9 +700,12 @@ class EliteStrategy:
                 "stage": 2, "direction": direction, "symbol": symbol,
                 "entry":          price,
                 "sl":             sl_price,
-                "tp1":            tp_price,
-                "tp2":            tp_price,
-                "tp3":            tp_price,
+                "tp1":            tp1_price,
+                "tp2":            tp2_price,
+                "tp3":            tp3_price,
+                "tp1_label":      tp1_lbl,
+                "tp2_label":      tp2_lbl,
+                "tp3_label":      tp3_lbl,
                 "sl_dist":        sl_dist,
                 "tp_rr":          round(actual_rr, 2),
                 "trail_activate": trail_activate,

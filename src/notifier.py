@@ -295,7 +295,12 @@ class Notifier:
         symbol     = sig["symbol"]
         price      = sig["entry"]
         sl         = sig["sl"]
-        tp         = sig["tp1"]          # tp1/tp2/tp3 are same value currently
+        tp1        = sig["tp1"]
+        tp2        = sig["tp2"]
+        tp3        = sig["tp3"]
+        tp1_label  = sig.get("tp1_label", "")
+        tp2_label  = sig.get("tp2_label", "")
+        tp3_label  = sig.get("tp3_label", "")
         score      = sig.get("score", 0)
         tp_rr      = sig.get("tp_rr", 0)
         rsi        = sig.get("rsi", 0)
@@ -310,6 +315,10 @@ class Notifier:
         qty        = self._qty_for_risk(price, sl, risk_usdt)
         sl_pct     = abs(price - sl) / price * 100
 
+        tp1_note   = f"  <i>{tp1_label}</i>" if tp1_label else ""
+        tp2_note   = f"  <i>{tp2_label}</i>" if tp2_label else ""
+        tp3_note   = f"  <i>{tp3_label}</i>" if tp3_label else f"  ({tp_rr:.1f}:1 RR)"
+
         trail_line = (
             f"\n🔁 Trail  <code>{self._fmt(trail_act)}</code>  (activates at 3:1)"
             if trail_act else ""
@@ -320,7 +329,9 @@ class Notifier:
             f"Elite 4H BOS  {stars}\n\n"
             f"📌 Entry    <code>{self._fmt(price)}</code>\n"
             f"🛑 SL         <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP         <code>{self._fmt(tp)}</code>  ({tp_rr:.1f}:1 RR)\n"
+            f"🎯 TP1       <code>{self._fmt(tp1)}</code>{tp1_note}\n"
+            f"🎯 TP2       <code>{self._fmt(tp2)}</code>{tp2_note}\n"
+            f"🏆 TP3       <code>{self._fmt(tp3)}</code>{tp3_note}\n"
             f"{trail_line}\n"
             f"📦 Risk  <code>${risk_usdt:.0f}</code>  ·  "
             f"Qty  <code>{self._fmt_qty(qty)} {base}</code>  ·  "

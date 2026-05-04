@@ -122,8 +122,6 @@ class Bot:
         elite_cfg             = cfg.get("elite", {})
         self._daily_sig_limit  = elite_cfg.get("daily_limit", 5)
         self._max_concurrent   = elite_cfg.get("max_concurrent", 3)
-        self._pending_signals: dict[int, dict] = {}   # id → {symbol, signal, live_price, sent_at}
-        self._next_pending_id  = 0
         self._daily_elite_count = 0
         self._daily_elite_date  = None                # date when count was last reset
         self._consecutive_sl    = 0                   # consecutive SLs hit (triggers elite pause)
@@ -895,28 +893,62 @@ class Bot:
         concurrent = len(self._paper_positions) + len(self._mexc_positions)
         if concurrent >= self._max_concurrent:
             return False
-        if any(v["symbol"] == symbol for v in self._pending_signals.values()):
-            return False
         if self._is_on_cooldown(symbol, "elite", 2):
             return False
 
-        # Queue for admin approval
-        pid = self._next_pending_id
-        self._next_pending_id += 1
-        self._pending_signals[pid] = {
-            "id":         pid,
-            "symbol":     symbol,
-            "signal":     sig,
-            "live_price": live_price or current_price,
-            "sent_at":    datetime.utcnow(),
-        }
-        self._send_signal_approval(pid, sig, regime)
+        live_p    = live_price or current_price
+        direction = sig["direction"]
+        self._daily_elite_count += 1
+
+        # Post directly to public channel — no admin queue
+        self.notifier.elite_confirmed_signal(sig)
+        self._last_channel_msg_time = datetime.utcnow()
+
+        # Bybit live order
+        self._bybit_order(sig, symbol)
+
+        # Paper position
+        if self.paper_enabled and symbol not in self._paper_positions:
+            from src.strategy import Signal as Sig
+            dummy = Sig(
+                stage=2, direction=direction, symbol=symbol,
+                entry_price=sig["entry"], stop_loss=sig["sl"],
+                tp1=sig["tp1"], tp2=sig["tp2"], tp3=sig["tp3"],
+                atr=sig.get("atr", 0), rsi=sig.get("rsi", 50),
+                volume_ratio=sig.get("vol_ratio", 0),
+                reason=sig.get("reason", ""),
+            )
+            self._paper_open(dummy, "Elite 4H BOS", live_price=live_p)
+
+        # Register trailing stop state
+        sl_dist = sig.get("sl_dist", abs(sig["entry"] - sig["sl"]))
+        if sl_dist > 0:
+            self._elite_trail_state[symbol] = {
+                "direction":      direction,
+                "entry":          sig["entry"],
+                "sl_dist":        sl_dist,
+                "trail_activate": sig.get(
+                    "trail_activate",
+                    sig["entry"] + (self.elite_strategy.trail_rr * sl_dist
+                                    if direction == "long"
+                                    else -self.elite_strategy.trail_rr * sl_dist),
+                ),
+                "current_sl":     sig["sl"],
+                "tp":             sig["tp3"],
+                "atr":            sig.get("atr", 0),
+                "activated":      False,
+            }
+            logger.info(
+                f"[ELITE] Trail state registered for {symbol} | "
+                f"activates @ {self._elite_trail_state[symbol]['trail_activate']:.6g}"
+            )
+
         self._mark_sent(symbol, "elite", 2)
-        self._daily_alerts.append({"stage": 2, "direction": sig["direction"], "symbol": symbol})
+        self._daily_alerts.append({"stage": 2, "direction": direction, "symbol": symbol})
 
         logger.info(
-            f"[ELITE] {sig['direction'].upper()} {symbol} "
-            f"@ {sig['entry']:.6g} | Score={sig['score']}/20 | Pending #{pid}"
+            f"[ELITE] {direction.upper()} {symbol} "
+            f"@ {sig['entry']:.6g} | Score={sig['score']}/20 | Auto-fired to channel"
         )
         return True
 
@@ -965,169 +997,6 @@ class Bot:
         self.notifier.watching_signal(sig)
         self._last_channel_msg_time = datetime.utcnow()
         logger.info(f"[WATCH] {direction.upper()} {symbol} score={score}/20 — watching alert sent")
-
-    def _send_signal_approval(self, pid: int, sig: dict, regime: dict):
-        """Send signal to admin bot with Approve / Skip / Wait buttons (20-point format)."""
-        def f(v):
-            if v is None:      return "N/A"
-            if abs(v) >= 1000: return f"${v:,.2f}"
-            if abs(v) >= 10:   return f"${v:.4f}"
-            return f"${v:.6f}"
-
-        direction = sig["direction"]
-        symbol    = sig["symbol"]
-        base      = symbol.split("/")[0]
-        score     = sig.get("score", 0)
-        tp_rr     = sig.get("tp_rr", 0)
-        risk_usdt = sig.get("risk_usdt", 5.0)
-        reward    = risk_usdt * tp_rr
-
-        dir_icon   = "LONG 🟢"  if direction == "long" else "SHORT 🔴"
-        regime_str = {"bull": "BULL ✅", "bear": "BEAR ✅", "neutral": "NEUTRAL ⚠️"}.get(
-            regime.get("regime", "neutral"), "NEUTRAL ⚠️"
-        )
-        kz_label   = sig.get("kz_label", "")
-        h1_lbl     = sig.get("h1_label", "")
-        # FIX: conf_bolts thresholds updated for 20-point scale
-        conf_bolts = (
-            "⚡⚡⚡⚡" if score >= 18 else
-            "⚡⚡⚡"   if score >= 14 else
-            "⚡⚡"     if score >= 10 else "⚡"
-        )
-
-        # Per-category line blocks
-        def _block(lines: list) -> str:
-            return "\n".join(lines) if lines else "⬜ N/A"
-
-        wyck_block = _block(sig.get("wyck_lines", []))
-        liq_block  = _block(sig.get("liq_lines",  []))
-        mmm_block  = _block(sig.get("mmm_lines",  []))
-        vsa_block  = _block(sig.get("vsa_lines",  []))
-        im_block   = _block(sig.get("im_lines",   []))
-        free_block = _block(sig.get("free_lines",  []))
-        h1_block   = _block(sig.get("h1_lines",   []))   # FIX: now included
-        amd_block  = _block(sig.get("amd_lines",  []))   # FIX: now included
-        kz_block   = sig.get("kz_line", "⬜ Kill Zone +0")
-
-        sweep_tag  = "EQL Swept 💧 → LONG" if sig["direction"] == "long" else "EQH Swept 💧 → SHORT"
-        wyck_phase = sig.get("wyck_lines", ["N/A"])[0] if sig.get("wyck_lines") else "N/A"
-        text = (
-            f"🚨 <b>ELITE SIGNAL — #{pid:03d}</b>\n\n"
-            f"Pair:      <b>{base}USDT</b>\n"
-            f"Direction: <b>{dir_icon}</b>\n"
-            f"Trigger:   <b>{sweep_tag}</b>\n"
-            f"Wyckoff:   <b>{wyck_phase}</b>\n"
-            f"Regime:    <b>{regime_str}</b>\n"
-            f"Kill Zone: <b>{kz_label or 'N/A'}</b>\n"
-            f"Score:     <b>{score}/20 {conf_bolts}</b>\n\n"   # FIX: /18 → /20
-            f"Entry:  <code>{f(sig['entry'])}</code>\n"
-            f"SL:     <code>{f(sig['sl'])}</code>  <i>(below sweep wick)</i>\n"
-            f"TP:     <code>{f(sig['tp1'])}</code>\n"
-            f"Risk:   <b>${risk_usdt:.0f}</b>\n"
-            f"Reward: <b>${reward:.0f}</b>\n"
-            f"RR:     <b>{tp_rr:.1f}:1</b>\n"
-            f"Trail:  Activates at <code>{f(sig.get('trail_activate', 0))}</code>\n"
-        )
-        if h1_lbl:
-            text += f"1H:     {h1_lbl}\n"
-        # FIX: category caps updated to v2 values
-        text += (
-            f"\n<b>KILL ZONE ({sig.get('kz_score', 0)}/3):</b>\n{kz_block}\n"
-            f"\n<b>AMD PHASE ({sig.get('amd_score', 0)}/2):</b>\n{amd_block}\n"
-            f"\n<b>WYCKOFF ({sig.get('wyck_score', 0)}/2):</b>\n{wyck_block}\n"
-            f"\n<b>LIQUIDITY ({sig.get('liq_score', 0)}/5):</b>\n{liq_block}\n"
-            f"\n<b>MMM ({sig.get('mmm_score', 0)}/2):</b>\n{mmm_block}\n"
-            f"\n<b>VSA ({sig.get('vsa_score', 0)}/2):</b>\n{vsa_block}\n"
-            f"\n<b>INTERMARKET ({sig.get('im_score', 0)}/2):</b>\n{im_block}\n"
-            f"\n<b>FREE DATA ({sig.get('free_score', 0)}/4):</b>\n{free_block}\n"
-            f"\n<b>1H CONFIRM ({sig.get('h1_score', 0)}/3):</b>\n{h1_block}\n"
-            f"\nTotal: <b>{score}/20 {conf_bolts}</b>\n"
-            f"Size:  <b>${risk_usdt:.0f} risk</b>\n"
-            f"RR:    <b>{tp_rr:.1f}:1 minimum</b>"
-        )
-        markup = {
-            "inline_keyboard": [[
-                {"text": "✅ Approve", "callback_data": f"elite_approve_{pid}"},
-                {"text": "❌ Skip",    "callback_data": f"elite_skip_{pid}"},
-                {"text": "⏰ Wait",   "callback_data": f"elite_wait_{pid}"},
-            ]]
-        }
-        self._admin_send(text, markup=markup)
-
-    def _handle_signal_approve(self, pid: int):
-        """
-        Execute an approved elite signal:
-          1. Post to public Telegram channel
-          2. Place Bybit order
-          3. Open paper position
-        """
-        entry_data = self._pending_signals.pop(pid, None)
-        if not entry_data:
-            logger.warning(f"[ELITE] Approved #{pid} not found in pending dict")
-            return
-
-        sig    = entry_data["signal"]
-        symbol = entry_data["symbol"]
-        live_p = entry_data.get("live_price", sig.get("entry", 0))
-        self._daily_elite_count += 1
-
-        direction  = sig["direction"]
-        score      = sig.get("score", 0)
-        # FIX: conf_bolts thresholds updated for 20-point scale
-        conf_bolts = (
-            "⚡⚡⚡⚡" if score >= 18 else
-            "⚡⚡⚡"   if score >= 14 else
-            "⚡⚡"     if score >= 10 else "⚡"
-        )
-
-        # FIX: replaced hand-rolled pub_text with elite_confirmed_signal()
-        # This renders the full 20-point breakdown using all *_lines keys from the signal dict.
-        self.notifier.elite_confirmed_signal(sig)
-        self._last_channel_msg_time = datetime.utcnow()   # reset silence timer
-
-        # Bybit live order
-        self._bybit_order(sig, symbol)
-
-        # Paper position
-        if self.paper_enabled and symbol not in self._paper_positions:
-            from src.strategy import Signal as Sig
-            dummy = Sig(
-                stage=2, direction=direction, symbol=symbol,
-                entry_price=sig["entry"], stop_loss=sig["sl"],
-                tp1=sig["tp1"], tp2=sig["tp2"], tp3=sig["tp3"],
-                atr=sig.get("atr", 0), rsi=sig.get("rsi", 50),
-                volume_ratio=sig.get("vol_ratio", 0),
-                reason=sig.get("reason", ""),
-            )
-            self._paper_open(dummy, "Elite 4H BOS", live_price=live_p)
-
-        # Register trailing stop state — managed each tick by _elite_manage_trail
-        sl_dist = sig.get("sl_dist", abs(sig["entry"] - sig["sl"]))
-        if sl_dist > 0:
-            self._elite_trail_state[symbol] = {
-                "direction":      direction,
-                "entry":          sig["entry"],
-                "sl_dist":        sl_dist,
-                "trail_activate": sig.get(
-                    "trail_activate",
-                    sig["entry"] + (self.elite_strategy.trail_rr * sl_dist
-                                    if direction == "long"
-                                    else -self.elite_strategy.trail_rr * sl_dist),
-                ),
-                "current_sl":     sig["sl"],
-                "tp":             sig["tp1"],
-                "atr":            sig.get("atr", 0),
-                "activated":      False,
-            }
-            logger.info(
-                f"[ELITE] Trail state registered for {symbol} | "
-                f"activates @ {self._elite_trail_state[symbol]['trail_activate']:.6g}"
-            )
-
-        logger.info(
-            f"[ELITE] #{pid} approved — {direction.upper()} {symbol} "
-            f"posted to channel + Bybit order placed"
-        )
 
     # ------------------------------------------------------------------
     # Elite trailing stop management
@@ -1320,7 +1189,6 @@ class Bot:
         bybit_cb        = "cmd_stop"        if self.bybit.enabled else "cmd_start"
         elite_pause_btn = "▶️ Resume Scan" if self._elite_paused  else "⏸ Pause Scan"
         elite_pause_cb  = "cmd_resume_elite" if self._elite_paused else "cmd_pause_elite"
-        pending_n       = len(self._pending_signals)
         return {
             "inline_keyboard": [
                 # Row 1: Bybit execution toggle
@@ -1331,10 +1199,7 @@ class Bot:
                     {"text": "🔄 Reset Daily",  "callback_data": "cmd_reset_daily"},
                 ],
                 # Row 3: Signal counts
-                [
-                    {"text": f"⏳ Pending: {pending_n}",                         "callback_data": "cmd_status"},
-                    {"text": f"📊 Today: {self._daily_elite_count}/{self._daily_sig_limit}", "callback_data": "cmd_status"},
-                ],
+                [{"text": f"📊 Today: {self._daily_elite_count}/{self._daily_sig_limit}", "callback_data": "cmd_status"}],
                 # Row 4: Status refresh
                 [{"text": "📊 Refresh Status", "callback_data": "cmd_status"}],
             ]
@@ -1367,7 +1232,6 @@ class Bot:
             resume_note = f" → resumes {self._elite_resume_at.strftime('%H:%M UTC')}"
         open_pos  = len(self._paper_positions)
         balance   = f"${self.paper_balance:.2f}" if self.paper_enabled else "N/A"
-        pending_n = len(self._pending_signals)
         text = (
             f"🤖 <b>Bot Control Panel</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1381,8 +1245,7 @@ class Bot:
             f"Next scan:  {self._next_4h_close_str()}\n"
             f"─────────────────────────\n"
             f"Scanning:         {scan_state}{resume_note}\n"
-            f"Signals today:    {self._daily_elite_count}/{self._daily_sig_limit}\n"
-            f"Pending approval: {pending_n}"
+            f"Signals today:    {self._daily_elite_count}/{self._daily_sig_limit}"
         )
         self._admin_send(text, markup=self._control_panel_markup())
 
@@ -1422,34 +1285,6 @@ class Bot:
                     elif cb_data == "cmd_status":
                         self._answer_callback(cb_id)
                         self._send_control_panel()
-                    # ── Elite signal approval buttons ────────────────────
-                    elif cb_data.startswith("elite_approve_"):
-                        try:
-                            pid = int(cb_data.split("elite_approve_")[1])
-                            self._handle_signal_approve(pid)
-                            self._answer_callback(cb_id, "✅ Signal approved & posted")
-                        except (ValueError, IndexError, Exception) as e:
-                            logger.warning(f"[CMD] elite_approve error: {e}")
-                            self._answer_callback(cb_id, "Error approving signal")
-
-                    elif cb_data.startswith("elite_skip_"):
-                        try:
-                            pid  = int(cb_data.split("elite_skip_")[1])
-                            item = self._pending_signals.pop(pid, None)
-                            sym  = item["symbol"] if item else "unknown"
-                            self._answer_callback(cb_id, "⏭ Signal skipped")
-                            logger.info(f"[ELITE] Signal #{pid} ({sym}) skipped by admin")
-                        except (ValueError, IndexError):
-                            pass
-
-                    elif cb_data.startswith("elite_wait_"):
-                        try:
-                            pid = int(cb_data.split("elite_wait_")[1])
-                            self._answer_callback(cb_id, "⏳ Signal held for re-evaluation")
-                            logger.info(f"[ELITE] Signal #{pid} held by admin")
-                        except (ValueError, IndexError):
-                            pass
-
                     # ── Elite control buttons ─────────────────────────────
                     elif cb_data == "cmd_pause_elite":
                         self._elite_paused    = True
