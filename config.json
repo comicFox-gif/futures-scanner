@@ -59,7 +59,7 @@
     "volume_multiplier": 1.5,
     "adx_min": 25,
     "min_body": 0.50,
-    "min_score": 7,
+    "min_score": 12,
     "daily_limit": 5,
     "max_concurrent": 3,
     "min_rr": 2.0,
