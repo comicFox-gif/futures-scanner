@@ -1,4 +1,4 @@
-“””
+"""
 Elite 4H Confluence Strategy  —  20-point scoring  (v2.0)
 
 Fires when 4H liquidity sweep completes and score >= min_score (default 12/20).
