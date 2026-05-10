@@ -574,7 +574,8 @@ class EliteStrategy:
                     continue
                 if rsi < 35 or rsi > 75:
                     continue
-                if mregime in ("bear", "neutral"):
+                # Allow bull + neutral regime for longs — only block bear
+                if mregime == "bear":
                     continue
                 sl_dist   = max(price - (float(row["low"]) - atr * 0.3), atr * 0.8)
                 swing_ref = swing_low
@@ -583,7 +584,8 @@ class EliteStrategy:
                     continue
                 if rsi > 65 or rsi < 25:
                     continue
-                if mregime in ("bull", "neutral"):
+                # Allow bear + neutral regime for shorts — only block bull
+                if mregime == "bull":
                     continue
                 sl_dist   = max((float(row["high"]) + atr * 0.3) - price, atr * 0.8)
                 swing_ref = swing_high
