@@ -157,7 +157,8 @@ class Bot:
     # ------------------------------------------------------------------
 
     def _init_exchange(self, cfg: dict, env: dict):
-        exchange_id = env.get("EXCHANGE", cfg.get("exchange", "bybit"))
+        # ccxt exchange IDs are always lowercase (ccxt.bybit, not ccxt.Bybit)
+        exchange_id = env.get("EXCHANGE", cfg.get("exchange", "bybit")).strip().lower()
         type_map    = {"bybit": "linear", "okx": "swap", "mexc": "swap"}
         default_type = type_map.get(exchange_id, "linear")
         api_key    = env.get("API_KEY", "")
