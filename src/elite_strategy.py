@@ -42,6 +42,7 @@ from src.sentiment import (
     get_fear_greed,
     get_funding_rate,
     get_open_interest,
+    get_oi_trend,
     get_long_short_ratio,
 )
 from src.advanced_confluence import (
@@ -50,6 +51,7 @@ from src.advanced_confluence import (
     detect_liquidity,
     detect_mmm,
     detect_vsa,
+    detect_delta_divergence,
     get_intermarket_score,
     confirm_1h_alignment,
     risk_usdt_for_score,
@@ -198,49 +200,87 @@ class EliteStrategy:
         tp3 = deduped[2] if len(deduped) > 2 else fixed(5.0)
         return tp1[0], tp2[0], tp3[0], tp1[1], tp2[1], tp3[1]
 
-    # ── Free data scoring (max 4pts) ─────────────────────────────────────────
+    # ── Free data scoring (max 4pts) — real whale positioning ────────────────
 
-    def _score_free_data(self, symbol: str, direction: str) -> tuple[int, list[str]]:
+    def _score_free_data(
+        self, symbol: str, direction: str, h4_df: pd.DataFrame | None = None
+    ) -> tuple[int, list[str]]:
+        """
+        Score crypto-native whale-positioning data. CONTRARIAN by design:
+        we side with smart money against crowded/trapped retail.
+
+        Important: NO free points for missing data. A signal with no funding /
+        OI / L-S data scores 0 here, not +3 — this stops illiquid, manipulable
+        pairs from being inflated to signal threshold on padding alone.
+
+          Funding   contrarian positioning (neg→long, pos→short)        +1
+          OI trend  rising OI in our direction = new money confirms      +1
+          L/S       retail NOT crowded with us (fade the crowd)          +1
+          F&G       contrarian sentiment (fear→long, greed→short)        +1
+          Delta     volume-delta OPPOSES our direction → trap warning    -1
+        """
         score = 0
         lines: list[str] = []
         base  = symbol.split("/")[0]
 
+        # ── 1. Funding rate — contrarian crowd positioning ───────────────
         rate = get_funding_rate(None, symbol)
         if rate is None:
-            score += 1; lines.append(f"✅ Funding Rate N/A   +1")
-        elif direction == "long"  and rate <= 0:
-            score += 1; lines.append(f"✅ Funding Rate {rate:.4f}%   +1")
-        elif direction == "short" and rate >  0:
-            score += 1; lines.append(f"✅ Funding Rate +{rate:.4f}%   +1")
+            lines.append("⬜ Funding Rate N/A   +0")
+        elif direction == "long" and rate <= 0:
+            score += 1; lines.append(f"✅ Funding {rate:.4f}% — shorts pay, fade them   +1")
+        elif direction == "short" and rate > 0:
+            score += 1; lines.append(f"✅ Funding +{rate:.4f}% — longs pay, fade them   +1")
         else:
-            lines.append(f"⬜ Funding Rate {rate:.4f}%   +0")
+            lines.append(f"⬜ Funding {rate:.4f}% — crowd already with us   +0")
 
-        oi = get_open_interest(None, symbol)
-        if oi is not None:
-            score += 1; lines.append(f"✅ OI ${oi:,.0f}   +1")
+        # ── 2. Open Interest TREND — real money confirmation ─────────────
+        oi_trend  = get_oi_trend(symbol)
+        price_dir = None
+        if h4_df is not None and len(h4_df) >= 7:
+            price_dir = 1 if float(h4_df.iloc[-2]["close"]) > float(h4_df.iloc[-7]["close"]) else -1
+        want_dir = 1 if direction == "long" else -1
+        if oi_trend is None or price_dir is None:
+            lines.append("⬜ OI Trend N/A   +0")
+        elif oi_trend == "rising" and price_dir == want_dir:
+            score += 1; lines.append("✅ OI rising with the move — new money confirms   +1")
+        elif oi_trend == "rising":
+            lines.append("⬜ OI rising against the move — counter-positioning   +0")
         else:
-            lines.append(f"⬜ Open Interest N/A   +0")
+            lines.append("⬜ OI falling — move is short-cover / liquidation   +0")
 
+        # ── 3. Long/Short ratio — fade crowded retail (contrarian) ───────
         ls = get_long_short_ratio(base)
         if ls is None:
-            score += 1; lines.append(f"✅ Long/Short Ratio N/A   +1")
-        elif direction == "long"  and ls <= 2.5:
-            score += 1; lines.append(f"✅ Long/Short Ratio {ls:.2f}   +1")
-        elif direction == "short" and ls >= 0.4:
-            score += 1; lines.append(f"✅ Long/Short Ratio {ls:.2f}   +1")
+            lines.append("⬜ Long/Short Ratio N/A   +0")
+        elif direction == "long" and ls < 1.2:
+            score += 1; lines.append(f"✅ L/S {ls:.2f} — retail not long-crowded   +1")
+        elif direction == "short" and ls > 1.5:
+            score += 1; lines.append(f"✅ L/S {ls:.2f} — retail crowded long, fade it   +1")
         else:
-            lines.append(f"⬜ Long/Short Ratio {ls:.2f}   +0")
+            lines.append(f"⬜ L/S {ls:.2f} — no contrarian edge   +0")
 
+        # ── 4. Fear & Greed — contrarian sentiment ───────────────────────
         fng = get_fear_greed()
         fv  = fng["value"]
-        if   direction == "long"  and fv < 50:
-            score += 1; lines.append(f"✅ Fear/Greed {fv} (Fear)   +1")
+        if direction == "long" and fv < 50:
+            score += 1; lines.append(f"✅ Fear/Greed {fv} (Fear) — buy fear   +1")
         elif direction == "short" and fv >= 50:
-            score += 1; lines.append(f"✅ Fear/Greed {fv} (Greed)   +1")
+            score += 1; lines.append(f"✅ Fear/Greed {fv} (Greed) — sell greed   +1")
         else:
             lines.append(f"⬜ Fear/Greed {fv}   +0")
 
-        return min(4, score), lines
+        # ── 5. Delta divergence — trap guard (whale flow vs our trade) ───
+        if h4_df is not None:
+            delta = detect_delta_divergence(h4_df)
+            delta_dir = delta.get("delta_dir", 0)
+            if delta_dir and delta_dir != want_dir:
+                score -= 1
+                lines.append("⚠️ Volume-delta OPPOSES entry — possible trap   -1")
+            elif delta_dir == want_dir:
+                lines.append("✅ Volume-delta flowing with us   +0")
+
+        return max(0, min(4, score)), lines
 
     # ── Swing swept helper ────────────────────────────────────────────────────
 
@@ -350,12 +390,18 @@ class EliteStrategy:
         liq_lines = []
         price_now = float(h4_df.iloc[-2]["close"])
 
+        swept = (direction == "long" and liq["eql_swept"]) or \
+                (direction == "short" and liq["eqh_swept"])
         if direction == "long"  and liq["eql_swept"]:
             liq_raw += 2
             liq_lines.append(f"✅ EQL Swept + Closed Above   +2")
         if direction == "short" and liq["eqh_swept"]:
             liq_raw += 2
             liq_lines.append(f"✅ EQH Swept + Closed Below   +2")
+        # Whale confirmation: sweep transacted above-average volume
+        if swept and liq.get("sweep_vol_confirmed"):
+            liq_raw += 1
+            liq_lines.append(f"✅ Whale Volume on Sweep 🐋   +1")
         if liq["stop_hunt"]:
             # FIX: stop hunt reweighted +2 → +1 (less weight than full EQL/EQH sweep)
             liq_raw += 1
@@ -442,8 +488,8 @@ class EliteStrategy:
             else [f"⬜ Intermarket {n_align}/{n_total}   +0"]
         )
 
-        # ── FREE DATA (cap 4) — unchanged ────────────────────────────────
-        free_score, free_lines = self._score_free_data(symbol, direction)
+        # ── FREE DATA (cap 4) — real whale positioning + trap guard ──────
+        free_score, free_lines = self._score_free_data(symbol, direction, h4_df)
         free_score = min(4, free_score)
 
         # ── 1H CONFIRMATION (cap 3) — FIX: now contributes to score ──────

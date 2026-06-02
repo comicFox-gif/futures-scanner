@@ -280,6 +280,7 @@ def detect_liquidity(
     NONE = dict(
         eqh_levels=[], eql_levels=[],
         eqh_swept=False, eql_swept=False, stop_hunt=False,
+        sweep_vol_confirmed=False,
         score=0, label=[],
     )
     try:
@@ -330,13 +331,17 @@ def detect_liquidity(
         eqh_swept = False
         eql_swept = False
         stop_hunt = False
+        # Whale confirmation: a real sweep transacts size. A thin-volume wick
+        # through equal highs/lows is more likely the trap itself, not whales.
+        sweep_vol_confirmed = cur_vol > vol_avg
 
         # EQH swept: wick above EQH, close below
         for lvl in eqh_levels:
             if cur_high > lvl * (1 + threshold_pct * 0.3) and cur_close < lvl:
                 eqh_swept = True
                 score += 2
-                labels.append(f"Liquidity: EQH Swept ${lvl:,.4g} +2 💧")
+                vtag = " + whale vol 🐋" if sweep_vol_confirmed else " (thin vol ⚠️)"
+                labels.append(f"Liquidity: EQH Swept ${lvl:,.4g} +2 💧{vtag}")
                 break
 
         # EQL swept: wick below EQL, close above
@@ -344,7 +349,8 @@ def detect_liquidity(
             if cur_low < lvl * (1 - threshold_pct * 0.3) and cur_close > lvl:
                 eql_swept = True
                 score += 2
-                labels.append(f"Liquidity: EQL Swept ${lvl:,.4g} +2 💧")
+                vtag = " + whale vol 🐋" if sweep_vol_confirmed else " (thin vol ⚠️)"
+                labels.append(f"Liquidity: EQL Swept ${lvl:,.4g} +2 💧{vtag}")
                 break
 
         # Stop hunt: spike beyond previous candle + reversal close
@@ -365,7 +371,9 @@ def detect_liquidity(
         return dict(
             eqh_levels=eqh_levels, eql_levels=eql_levels,
             eqh_swept=eqh_swept,   eql_swept=eql_swept,
-            stop_hunt=stop_hunt,   score=score, label=labels,
+            stop_hunt=stop_hunt,
+            sweep_vol_confirmed=sweep_vol_confirmed,
+            score=score, label=labels,
         )
 
     except Exception as e:

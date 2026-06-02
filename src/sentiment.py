@@ -148,6 +148,55 @@ def get_open_interest(exchange=None, symbol: str = "") -> float | None:
     return None
 
 
+_oi_hist_cache: dict = {}
+_OI_HIST_TTL = 600.0   # 10 minutes
+
+
+def get_oi_trend(symbol: str = "", interval: str = "1h") -> str | None:
+    """
+    Return the direction of recent Open Interest change: 'rising' | 'falling' | None.
+
+    OI delta is the real whale-positioning signal:
+      price ↑ + OI rising  = new money opening longs   → genuine buying
+      price ↓ + OI rising  = new money opening shorts   → genuine selling
+      OI falling           = positions closing (short-cover / long-liquidation) → weak move
+
+    Uses Bybit /v5/market/open-interest history (newest first). Cached 10 min.
+    `symbol` format: 'BTC/USDT:USDT' → 'BTCUSDT'.
+    """
+    bybit_sym = _to_bybit_sym(symbol)
+    cache_key = f"oitrend|{bybit_sym}|{interval}"
+    cached = _cache_get(_oi_hist_cache, cache_key, _OI_HIST_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _SESSION.get(
+            f"{BYBIT_BASE}/v5/market/open-interest",
+            params={
+                "category":     "linear",
+                "symbol":       bybit_sym,
+                "intervalTime": interval,
+                "limit":        2,
+            },
+            timeout=8,
+        )
+        body = resp.json()
+        if body.get("retCode") == 0:
+            rows = body.get("result", {}).get("list", [])
+            if len(rows) >= 2:
+                newest = float(rows[0].get("openInterest", 0) or 0)
+                prev   = float(rows[1].get("openInterest", 0) or 0)
+                if prev > 0:
+                    trend = "rising" if newest > prev else "falling"
+                    _cache_set(_oi_hist_cache, cache_key, trend)
+                    logger.debug(f"[SENTIMENT] OI trend {bybit_sym}: {trend} ({prev:,.0f}→{newest:,.0f})")
+                    return trend
+    except Exception as e:
+        logger.debug(f"[SENTIMENT] OI trend {bybit_sym}: {e}")
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 4.  Long / Short Ratio  (Bybit public REST — no auth)
 # ══════════════════════════════════════════════════════════════════════════════
