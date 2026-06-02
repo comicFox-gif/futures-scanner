@@ -372,41 +372,16 @@ class Notifier:
         price     = sig["entry"]
         sl        = sig["sl"]
         score     = sig.get("score", 0)
-        tp_rr     = sig.get("tp_rr", 0)
-        h1_reason = sig.get("h1_reason", "1H not yet aligned")
-        conf_label = self._conf_label(score)
-
-        dir_tag  = self._dir_tag(direction)
-        sl_pct   = abs(price - sl) / price * 100
-
-        # Per-category mini-summary (just the scores, no full lines)
-        wyck_s = sig.get("wyck_score", 0)
-        liq_s  = sig.get("liq_score",  0)
-        mmm_s  = sig.get("mmm_score",  0)
-        vsa_s  = sig.get("vsa_score",  0)
-
-        cat_line = (
-            f"Wyckoff <code>{wyck_s}</code>  "
-            f"Liq <code>{liq_s}</code>  "
-            f"MMM <code>{mmm_s}</code>  "
-            f"VSA <code>{vsa_s}</code>"
-        )
+        dir_tag   = self._dir_tag(direction)
 
         self.send(
-            f"⏳ <b>Waiting for 1H</b>  [Elite 4H BOS]\n"
-            f"{DLINE}\n"
-            f"{dir_tag}  •  <b>{symbol}</b>\n"
-            f"Score  <code>{score}/{_MAX_SCORE}</code>  [{conf_label}]  ·  Need 1H confirm\n"
+            f"⏳ <b>Setup — Waiting for 1H</b>\n"
+            f"{dir_tag}  •  <b>{symbol}</b>  ·  Score <b>{score}/{_MAX_SCORE}</b>\n"
             f"{DLINE}\n"
             f"📌 Entry  <code>{self._fmt(price)}</code>\n"
-            f"🛑 SL       <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 Target  {tp_rr:.0f}:1 RR minimum\n"
+            f"🛑 SL     <code>{self._fmt(sl)}</code>\n"
             f"{DLINE}\n"
-            f"{cat_line}\n"
-            f"{DLINE}\n"
-            f"<i>1H: {h1_reason}</i>\n"
-            f"<i>Signal fires when FVG / MSS / sweep confirms on 1H close.</i>\n"
-            f"<i>{self._ts()}</i>"
+            f"<i>Signal fires when 1H confirms.</i>  {self._ts()}"
         )
 
     # ------------------------------------------------------------------

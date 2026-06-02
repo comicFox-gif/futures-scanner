@@ -877,7 +877,7 @@ class Bot:
         if sig.get("forming"):
             return False
 
-        # ── "Watching" alert — score ≥12 but 1H not confirmed yet ──────
+        # ── "Watching" alert — score ≥ min_score but 1H not confirmed yet ──
         if sig.get("watching"):
             self._send_watching_alert(sig)
             return False
