@@ -147,42 +147,40 @@ class EliteStrategy:
         return True
 
     def _find_structural_tps(
-        self, weekly_df, daily_df, entry: float, sl_dist: float, direction: str
+        self, weekly_df, daily_df, entry: float, sl_dist: float, direction: str,
+        h4_df=None,
     ) -> tuple:
         """
         Return 3 distinct structural TP levels: (tp1, tp2, tp3, lbl1, lbl2, lbl3).
 
-        Collects all Daily + Weekly swing levels beyond entry, deduplicates
-        levels within 0.5% of each other, then picks the 3 nearest qualifying
-        ones (≥1.5:1 RR minimum).  Falls back to fixed 2:1 / 3:1 / 5:1 when
-        there is not enough structure on the chart.
+        Collects real swing levels from 4H + Daily + Weekly charts that sit
+        beyond entry (≥1.5:1 RR), deduplicates levels within 0.5% of each
+        other, then picks the 3 nearest.  The 4H swings give near-term targets
+        (TP1), Daily/Weekly give the further ones.  Falls back to fixed
+        2:1 / 3:1 / 5:1 only when the chart truly has no structure.
         """
         mult = 1 if direction == "long" else -1
         candidates: list[tuple[float, str]] = []
 
-        if daily_df is not None and len(daily_df) >= 10:
+        def collect(df, left, right, tag, lo, hi):
+            if df is None or len(df) < lo:
+                return
+            window = df.iloc[-hi:-2] if len(df) > hi else df.iloc[:-2]
             if direction == "long":
-                for _, lvl in find_swing_highs_idx(daily_df.iloc[:-2], 3, 1):
+                for _, lvl in find_swing_highs_idx(window, left, right):
                     rr = (lvl - entry) / sl_dist
                     if rr >= 1.5:
-                        candidates.append((lvl, f"D-{lvl:.5g} ({rr:.1f}R)"))
+                        candidates.append((lvl, f"{tag}-{lvl:.5g} ({rr:.1f}R)"))
             else:
-                for _, lvl in find_swing_lows_idx(daily_df.iloc[:-2], 3, 1):
+                for _, lvl in find_swing_lows_idx(window, left, right):
                     rr = (entry - lvl) / sl_dist
                     if rr >= 1.5:
-                        candidates.append((lvl, f"D-{lvl:.5g} ({rr:.1f}R)"))
+                        candidates.append((lvl, f"{tag}-{lvl:.5g} ({rr:.1f}R)"))
 
-        if weekly_df is not None and len(weekly_df) >= 4:
-            if direction == "long":
-                for _, lvl in find_swing_highs_idx(weekly_df.iloc[:-2], 2, 1):
-                    rr = (lvl - entry) / sl_dist
-                    if rr >= 1.5:
-                        candidates.append((lvl, f"W-{lvl:.5g} ({rr:.1f}R)"))
-            else:
-                for _, lvl in find_swing_lows_idx(weekly_df.iloc[:-2], 2, 1):
-                    rr = (entry - lvl) / sl_dist
-                    if rr >= 1.5:
-                        candidates.append((lvl, f"W-{lvl:.5g} ({rr:.1f}R)"))
+        # 4H near-term structure, then Daily, then Weekly major levels
+        collect(h4_df,     self.swing_left, self.swing_right, "4H", 30, 150)
+        collect(daily_df,  3, 1, "D", 10, 200)
+        collect(weekly_df, 2, 1, "W", 4,  60)
 
         # Sort nearest first, deduplicate within 0.5%
         candidates.sort(key=lambda x: x[0] * mult, reverse=(direction == "long"))
@@ -715,7 +713,7 @@ class EliteStrategy:
 
             # ── TPs — 3 distinct structural levels (Weekly/Daily swings) ─
             tp1_price, tp2_price, tp3_price, tp1_lbl, tp2_lbl, tp3_lbl = (
-                self._find_structural_tps(weekly_df, daily_df, price, sl_dist, direction)
+                self._find_structural_tps(weekly_df, daily_df, price, sl_dist, direction, h4_df)
             )
             tp_reason = tp3_lbl   # furthest TP label used in log/reason string
 

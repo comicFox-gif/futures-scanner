@@ -61,27 +61,29 @@ class PairSelector:
     def _refresh(self):
         logger.info("Fetching top pairs by 24h volume...")
         try:
-            # Load markets first to get all active swap symbols
+            # Load markets so we can identify active USDT swaps
             markets = self.exchange.load_markets()
-            swap_symbols = [
+            swap_set = {
                 s for s, m in markets.items()
                 if m.get("swap") and m.get("quote") == "USDT"
                 and m.get("active", True) and s not in BLACKLIST
-            ]
-            logger.info(f"Found {len(swap_symbols)} active USDT swap markets")
+            }
+            logger.info(f"Found {len(swap_set)} active USDT swap markets")
 
-            # Fetch tickers for swap symbols (batch to avoid rate limits)
-            tickers = self.exchange.fetch_tickers(swap_symbols)
+            # Fetch ALL tickers in one call — passing a 400+ symbol list to
+            # fetch_tickers is unreliable on Bybit (URL/length limits) and was
+            # silently failing → falling back to the 5 static pairs.
+            tickers = self.exchange.fetch_tickers()
         except Exception as e:
             logger.error(f"PairSelector: fetch failed: {e}")
             if not self._symbols:
                 self._symbols = self.fallback
             return
 
-        # Rank by 24h USD volume
+        # Rank by 24h USD volume — keep only active USDT swaps
         candidates = []
         for symbol, t in tickers.items():
-            if symbol in BLACKLIST:
+            if symbol in BLACKLIST or symbol not in swap_set:
                 continue
             # Try quoteVolume first, fall back to baseVolume * last price
             vol_usd = t.get("quoteVolume") or 0

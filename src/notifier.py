@@ -298,55 +298,25 @@ class Notifier:
         tp1        = sig["tp1"]
         tp2        = sig["tp2"]
         tp3        = sig["tp3"]
-        tp1_label  = sig.get("tp1_label", "")
-        tp2_label  = sig.get("tp2_label", "")
-        tp3_label  = sig.get("tp3_label", "")
         score      = sig.get("score", 0)
-        tp_rr      = sig.get("tp_rr", 0)
-        rsi        = sig.get("rsi", 0)
         risk_usdt  = sig.get("risk_usdt", 10.0)
-        atr        = sig.get("atr", 0)
-        trail_act  = sig.get("trail_activate")
-        h1_label   = sig.get("h1_label", "")
-        conf_label = self._conf_label(score)
-        stars      = self._stars(score)
         dir_tag    = self._dir_tag(direction)
         base       = self._base_currency(symbol)
         qty        = self._qty_for_risk(price, sl, risk_usdt)
-        sl_pct     = abs(price - sl) / price * 100
 
-        tp1_note   = f"  <i>{tp1_label}</i>" if tp1_label else ""
-        tp2_note   = f"  <i>{tp2_label}</i>" if tp2_label else ""
-        tp3_note   = f"  <i>{tp3_label}</i>" if tp3_label else f"  ({tp_rr:.1f}:1 RR)"
-
-        trail_line = (
-            f"\n🔁 Trail  <code>{self._fmt(trail_act)}</code>  (activates at 3:1)"
-            if trail_act else ""
-        )
-
-        header = (
+        msg = (
             f"{dir_tag}  •  <b>{symbol}</b>  #{self._signal_no:03d}\n"
-            f"Elite 4H BOS  {stars}\n\n"
-            f"📌 Entry    <code>{self._fmt(price)}</code>\n"
-            f"🛑 SL         <code>{self._fmt(sl)}</code>  (-{sl_pct:.2f}%)\n"
-            f"🎯 TP1       <code>{self._fmt(tp1)}</code>{tp1_note}\n"
-            f"🎯 TP2       <code>{self._fmt(tp2)}</code>{tp2_note}\n"
-            f"🏆 TP3       <code>{self._fmt(tp3)}</code>{tp3_note}\n"
-            f"{trail_line}\n"
-            f"📦 Risk  <code>${risk_usdt:.0f}</code>  ·  "
-            f"Qty  <code>{self._fmt_qty(qty)} {base}</code>  ·  "
-            f"RSI <code>{rsi:.0f}</code>"
-        )
-
-        score_block = self._elite_score_block(sig)
-
-        footer = (
-            f"\n{DLINE}\n"
-            f"1H: <i>{h1_label}</i>\n"
+            f"Score  <b>{score}/{_MAX_SCORE}</b>\n"
+            f"{DLINE}\n"
+            f"📌 Entry  <code>{self._fmt(price)}</code>\n"
+            f"🛑 SL     <code>{self._fmt(sl)}</code>\n"
+            f"🎯 TP1    <code>{self._fmt(tp1)}</code>\n"
+            f"🎯 TP2    <code>{self._fmt(tp2)}</code>\n"
+            f"🏆 TP3    <code>{self._fmt(tp3)}</code>\n"
+            f"📦 Qty    <code>{self._fmt_qty(qty)} {base}</code>\n"
+            f"{DLINE}\n"
             f"{self._footer()}"
         )
-
-        msg = header + "\n" + score_block + footer
         self.send_signal(msg, is_forex=self._is_forex_symbol(symbol))
 
     # ------------------------------------------------------------------
@@ -464,7 +434,7 @@ class Notifier:
             f"<b>Entry Gates (ALL required)</b>\n"
             f"  ⏰ Kill Zone: London 07-09 · NY 12-14 UTC\n"
             f"  📊 Regime: Bull=longs · Bear=shorts · Neutral=none\n"
-            f"  🏆 Score: 12/20 min · Wyckoff+Liq+MMM+VSA+1H+KZ\n"  # FIX: was 5/20
+            f"  🏆 Score: 10/20 min · Wyckoff+Liq+MMM+VSA+1H+KZ\n"
             f"  ✅ 1H aligned: FVG or MSS or sweep confirms\n"
             f"{DLINE}\n"
             f"<b>Execution</b>\n"
@@ -477,7 +447,7 @@ class Notifier:
             f"  VSA  ·  Intermarket  ·  Kill Zone AMD\n"
             f"{DLINE}\n"
             f"{paper_line}\n"
-            f"<i>Signals post here on approval.</i>"
+            f"<i>Signals post here automatically on confirmation.</i>"
         )
 
     # ------------------------------------------------------------------
