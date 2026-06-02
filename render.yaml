@@ -1,0 +1,62 @@
+# Render Blueprint — Elite Crypto Futures Scanner
+# ------------------------------------------------
+# This bot is a 24/7 BACKGROUND WORKER (not a web service).
+# Render free tier does NOT run background workers, and free web services
+# sleep after 15 min of inactivity — which would kill the scanner.
+# A worker therefore needs a paid plan (Starter ≈ $7/mo) + a small disk.
+#
+# Deploy:
+#   1. Push this file to your repo.
+#   2. Render Dashboard → New → Blueprint → pick this repo.
+#   3. Fill in the secret env vars (marked sync:false) when prompted.
+
+services:
+  - type: worker
+    name: futures-scanner
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter            # workers require a paid plan; no free tier
+    region: oregon           # pick the region nearest you
+    autoDeploy: true         # redeploy on git push to the tracked branch
+
+    # Persistent disk — replaces the Railway Volume at /data.
+    # Paper-trading balance/positions/stats survive redeploys.
+    disk:
+      name: state
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      # ── State persistence (points at the mounted disk) ──────────────
+      - key: STATE_FILE
+        value: /data/paper_state.json
+
+      # ── Non-secret config (safe defaults; edit in dashboard) ────────
+      - key: EXCHANGE
+        value: bybit
+      - key: PAPER_MODE
+        value: "true"
+      - key: BYBIT_LEVERAGE
+        value: "10"
+      - key: BYBIT_MAX_RISK
+        value: "10"
+
+      # ── Secrets — set in the Render dashboard, never commit these ───
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_ADMIN_ID
+        sync: false
+      - key: ADMIN_BOT_TOKEN
+        sync: false
+      - key: BYBIT_KEY
+        sync: false
+      - key: BYBIT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUB_BOT_URL
+        sync: false
+      - key: SUB_BOT_API_KEY
+        sync: false
